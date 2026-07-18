@@ -9,7 +9,6 @@
 
   <ItemGroup>
     <PackageReference Include="TUnit" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
     <ProjectReference Include="..\..\src\PicoNode.Actor.Abs\PicoNode.Actor.Abs.csproj" />
   </ItemGroup>
 </Project>
