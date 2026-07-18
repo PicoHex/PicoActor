@@ -1,5 +1,5 @@
 # PicoActor CI — validation pipeline
-# Tier 1: simple library pair (PicoNode.Actor.Abs + PicoNode.Actor)
+# Tier 1: simple library pair (PicoActor.Abs + PicoActor)
 # Runs on PR and push to main
 
 name: ci
@@ -64,15 +64,15 @@ jobs:
       - name: Build
         run: dotnet build PicoActor.slnx --no-restore -c Release
 
-      - name: Test PicoNode.Actor.Abs
-        run: dotnet test --project tests/PicoNode.Actor.Abs.Tests/PicoNode.Actor.Abs.Tests.csproj --no-build -c Release
+      - name: Test PicoActor.Abs
+        run: dotnet test --project tests/PicoActor.Abs.Tests/PicoActor.Abs.Tests.csproj --no-build -c Release
 
-      - name: Test PicoNode.Actor
-        run: dotnet test --project tests/PicoNode.Actor.Tests/PicoNode.Actor.Tests.csproj --no-build -c Release
+      - name: Test PicoActor
+        run: dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-build -c Release
 
       - name: AOT publish (Counter sample)
         run: >
-          dotnet publish samples/PicoNode.Actor.Sample/PicoNode.Actor.Sample.csproj
+          dotnet publish samples/PicoActor.Sample/PicoActor.Sample.csproj
           --no-restore -c Release -r ${{ matrix.rid }}
           -p:PublishAot=true --self-contained
           -o publish/${{ matrix.rid }}

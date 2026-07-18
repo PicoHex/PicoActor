@@ -37,16 +37,16 @@ jobs:
       # Each csproj uses conditional ItemGroup to select between
       # ProjectReference (dev) and PackageReference (pack/release).
 
-      - name: Pack PicoNode.Actor.Abs
+      - name: Pack PicoActor.Abs
         run: >
-          dotnet pack src/PicoNode.Actor.Abs/PicoNode.Actor.Abs.csproj
+          dotnet pack src/PicoActor.Abs/PicoActor.Abs.csproj
           -c Release -p:Version=${{ env.PACKAGE_VERSION }}
           -p:UseProjectReferences=false
           -o packages
 
-      - name: Pack PicoNode.Actor
+      - name: Pack PicoActor
         run: >
-          dotnet pack src/PicoNode.Actor/PicoNode.Actor.csproj
+          dotnet pack src/PicoActor/PicoActor.csproj
           -c Release -p:Version=${{ env.PACKAGE_VERSION }}
           -p:UseProjectReferences=false
           -p:RestoreAdditionalProjectSources=${{ github.workspace }}/packages

@@ -1,11 +1,11 @@
-# PicoNode.Actor
+# PicoActor
 
 AOT-совместимый in-memory Actor-фреймворк с Event Sourcing для .NET.
 Лёгкий, без рефлексии, разработан для AI-агентных систем и оркестрации
 рабочих процессов. Работает под NativeAOT и trimming.
 
 [![CI](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml/badge.svg)](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/PicoNode.Actor)](https://www.nuget.org/packages/PicoNode.Actor)
+[![NuGet](https://img.shields.io/nuget/v/PicoActor)](https://www.nuget.org/packages/PicoActor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | [繁體中文](README.zh-tw.md) | [한국어](README.ko.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
@@ -41,9 +41,9 @@ Event Sourcing Actors следуют **Persist-then-Mutate** (Сначала с�
 
 ---
 
-## Почему PicoNode.Actor
+## Почему PicoActor
 
-| Аспект | Существующие решения | PicoNode.Actor |
+| Аспект | Существующие решения | PicoActor |
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans требуют рефлексию | ✅ Полная поддержка NativeAOT |
 | Event Sourcing | ❌ Proto.Actor, Orleans без встроенного ES | ✅ Persist-then-Mutate, автоматический откат |
@@ -57,12 +57,12 @@ Event Sourcing Actors следуют **Persist-then-Mutate** (Сначала с�
 ## Быстрый старт
 
 ```bash
-dotnet add package PicoNode.Actor
+dotnet add package PicoActor
 ```
 
 ```csharp
-using PicoNode.Actor;
-using PicoNode.Actor.Abs;
+using PicoActor;
+using PicoActor.Abs;
 
 // 1. Настройка
 var store = new InMemoryEventStore();
@@ -90,7 +90,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ## Детали модуля
 
-### PicoNode.Actor.Abs — Основные абстракции
+### PicoActor.Abs — Основные абстракции
 
 Цель `netstandard2.0` для максимальной совместимости.
 
@@ -109,7 +109,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorOutputEvent` | Исходящее уведомление — Type, Data, опциональные ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | Выбрасывается IEventStore при несовпадении версий |
 
-### PicoNode.Actor — Среда выполнения
+### PicoActor — Среда выполнения
 
 Цель `net10.0`, AOT-совместим.
 
@@ -295,14 +295,14 @@ public sealed class PostgresEventStore : IEventStore
 
 | Пакет | Цель | Описание |
 |---------|--------|-------------|
-| [PicoNode.Actor.Abs](https://www.nuget.org/packages/PicoNode.Actor.Abs) | `netstandard2.0` | Основные абстракции: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
-| [PicoNode.Actor](https://www.nuget.org/packages/PicoNode.Actor) | `net10.0` | Среда выполнения: `ActorSystem`, `InMemoryEventStore`, интеграция PicoDI |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | Основные абстракции: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Среда выполнения: `ActorSystem`, `InMemoryEventStore`, интеграция PicoDI |
 
 ---
 
 ## Сравнение
 
-| Возможность | PicoNode.Actor | Akka.NET | Proto.Actor | Orleans |
+| Возможность | PicoActor | Akka.NET | Proto.Actor | Orleans |
 |---------|:---:|:--:|:--:|:--:|
 | Только in-memory | ✅ | ✅ | ✅ | ❌ |
 | AOT / Trimming | ✅ | ❌ | ❌ | ❌ |

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageId>PicoActor</PackageId>
+    <Description>In-memory Actor runtime for PicoNode. Provides ActorSystem (IActorSystem implementation), InMemoryEventStore, and PicoDI integration.</Description>
+    <PackageTags>PicoHex;PicoNode;AOT;Actor;ActorModel;EventSourcing</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PicoActor.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="PicoDI" />
+    <PackageReference Include="PicoDI.Abs" />
+    <PackageReference Include="PicoLog.Abs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
+    <ProjectReference Include="..\PicoActor.Abs\PicoActor.Abs.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
+    <PackageReference Include="PicoActor.Abs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+</Project>

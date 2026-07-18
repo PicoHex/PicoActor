@@ -1,11 +1,11 @@
-# PicoNode.Actor
+# PicoActor
 
 AOT互換のインメモリ Actor フレームワーク。Event Sourcing 対応。
 軽量・ゼロリフレクション、AI エージェントシステムとワークフロー
 オーケストレーション向け。NativeAOT およびトリミング環境で動作。
 
 [![CI](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml/badge.svg)](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/PicoNode.Actor)](https://www.nuget.org/packages/PicoNode.Actor)
+[![NuGet](https://img.shields.io/nuget/v/PicoActor)](https://www.nuget.org/packages/PicoActor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | [繁體中文](README.zh-tw.md) | [한국어](README.ko.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
@@ -40,9 +40,9 @@ Event Sourcing Actor は**Persist-then-Mutate**（永続化してから変更）
 
 ---
 
-## なぜ PicoNode.Actor か
+## なぜ PicoActor か
 
-| 観点 | 既存の選択肢 | PicoNode.Actor |
+| 観点 | 既存の選択肢 | PicoActor |
 |---------|:----------------:|:--------------:|
 | AOT / トリミング | ❌ Akka.NET、Proto.Actor、Orleans はリフレクション必須 | ✅ 完全 NativeAOT 対応 |
 | Event Sourcing | ❌ Proto.Actor、Orleans は ES 非内蔵 | ✅ Persist-then-Mutate、自動ロールバック |
@@ -56,12 +56,12 @@ Event Sourcing Actor は**Persist-then-Mutate**（永続化してから変更）
 ## クイックスタート
 
 ```bash
-dotnet add package PicoNode.Actor
+dotnet add package PicoActor
 ```
 
 ```csharp
-using PicoNode.Actor;
-using PicoNode.Actor.Abs;
+using PicoActor;
+using PicoActor.Abs;
 
 // 1. セットアップ
 var store = new InMemoryEventStore();
@@ -89,7 +89,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ## モジュール詳細
 
-### PicoNode.Actor.Abs — コア抽象
+### PicoActor.Abs — コア抽象
 
 `netstandard2.0` ターゲット、最大互換性。
 
@@ -108,7 +108,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorOutputEvent` | 送信通知——Type、Data、オプショナル ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | バージョン不一致時に IEventStore がスロー |
 
-### PicoNode.Actor — ランタイム
+### PicoActor — ランタイム
 
 `net10.0` ターゲット、AOT 互換。
 
@@ -293,14 +293,14 @@ public sealed class PostgresEventStore : IEventStore
 
 | パッケージ | ターゲット | 説明 |
 |---------|--------|-------------|
-| [PicoNode.Actor.Abs](https://www.nuget.org/packages/PicoNode.Actor.Abs) | `netstandard2.0` | コア抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
-| [PicoNode.Actor](https://www.nuget.org/packages/PicoNode.Actor) | `net10.0` | ランタイム：`ActorSystem`、`InMemoryEventStore`、PicoDI 統合 |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | コア抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | ランタイム：`ActorSystem`、`InMemoryEventStore`、PicoDI 統合 |
 
 ---
 
 ## 比較
 
-| 機能 | PicoNode.Actor | Akka.NET | Proto.Actor | Orleans |
+| 機能 | PicoActor | Akka.NET | Proto.Actor | Orleans |
 |---------|:---:|:--:|:--:|:--:|
 | インメモリのみ | ✅ | ✅ | ✅ | ❌ |
 | AOT / トリミング | ✅ | ❌ | ❌ | ❌ |

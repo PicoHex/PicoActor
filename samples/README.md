@@ -1,6 +1,6 @@
 # samples
 
-## PicoNode.Actor.Sample
+## PicoActor.Sample
 
 Event-Sourced Counter demonstration.
 
@@ -9,5 +9,5 @@ Covers: `ActorSystem`, `InMemoryEventStore`, `CreateAsync`, `Send`,
 rebuild), idempotent StopAsync.
 
 ```bash
-dotnet run --project samples/PicoNode.Actor.Sample
+dotnet run --project samples/PicoActor.Sample
 ```

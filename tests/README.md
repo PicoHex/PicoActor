@@ -1,11 +1,11 @@
 # tests
 
-TUnit test suites for PicoNode.Actor.
+TUnit test suites for PicoActor.
 
 | Project | Coverage |
 |---------|----------|
-| [PicoNode.Actor.Abs.Tests](PicoNode.Actor.Abs.Tests) | `Actor` exception propagation, `UnhandledErrorHandler` hook |
-| [PicoNode.Actor.Tests](PicoNode.Actor.Tests) | `ActorSystem` concurrency, `GetAsync` race, `EventSourcedActor` recovery, append failure rollback |
+| [PicoActor.Abs.Tests](PicoActor.Abs.Tests) | `Actor` exception propagation, `UnhandledErrorHandler` hook |
+| [PicoActor.Tests](PicoActor.Tests) | `ActorSystem` concurrency, `GetAsync` race, `EventSourcedActor` recovery, append failure rollback |
 
 ## Run
 

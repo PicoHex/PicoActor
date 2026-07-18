@@ -1,11 +1,11 @@
-# PicoNode.Actor
+# PicoActor
 
 AOT 호환 인메모리 Actor 프레임워크, Event Sourcing 지원.
 경량, 제로 리플렉션, AI 에이전트 시스템 및 워크플로우 오케스트레이션용.
 NativeAOT 및 트리밍 환경에서 실행 가능.
 
 [![CI](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml/badge.svg)](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/PicoNode.Actor)](https://www.nuget.org/packages/PicoNode.Actor)
+[![NuGet](https://img.shields.io/nuget/v/PicoActor)](https://www.nuget.org/packages/PicoActor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | [繁體中文](README.zh-tw.md) | [한국어](README.ko.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
@@ -40,9 +40,9 @@ Event Sourcing Actor는 **Persist-then-Mutate**(영속화 후 변경)를 따릅�
 
 ---
 
-## 왜 PicoNode.Actor인가
+## 왜 PicoActor인가
 
-| 관점 | 기존 옵션 | PicoNode.Actor |
+| 관점 | 기존 옵션 | PicoActor |
 |---------|:----------------:|:--------------:|
 | AOT / 트리밍 | ❌ Akka.NET, Proto.Actor, Orleans는 리플렉션 필요 | ✅ 완전 NativeAOT 지원 |
 | Event Sourcing | ❌ Proto.Actor, Orleans는 ES 미내장 | ✅ Persist-then-Mutate, 자동 롤백 |
@@ -56,12 +56,12 @@ Event Sourcing Actor는 **Persist-then-Mutate**(영속화 후 변경)를 따릅�
 ## 빠른 시작
 
 ```bash
-dotnet add package PicoNode.Actor
+dotnet add package PicoActor
 ```
 
 ```csharp
-using PicoNode.Actor;
-using PicoNode.Actor.Abs;
+using PicoActor;
+using PicoActor.Abs;
 
 // 1. 설정
 var store = new InMemoryEventStore();
@@ -89,7 +89,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ## 모듈 상세
 
-### PicoNode.Actor.Abs — 핵심 추상화
+### PicoActor.Abs — 핵심 추상화
 
 `netstandard2.0` 타겟, 최대 호환성.
 
@@ -108,7 +108,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorOutputEvent` | 발신 알림——Type, Data, 선택적 ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | 버전 불일치 시 IEventStore가 발생 |
 
-### PicoNode.Actor — 런타임
+### PicoActor — 런타임
 
 `net10.0` 타겟, AOT 호환.
 
@@ -293,14 +293,14 @@ public sealed class PostgresEventStore : IEventStore
 
 | 패키지 | 타겟 | 설명 |
 |---------|--------|-------------|
-| [PicoNode.Actor.Abs](https://www.nuget.org/packages/PicoNode.Actor.Abs) | `netstandard2.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
-| [PicoNode.Actor](https://www.nuget.org/packages/PicoNode.Actor) | `net10.0` | 런타임: `ActorSystem`, `InMemoryEventStore`, PicoDI 통합 |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 런타임: `ActorSystem`, `InMemoryEventStore`, PicoDI 통합 |
 
 ---
 
 ## 비교
 
-| 기능 | PicoNode.Actor | Akka.NET | Proto.Actor | Orleans |
+| 기능 | PicoActor | Akka.NET | Proto.Actor | Orleans |
 |---------|:---:|:--:|:--:|:--:|
 | 인메모리 전용 | ✅ | ✅ | ✅ | ❌ |
 | AOT / 트리밍 | ✅ | ❌ | ❌ | ❌ |

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="PublishAot">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <PublishAot>false</PublishAot>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageId>PicoActor.Abs</PackageId>
+    <Description>Core abstractions for PicoActor in-memory actor framework. Targets netstandard2.0 for maximum compatibility.</Description>
+    <PackageTags>PicoHex;PicoNode;AOT;Actor;ActorModel;Abstractions</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PicoActor.Abs.Tests" />
+    <InternalsVisibleTo Include="PicoActor" />
+    <InternalsVisibleTo Include="PicoNode.Agent.Core.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Threading.Channels" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+</Project>

@@ -1,9 +1,9 @@
-# PicoNode.Actor
+# PicoActor
 
 AOT 兼容的内存 Actor 框架，支持事件溯源（Event Sourcing）。轻量、零反射，专为 AI Agent 系统和工作流编排设计。可在 NativeAOT 和裁剪环境下运行。
 
 [![CI](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml/badge.svg)](https://github.com/PicoHex/PicoActor/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/PicoNode.Actor)](https://www.nuget.org/packages/PicoNode.Actor)
+[![NuGet](https://img.shields.io/nuget/v/PicoActor)](https://www.nuget.org/packages/PicoActor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Português](README.pt.md) | [繁體中文](README.zh-tw.md) | [한국어](README.ko.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
@@ -38,9 +38,9 @@ AOT 兼容的内存 Actor 框架，支持事件溯源（Event Sourcing）。轻�
 
 ---
 
-## 为什么选择 PicoNode.Actor
+## 为什么选择 PicoActor
 
-| 关注点 | 现有方案 | PicoNode.Actor |
+| 关注点 | 现有方案 | PicoActor |
 |---------|:----------------:|:--------------:|
 | AOT / 裁剪 | ❌ Akka.NET、Proto.Actor、Orleans 均依赖反射 | ✅ 完整 NativeAOT 支持 |
 | 事件溯源 | ❌ Proto.Actor、Orleans 无内置 ES | ✅ Persist-then-Mutate，自动回滚 |
@@ -54,12 +54,12 @@ AOT 兼容的内存 Actor 框架，支持事件溯源（Event Sourcing）。轻�
 ## 快速开始
 
 ```bash
-dotnet add package PicoNode.Actor
+dotnet add package PicoActor
 ```
 
 ```csharp
-using PicoNode.Actor;
-using PicoNode.Actor.Abs;
+using PicoActor;
+using PicoActor.Abs;
 
 // 1. 初始化
 var store = new InMemoryEventStore();
@@ -87,7 +87,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ## 模块详情
 
-### PicoNode.Actor.Abs — 核心抽象
+### PicoActor.Abs — 核心抽象
 
 目标框架 `netstandard2.0`，最大兼容性。
 
@@ -106,7 +106,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorOutputEvent` | 出站通知——Type、Data、可选 ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | 版本不匹配时由 IEventStore 抛出 |
 
-### PicoNode.Actor — 运行时
+### PicoActor — 运行时
 
 目标框架 `net10.0`，AOT 兼容。
 
@@ -291,14 +291,14 @@ public sealed class PostgresEventStore : IEventStore
 
 | 包 | 目标框架 | 描述 |
 |---------|--------|-------------|
-| [PicoNode.Actor.Abs](https://www.nuget.org/packages/PicoNode.Actor.Abs) | `netstandard2.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
-| [PicoNode.Actor](https://www.nuget.org/packages/PicoNode.Actor) | `net10.0` | 运行时：`ActorSystem`、`InMemoryEventStore`、PicoDI 集成 |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 运行时：`ActorSystem`、`InMemoryEventStore`、PicoDI 集成 |
 
 ---
 
 ## 对比
 
-| 特性 | PicoNode.Actor | Akka.NET | Proto.Actor | Orleans |
+| 特性 | PicoActor | Akka.NET | Proto.Actor | Orleans |
 |---------|:---:|:--:|:--:|:--:|
 | 纯内存 | ✅ | ✅ | ✅ | ❌ |
 | AOT / 裁剪 | ✅ | ❌ | ❌ | ❌ |
