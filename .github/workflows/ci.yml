@@ -1,0 +1,78 @@
+# PicoActor CI — validation pipeline
+# Tier 1: simple library pair (PicoNode.Actor.Abs + PicoNode.Actor)
+# Runs on PR and push to main
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [win-x64, win-arm64, linux-x64, linux-arm64, osx-arm64]
+        include:
+          - rid: win-x64
+            os: windows-latest
+          - rid: win-arm64
+            os: windows-11-arm
+          - rid: linux-x64
+            os: ubuntu-latest
+          - rid: linux-arm64
+            os: ubuntu-24.04-arm
+          - rid: osx-arm64
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+    name: build ${{ matrix.rid }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Linux AOT prerequisites
+        if: startsWith(matrix.rid, 'linux-')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+
+      - name: Restore
+        run: dotnet restore PicoActor.slnx
+
+      - name: Build
+        run: dotnet build PicoActor.slnx --no-restore -c Release
+
+      - name: Test PicoNode.Actor.Abs
+        run: dotnet test --project tests/PicoNode.Actor.Abs.Tests/PicoNode.Actor.Abs.Tests.csproj --no-build -c Release
+
+      - name: Test PicoNode.Actor
+        run: dotnet test --project tests/PicoNode.Actor.Tests/PicoNode.Actor.Tests.csproj --no-build -c Release
+
+      - name: AOT publish (Counter sample)
+        run: >
+          dotnet publish samples/PicoNode.Actor.Sample/PicoNode.Actor.Sample.csproj
+          --no-restore -c Release -r ${{ matrix.rid }}
+          -p:PublishAot=true --self-contained
+          -o publish/${{ matrix.rid }}
