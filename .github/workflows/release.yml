@@ -53,9 +53,17 @@ jobs:
           -o packages
 
       - name: Publish to NuGet
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push packages/*.nupkg --api-key $NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+        shell: bash
+        working-directory: packages
+        run: |
+          for file in *.nupkg; do
+            if [[ "$file" != *.snupkg ]] && [[ "$file" != *.symbols.nupkg ]]; then
+              dotnet nuget push "$file" \
+                --api-key "${{ secrets.NUGET_API_KEY }}" \
+                --source https://api.nuget.org/v3/index.json \
+                --skip-duplicate
+            fi
+          done
 
       - name: Upload packages as release artifacts
         uses: actions/upload-artifact@v4
