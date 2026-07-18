@@ -61,7 +61,9 @@ public sealed class EventSourcedActorRecoveryTests
     /// </summary>
     [Test]
     [Timeout(10000)]
-    public async Task AppendFailure_DiscardsFailedEvents_NextMessageSucceedsCleanly()
+    public async Task AppendFailure_DiscardsFailedEvents_NextMessageSucceedsCleanly(
+        CancellationToken cancellationToken = default
+    )
     {
         var store = new TransientFailingStore();
         var system = new ActorSystem(store);
@@ -98,7 +100,9 @@ public sealed class EventSourcedActorRecoveryTests
     /// </summary>
     [Test]
     [Timeout(10000)]
-    public async Task AppendFailure_RollsBackVersion_ToLastPersisted()
+    public async Task AppendFailure_RollsBackVersion_ToLastPersisted(
+        CancellationToken cancellationToken = default
+    )
     {
         var store = new TransientFailingStore();
         var system = new ActorSystem(store);

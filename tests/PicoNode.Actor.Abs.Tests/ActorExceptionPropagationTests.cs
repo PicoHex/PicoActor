@@ -19,7 +19,9 @@ public sealed class ActorExceptionPropagationTests
     /// </summary>
     [Test]
     [Timeout(5000)]
-    public async Task Post_when_OnMessageAsync_throws_sets_Tcs_to_faulted()
+    public async Task Post_when_OnMessageAsync_throws_sets_Tcs_to_faulted(
+        CancellationToken cancellationToken = default
+    )
     {
         var actor = new ThrowingActor();
         // Simulate what ActorSystem does: assign Id, then release the gate
@@ -42,7 +44,9 @@ public sealed class ActorExceptionPropagationTests
     /// </summary>
     [Test]
     [Timeout(5000)]
-    public async Task Send_when_OnMessageAsync_throws_invokes_UnhandledErrorHandler()
+    public async Task Send_when_OnMessageAsync_throws_invokes_UnhandledErrorHandler(
+        CancellationToken cancellationToken = default
+    )
     {
         var actor = new ThrowingActor();
         actor.Id = Guid.CreateVersion7();

@@ -103,7 +103,9 @@ public sealed class ActorSystemGetAsyncRaceTests
     /// </summary>
     [Test]
     [Timeout(15000)]
-    public async Task GetAsync_LoserWhenWinnerStoppedConcurrently_DoesNotThrow()
+    public async Task GetAsync_LoserWhenWinnerStoppedConcurrently_DoesNotThrow(
+        CancellationToken cancellationToken = default
+    )
     {
         var id = Guid.CreateVersion7();
         var events = (IReadOnlyList<IDomainEvent>)new IDomainEvent[] { new RaceCreated() };

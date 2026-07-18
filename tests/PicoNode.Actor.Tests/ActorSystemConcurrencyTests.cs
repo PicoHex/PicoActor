@@ -10,7 +10,9 @@ public sealed class ActorSystemConcurrencyTests
     /// </summary>
     [Test]
     [Timeout(10000)]
-    public async Task GetAsync_ConcurrentSameId_ReturnsSameInstance()
+    public async Task GetAsync_ConcurrentSameId_ReturnsSameInstance(
+        CancellationToken cancellationToken = default
+    )
     {
         var store = new InMemoryEventStore();
         var system = new ActorSystem(store);
