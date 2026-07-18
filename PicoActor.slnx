@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/samples/">
+    <File Path="samples\README.md" />
+    <Project Path="samples/PicoNode.Actor.Sample/PicoNode.Actor.Sample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <File Path="src\README.md" />
+    <Project Path="src/PicoNode.Actor.Abs/PicoNode.Actor.Abs.csproj" />
+    <Project Path="src/PicoNode.Actor/PicoNode.Actor.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <File Path="tests\README.md" />
+    <Project Path="tests/PicoNode.Actor.Abs.Tests/PicoNode.Actor.Abs.Tests.csproj" />
+    <Project Path="tests/PicoNode.Actor.Tests/PicoNode.Actor.Tests.csproj" />
+  </Folder>
+</Solution>

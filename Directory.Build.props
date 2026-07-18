@@ -1,0 +1,36 @@
+<Project>
+  <!-- ═══════════════════════════════════════════════════════
+       PicoActor shared build properties
+       ═══════════════════════════════════════════════════════ -->
+
+  <PropertyGroup>
+    <!-- Default version for local / non-CI builds -->
+    <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
+
+    <!-- Central Package Management -->
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+
+    <!-- Deterministic builds when CI=true -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!-- Symbol packages for NuGet.org debugging experience -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>portable</DebugType>
+
+    <!-- Default: use project references for local dev -->
+    <UseProjectReferences Condition="'$(UseProjectReferences)' == ''">true</UseProjectReferences>
+
+    <!-- Default: don't pack unless opted in -->
+    <IsPackable Condition="'$(IsPackable)' == ''">false</IsPackable>
+  </PropertyGroup>
+
+  <!-- ═══════════════════════════════════════════════════════
+       SourceLink — enabled only for packable projects
+       ═══════════════════════════════════════════════════════ -->
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

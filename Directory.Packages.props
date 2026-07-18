@@ -1,0 +1,25 @@
+<Project>
+  <!-- ═══════════════════════════════════════════════════════
+       Central Package Management — single source of truth
+       for all NuGet dependency versions in this solution.
+       ═══════════════════════════════════════════════════════ -->
+
+  <ItemGroup>
+    <!-- PicoHex ecosystem -->
+    <PackageVersion Include="PicoDI" Version="2026.7.3" />
+    <PackageVersion Include="PicoDI.Abs" Version="2026.7.3" />
+    <PackageVersion Include="PicoLog.Abs" Version="2026.7.3" />
+
+    <!-- PicoActor internal (conditional package refs for NuGet publish) -->
+    <PackageVersion Include="PicoNode.Actor" Version="$(Version)" />
+    <PackageVersion Include="PicoNode.Actor.Abs" Version="$(Version)" />
+
+    <!-- .NET / Roslyn infrastructure -->
+    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.9" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.300" />
+    <PackageVersion Include="System.Threading.Channels" Version="10.0.9" />
+
+    <!-- Testing -->
+    <PackageVersion Include="TUnit" Version="1.59.0" />
+  </ItemGroup>
+</Project>
