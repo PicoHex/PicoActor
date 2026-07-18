@@ -16,7 +16,6 @@
     <InternalsVisibleTo Include="PicoActor.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="PicoDI" />
     <PackageReference Include="PicoDI.Abs" PrivateAssets="Build" />
     <PackageReference Include="PicoLog.Abs" PrivateAssets="Build" />
   </ItemGroup>

@@ -9,7 +9,7 @@ public static class PicoActorDiExtensions
     /// Users can bind <see cref="ActorConfig"/> from PicoCfg:
     /// <code>var cfg = CfgBind.Bind&lt;ActorConfig&gt;(configuration, "Actor");</code>
     /// </summary>
-    public static SvcContainer AddPicoActor(this SvcContainer container, ActorConfig? config)
+    public static ISvcContainer AddPicoActor(this ISvcContainer container, ActorConfig? config)
     {
         var storeType = config?.EventStore?.Type ?? "InMemory";
 
@@ -30,7 +30,7 @@ public static class PicoActorDiExtensions
     /// If <see cref="ILoggerFactory"/> is registered in the container,
     /// a logger is automatically resolved and injected into <see cref="ActorSystem"/>.
     /// </summary>
-    public static SvcContainer AddPicoActor(this SvcContainer container)
+    public static ISvcContainer AddPicoActor(this ISvcContainer container)
     {
         return AddPicoActor(container, eventStore: null);
     }
@@ -38,7 +38,7 @@ public static class PicoActorDiExtensions
     /// <summary>
     /// Registers PicoActor services with a custom event store.
     /// </summary>
-    public static SvcContainer AddPicoActor(this SvcContainer container, IEventStore? eventStore)
+    public static ISvcContainer AddPicoActor(this ISvcContainer container, IEventStore? eventStore)
     {
         // Register event store (custom or default in-memory)
         container.Register(
