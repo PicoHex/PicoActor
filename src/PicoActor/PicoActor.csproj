@@ -17,8 +17,8 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="PicoDI" />
-    <PackageReference Include="PicoDI.Abs" />
-    <PackageReference Include="PicoLog.Abs" />
+    <PackageReference Include="PicoDI.Abs" PrivateAssets="Build" />
+    <PackageReference Include="PicoLog.Abs" PrivateAssets="Build" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
     <ProjectReference Include="..\PicoActor.Abs\PicoActor.Abs.csproj" />
