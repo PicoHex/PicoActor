@@ -121,6 +121,7 @@ public sealed class ActorSystem : IActorSystem
         // Completed sagas stay dead — their JSONL files are audit trails only.
         if (actor is SagaActor { IsCompleted: true })
         {
+            await actor.StopAsync().ConfigureAwait(false);
             return default;
         }
 

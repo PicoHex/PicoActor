@@ -132,6 +132,36 @@ public sealed class SagaActorLifecycleTests
     }
 
     // ═══════════════════════════════════════════════════════════
+    // Repeated GetAsync on completed saga — no resource leak
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Repeated GetAsync calls on a completed saga must not crash or
+    /// accumulate unstopped actors. Before fix, each call leaked a
+    /// _loopTask/Channel/CTS. After fix, StopAsync cleans up each
+    /// rebuilt-but-discarded actor.
+    /// </summary>
+    [Test]
+    public async Task GetAsync_CompletedSaga_RepeatedCalls_DoesNotCrash()
+    {
+        var store = new InMemoryEventStore();
+        var system = new ActorSystem(store);
+
+        system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
+
+        var saga = await system.CreateAsync<TestSaga>(new StartSaga("stress"));
+        var sagaId = saga.Id;
+        await system.AskAsync<string>(sagaId, new StartSaga("stress"));
+        await Task.Delay(300); // let auto-stop complete
+
+        for (int i = 0; i < 500; i++)
+        {
+            var rebuilt = await system.GetAsync<TestSaga>(sagaId);
+            await Assert.That(rebuilt).IsNull();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
     // Idempotent replay: partial completion → resume finishes
     // ═══════════════════════════════════════════════════════════
 
