@@ -42,4 +42,13 @@ public interface IActorSystem
 
     /// <summary>Stop an actor. Waits for the current message to complete, discards remaining queue.</summary>
     ValueTask StopAsync(Guid id);
+
+    /// <summary>
+    /// Create a <see cref="SagaActor"/>, send a command, wait for the result,
+    /// and let the saga auto-stop when it marks itself complete.
+    /// The caller does not need to call <see cref="StopAsync"/> — the saga
+    /// self-terminates via <see cref="SagaActor.MarkComplete"/>.
+    /// </summary>
+    ValueTask<TResult> ExecuteSaga<TSaga, TResult>(ICommand command)
+        where TSaga : SagaActor;
 }

@@ -118,6 +118,12 @@ public sealed class ActorSystem : IActorSystem
         ((EventSourcedActor)actor).EventStore = _eventStore;
         es.ReplayEvents(events);
 
+        // Completed sagas stay dead — their JSONL files are audit trails only.
+        if (actor is SagaActor { IsCompleted: true })
+        {
+            return default;
+        }
+
         if (!_registry.TryAdd(id, actor))
         {
             _logger?.Warning(
@@ -214,5 +220,15 @@ public sealed class ActorSystem : IActorSystem
         _logger?.Info($"Stopping actor {id}");
         await actor.StopAsync().ConfigureAwait(false);
         _logger?.Info($"Actor {id} stopped");
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<TResult> ExecuteSaga<TSaga, TResult>(ICommand command)
+        where TSaga : SagaActor
+    {
+        var saga = await CreateAsync<TSaga>(command).ConfigureAwait(false);
+        return await AskAsync<TResult>(saga.Id, command).ConfigureAwait(false);
+        // Saga auto-stops via SagaActor.ProcessAsync → ScheduleStop.
+        // Caller does NOT call StopAsync.
     }
 }

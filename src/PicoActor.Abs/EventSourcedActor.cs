@@ -80,8 +80,10 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// <summary>
     /// Persist uncommitted events (if any store is configured), then Mutate each event,
     /// then clear the uncommitted list. No-op if there are no uncommitted events.
+    /// Protected so subclasses (e.g., <see cref="SagaActor"/>) can flush after
+    /// resuming from an interrupted step.
     /// </summary>
-    private async ValueTask FlushEventsAsync()
+    protected async ValueTask FlushEventsAsync()
     {
         if (_events.Count == 0)
             return;
