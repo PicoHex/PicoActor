@@ -98,7 +98,7 @@ interfaces and base classes.
 | Type | Role |
 |------|------|
 | `IActor` | Base interface — provides `Id` (UUID v7) |
-| `IActorSystem` | Runtime contract — Register, CreateAsync, GetAsync, Send, AskAsync, StopAsync |
+| `IActorSystem` | Runtime contract — Register, CreateAsync, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
 | `ICommand` | Marker interface for commands |
 | `IDomainEvent` | Marker interface for domain events |
 | `IEventSourcedActor` | Optional interface — Version, ReplayEvents, CommitEvents |
@@ -106,6 +106,7 @@ interfaces and base classes.
 | `ICancelable` | Optional — CancelCurrentTurn for long-running operations |
 | `Actor` | Abstract base — mailbox, consumption loop, SignalReady, StopAsync |
 | `EventSourcedActor` | ES base — RaiseEvent, Mutate, Persist-then-Mutate pipeline |
+| `SagaActor` | Finite-life ES coordinator — auto-stop after MarkComplete, crash recovery via ResumeAsync |
 | `Envelope` | Internal — wraps ICommand with optional TaskCompletionSource |
 | `ActorOutputEvent` | Outbound notification — Type, Data, optional ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | Thrown by IEventStore on version mismatch |
@@ -169,6 +170,74 @@ public sealed class Counter : EventSourcedActor
     }
 }
 ```
+
+### SagaActor (Finite-Life Coordinator)
+
+`SagaActor extends EventSourcedActor` — for cross-aggregate operations with a
+finite lifecycle. Unlike a regular EventSourcedActor whose mailbox runs
+forever, a SagaActor **auto-stops** after `MarkComplete()` is called.
+
+```csharp
+public sealed class OrderSaga : SagaActor
+{
+    private int _step;
+
+    public OrderSaga() { }  // Parameterless — commands via mailbox
+
+    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        if (command is PlaceOrder cmd)
+        {
+            if (_step < 1) RaiseEvent(new OrderPlaced(cmd.OrderId));
+            if (_step < 2) RaiseEvent(new PaymentReserved(cmd.OrderId));
+            if (_step < 3) { RaiseEvent(new OrderCompleted(cmd.OrderId)); MarkComplete(); }
+            return cmd.OrderId;
+        }
+        if (command is GetStep) return _step;
+        return null;
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case OrderPlaced: _step = 1; break;
+            case PaymentReserved: _step = 2; break;
+            case OrderCompleted: MarkComplete(); break;
+        }
+    }
+
+    protected override async ValueTask ResumeAsync()
+    {
+        // Re-drive from persisted state after crash recovery.
+        // Idempotent — _step guards skip completed steps.
+        await OnMessageAsync(new PlaceOrder(/* restored from state */));
+    }
+}
+```
+
+**Lifecycle:**
+
+```
+CreateAsync(cmd) → mailbox processes cmd → MarkComplete()
+→ ProcessAsync returns → ScheduleStop (fire-and-forget)
+→ Actor auto-stops, removed from registry
+```
+
+**Crash recovery:** events replay via `Mutate` → `OnReadyAsync` detects
+`_completed == false && Version > 0` → calls `ResumeAsync` → re-executes
+from the interrupted step. Every step must be guarded by `_step` checks
+for idempotency.
+
+**Convenience API:**
+
+```csharp
+var result = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId));
+// Saga auto-stops — no need to call StopAsync
+```
+
+`ExecuteSaga<TSaga, TResult>(command)` does `CreateAsync` + `AskAsync` in
+one call. The saga self-terminates via `MarkComplete`.
 
 ### Persist-then-Mutate Pipeline
 
@@ -286,7 +355,7 @@ public sealed class PostgresEventStore : IEventStore
 ## Use Cases
 
 - **Agentic AI systems** — each AI agent is an actor with conversation state
-- **Workflow orchestration** — actors model long-running business processes
+- **Workflow orchestration** — SagaActor coordinates cross-aggregate operations with auto-stop and crash recovery
 - **Game server state** — event-sourced actors for player/game state
 - **IoT device state** — in-memory actors with periodic snapshotting
 
