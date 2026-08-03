@@ -117,4 +117,30 @@ public sealed class ActorSystemCallerIdTests
         await Assert.That(b.Id).IsNotEqualTo(Guid.Empty);
         await Assert.That(a.Id).IsNotEqualTo(b.Id);
     }
+
+    [Test]
+    public async Task CreateAsync_WithCallerSuppliedId_DuplicateId_EventSourced_ThrowsWithoutCorruptingStore()
+    {
+        var store = new InMemoryEventStore();
+        var system = new ActorSystem(store);
+        RegisterCounter(system);
+
+        await system.CreateAsync<Counter>(new CreateCounter(1), FixedId);
+
+        // ES duplicate: the discarded actor staged CounterCreated in its constructor.
+        // It must NOT flush to the store (which would race the winner's flush), and
+        // the documented exception type must surface — not ConcurrencyException
+        // from the loser's init flush.
+        await Assert
+            .That(async () => await system.CreateAsync<Counter>(new CreateCounter(2), FixedId))
+            .Throws<InvalidOperationException>();
+
+        // The stream holds exactly ONE event batch — no silent duplicate append
+        var events = await store.LoadAsync(FixedId);
+        await Assert.That(events.Count).IsEqualTo(1);
+
+        // The winner remains functional
+        var value = await system.AskAsync<int>(FixedId, new GetValue());
+        await Assert.That(value).IsEqualTo(1);
+    }
 }

@@ -69,10 +69,16 @@ public sealed class ActorSystem : IActorSystem
             es.EventStore = _eventStore;
 
         // 4. Register in the system — a conflict means a duplicate-id bug; fail loudly.
-        //    StopAsync releases the lifecycle gate so the discarded actor's loop
-        //    cannot leak (the gate is never signaled for it).
+        //    Discard: the creation constructor already staged events (RaiseEvent
+        //    in Actor(ICommand)) that flush in the loop's OnReadyAsync. Without
+        //    clearing them, the discarded actor's init flush would race the
+        //    winner's flush on the same stream — surfacing ConcurrencyException
+        //    here instead of the documented InvalidOperationException, or (given
+        //    the store's check-then-act gap) silently appending duplicate events.
         if (!_registry.TryAdd(id, actor))
         {
+            if (actor is IEventSourcedActor eventSourced)
+                eventSourced.CommitEvents();
             await actor.StopAsync().ConfigureAwait(false);
             throw new InvalidOperationException($"Actor {id} already exists.");
         }
