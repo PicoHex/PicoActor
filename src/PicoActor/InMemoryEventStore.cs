@@ -1,39 +1,62 @@
+using PicoActor.Abs;
+
 namespace PicoActor;
 
 /// <summary>
-/// Default in-memory IEventStore implementation.
-/// Stores event streams in a ConcurrentDictionary. Lock-free by design:
-/// each actor's stream is only written by its own consumption loop (serial),
-/// and LoadAsync only occurs when the actor is not in memory (no concurrent writes).
+/// Thread-safe in-memory event store for development, testing, and single-process
+/// production. Serializes append/load per actor with a semaphore — the version
+/// check and append are atomic, so concurrent writers to the same actor stream
+/// cannot silently interleave (one wins, the rest throw
+/// <see cref="ConcurrencyException"/>). Lock contention is per actor, so
+/// different actors never block each other.
 /// </summary>
 public sealed class InMemoryEventStore : IEventStore
 {
     private readonly ConcurrentDictionary<Guid, List<IDomainEvent>> _streams = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
 
     /// <inheritdoc/>
-    public ValueTask<ulong> AppendAsync(
+    public async ValueTask<ulong> AppendAsync(
         Guid actorId,
         ulong expectedVersion,
         IReadOnlyList<IDomainEvent> events
     )
     {
         var stream = _streams.GetOrAdd(actorId, _ => []);
+        var gate = _locks.GetOrAdd(actorId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var current = (ulong)stream.Count;
+            if (current != expectedVersion)
+                throw new ConcurrencyException(actorId, expectedVersion, current);
 
-        // Lock-free: same actor's writes are serialized by the consumption loop.
-        var current = (ulong)stream.Count;
-        if (current != expectedVersion)
-            throw new ConcurrencyException(actorId, expectedVersion, current);
-
-        stream.AddRange(events);
-        return new ValueTask<ulong>((ulong)stream.Count);
+            stream.AddRange(events);
+            return (ulong)stream.Count;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <inheritdoc/>
-    public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
+    public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     {
-        if (_streams.TryGetValue(actorId, out var stream))
-            return new ValueTask<IReadOnlyList<IDomainEvent>>(stream.AsReadOnly());
+        if (!_streams.TryGetValue(actorId, out var stream))
+            return Array.Empty<IDomainEvent>();
 
-        return new ValueTask<IReadOnlyList<IDomainEvent>>(Array.Empty<IDomainEvent>());
+        // Snapshot under the gate so a concurrent AddRange cannot be observed
+        // mid-write.
+        var gate = _locks.GetOrAdd(actorId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return stream.ToList().AsReadOnly();
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 }

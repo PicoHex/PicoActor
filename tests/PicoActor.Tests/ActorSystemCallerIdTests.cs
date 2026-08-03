@@ -181,4 +181,47 @@ public sealed class ActorSystemCallerIdTests
 
         await system.StopAsync(FixedId);
     }
+
+    [Test]
+    public async Task AppendAsync_ConcurrentWriters_SameExpectedVersion_ExactlyOneSucceeds()
+    {
+        var store = new InMemoryEventStore();
+        var id = Guid.Parse("00000000-0000-0000-0000-0000000000a5");
+        // Large batches widen the check-then-act window (AddRange copy time) so
+        // the TOCTOU race reproduces reliably on the unfixed store.
+        var events = Enumerable
+            .Range(0, 10_000)
+            .Select<int, IDomainEvent>(i => new CounterCreated(i))
+            .ToList();
+
+        // 20 concurrent writers, all expecting version 0 — the check-then-act must
+        // be atomic per actor: exactly one wins, the rest get ConcurrencyException.
+        var results = await Task.WhenAll(
+            Enumerable.Range(0, 20).Select(_ => TryAppendAsync(store, id, events))
+        );
+
+        await Assert.That(results.Count(r => r.Success)).IsEqualTo(1);
+        await Assert.That(results.Count(r => r.VersionConflict)).IsEqualTo(19);
+
+        // Exactly one winner's full batch — no interleaved/duplicated events
+        var stream = await store.LoadAsync(id);
+        await Assert.That(stream.Count).IsEqualTo(events.Count);
+    }
+
+    private static async Task<(bool Success, bool VersionConflict)> TryAppendAsync(
+        InMemoryEventStore store,
+        Guid id,
+        List<IDomainEvent> events
+    )
+    {
+        try
+        {
+            await store.AppendAsync(id, 0, events);
+            return (true, false);
+        }
+        catch (ConcurrencyException)
+        {
+            return (false, true);
+        }
+    }
 }
