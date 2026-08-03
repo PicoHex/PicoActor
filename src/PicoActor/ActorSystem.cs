@@ -43,6 +43,11 @@ public sealed class ActorSystem : IActorSystem
     /// <inheritdoc/>
     public async ValueTask<T> CreateAsync<T>(ICommand command)
         where T : IActor
+        => await CreateAsync<T>(command, Guid.CreateVersion7()).ConfigureAwait(false);
+
+    /// <inheritdoc/>
+    public async ValueTask<T> CreateAsync<T>(ICommand command, Guid id)
+        where T : IActor
     {
         if (!_factories.TryGetValue(typeof(T), out var factory))
             throw new InvalidOperationException(
@@ -52,8 +57,7 @@ public sealed class ActorSystem : IActorSystem
         // 1. Call factory with creation command → constructor processes atomically
         var actor = (ActorBase)factory(command);
 
-        // 2. Assign framework-generated UUID v7
-        var id = Guid.CreateVersion7();
+        // 2. Assign the caller-supplied id (instead of a framework-generated UUID v7)
         actor.Id = id;
 
         // 2b. Set system reference for spawn operations
@@ -64,8 +68,14 @@ public sealed class ActorSystem : IActorSystem
         if (actor is EventSourcedActor es)
             es.EventStore = _eventStore;
 
-        // 4. Register in the system
-        _registry[id] = actor;
+        // 4. Register in the system — a conflict means a duplicate-id bug; fail loudly.
+        //    StopAsync releases the lifecycle gate so the discarded actor's loop
+        //    cannot leak (the gate is never signaled for it).
+        if (!_registry.TryAdd(id, actor))
+        {
+            await actor.StopAsync().ConfigureAwait(false);
+            throw new InvalidOperationException($"Actor {id} already exists.");
+        }
 
         // 5. Release the consumption loop gate
         actor.SignalReady();
