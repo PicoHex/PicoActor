@@ -83,6 +83,8 @@ await system.StopAsync(counter.Id);
 var rebuilt = await system.GetAsync<Counter>(counter.Id);
 ```
 
+`CreateAsync<T>(cmd, id)` 使用调用方指定的 id 创建 actor——当 id 需要在 actor 创建之前就已知时使用（确定性 id / saga 恢复）。若 id 已注册则抛出异常。
+
 ---
 
 ## 模块详情
@@ -94,7 +96,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 类型 | 角色 |
 |------|------|
 | `IActor` | 基础接口——提供 `Id`（UUID v7） |
-| `IActorSystem` | 运行时契约——Register、CreateAsync、GetAsync、Send、AskAsync、StopAsync |
+| `IActorSystem` | 运行时契约——Register、CreateAsync、CreateAsync(id)、GetAsync、Send、AskAsync、StopAsync、ExecuteSaga |
 | `ICommand` | 命令标记接口 |
 | `IDomainEvent` | 领域事件标记接口 |
 | `IEventSourcedActor` | 可选接口——Version、ReplayEvents、CommitEvents |

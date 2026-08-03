@@ -86,6 +86,8 @@ await system.StopAsync(counter.Id);
 var rebuilt = await system.GetAsync<Counter>(counter.Id);
 ```
 
+`CreateAsync<T>(cmd, id)` crea un actor con un id proporcionado por el llamador — úselo cuando el id deba conocerse antes de que el actor exista (id determinista / recuperación de saga). Lanza una excepción si el id ya está registrado.
+
 ---
 
 ## Detalles del Módulo
@@ -97,7 +99,7 @@ Target `netstandard2.0` para máxima compatibilidad.
 | Tipo | Rol |
 |------|------|
 | `IActor` | Interfaz base — proporciona `Id` (UUID v7) |
-| `IActorSystem` | Contrato de runtime — Register, CreateAsync, GetAsync, Send, AskAsync, StopAsync |
+| `IActorSystem` | Contrato de runtime — Register, CreateAsync, CreateAsync(id), GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
 | `ICommand` | Interfaz marcadora para comandos |
 | `IDomainEvent` | Interfaz marcadora para eventos de dominio |
 | `IEventSourcedActor` | Interfaz opcional — Version, ReplayEvents, CommitEvents |

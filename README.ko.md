@@ -85,6 +85,8 @@ await system.StopAsync(counter.Id);
 var rebuilt = await system.GetAsync<Counter>(counter.Id);
 ```
 
+`CreateAsync<T>(cmd, id)`는 호출자가 제공한 id로 actor를 생성합니다 — id가 actor 생성 전에 알려져야 하는 경우에 사용합니다(결정적 id / saga 복구). id가 이미 등록된 경우 예외를 throw합니다.
+
 ---
 
 ## 모듈 상세
@@ -96,7 +98,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 타입 | 역할 |
 |------|------|
 | `IActor` | 기본 인터페이스——`Id`(UUID v7) 제공 |
-| `IActorSystem` | 런타임 계약——Register, CreateAsync, GetAsync, Send, AskAsync, StopAsync |
+| `IActorSystem` | 런타임 계약——Register, CreateAsync, CreateAsync(id), GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
 | `ICommand` | 명령용 마커 인터페이스 |
 | `IDomainEvent` | 도메인 이벤트용 마커 인터페이스 |
 | `IEventSourcedActor` | 선택적——Version, ReplayEvents, CommitEvents |
