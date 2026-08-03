@@ -252,6 +252,17 @@ public sealed class ActorSystem : IActorSystem
         _logger?.Info($"Actor {id} stopped");
     }
 
+    /// <summary>
+    /// Gracefully stop every registered actor (code review #10 — host disposal
+    /// must not leak actor loops/CTSs until process exit).
+    /// </summary>
+    public async ValueTask StopAllAsync()
+    {
+        var ids = _registry.Keys.ToList();
+        foreach (var id in ids)
+            await StopAsync(id).ConfigureAwait(false);
+    }
+
     /// <inheritdoc/>
     public async ValueTask<TResult> ExecuteSaga<TSaga, TResult>(ICommand command)
         where TSaga : SagaActor
