@@ -211,8 +211,16 @@ public abstract class Actor : IActor, IAsyncDisposable
 
         _cts.Cancel();
         _mailbox.Writer.Complete();
-        await _loopTask.ConfigureAwait(false);
-        _cts.Dispose();
+        try
+        {
+            // A faulted loop (e.g. init failure) rethrows here — callers decide
+            // whether to propagate; the CTS must still be disposed.
+            await _loopTask.ConfigureAwait(false);
+        }
+        finally
+        {
+            _cts.Dispose();
+        }
     }
 
     /// <summary>IAsyncDisposable — delegates to StopAsync.</summary>

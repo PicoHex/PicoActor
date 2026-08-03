@@ -96,6 +96,17 @@ public sealed class ActorSystem : IActorSystem
         {
             _registry.TryRemove(id, out _);
             _logger?.Error($"Actor {typeof(T).Name} {id} initialization failed, removed");
+            // Stop the failed actor so its loop task terminates and is observed
+            // (RunAsync faults with the init exception) and its CTS is disposed.
+            // Swallow: the original exception must reach the caller.
+            try
+            {
+                await actor.StopAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // _loopTask already faulted with the init exception
+            }
             throw;
         }
 
