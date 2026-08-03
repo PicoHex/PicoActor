@@ -120,7 +120,7 @@ Target `net10.0`, compatível com AOT.
 | `ActorSystem` | `IActorSystem` padrão — registro ConcurrentDictionary, fábricas, roteamento, CancelTurn |
 | `InMemoryEventStore` | Armazenamento em memória lock-free — baseado em ConcurrentDictionary |
 | `ActorConfig` | POCO de configuração — vinculável a partir do PicoCfg |
-| `ActorSystemOptions` | Opções com IEventStore e ILogger opcionais |
+| `ActorSystemOptions` | [Obsoleto] Opções com IEventStore e ILogger opcionais — não consumido; use o construtor |
 | `PicoActorDiExtensions` | Método de extensão `AddPicoActor()` para PicoDI |
 
 ### Ator (Não-ES)

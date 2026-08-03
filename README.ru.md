@@ -120,7 +120,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorSystem` | Стандартный `IActorSystem` — реестр ConcurrentDictionary, регистрация фабрик, маршрутизация, CancelTurn |
 | `InMemoryEventStore` | Безблокировочное in-memory хранилище — на основе ConcurrentDictionary |
 | `ActorConfig` | POCO конфигурации — связывается из PicoCfg |
-| `ActorSystemOptions` | Опции с опциональными IEventStore и ILogger |
+| `ActorSystemOptions` | [Устарело] Опции с IEventStore и ILogger — не используется; используйте конструктор |
 | `PicoActorDiExtensions` | Метод расширения `AddPicoActor()` для PicoDI |
 
 ### Actor (не-ES)

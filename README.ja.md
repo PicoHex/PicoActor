@@ -119,7 +119,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorSystem` | デフォルト `IActorSystem`——ConcurrentDictionary レジストリ、ファクトリ登録、メッセージルーティング、CancelTurn |
 | `InMemoryEventStore` | ロックフリーインメモリストア——ConcurrentDictionary ベース |
 | `ActorConfig` | 設定 POCO——PicoCfg からバインディング可能 |
-| `ActorSystemOptions` | オプショナル IEventStore と ILogger の設定 |
+| `ActorSystemOptions` | [非推奨] オプションの IEventStore / ILogger——未使用,コンストラクタを使用 |
 | `PicoActorDiExtensions` | PicoDI 用 `AddPicoActor()` 拡張メソッド |
 
 ### Actor（非 ES）
