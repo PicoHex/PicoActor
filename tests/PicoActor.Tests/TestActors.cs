@@ -70,6 +70,41 @@ internal sealed class SimpleActor : ActorBase
     protected override ValueTask<object?> OnMessageAsync(ICommand command) => default;
 }
 
+/// <summary>Reports the actor-loop thread id — used to verify Ask continuations
+/// do not run inline on the completing actor's loop thread.</summary>
+internal sealed record GetLoopThreadId : ICommand;
+
+/// <summary>Blocks the actor loop thread until the gate is set — used to prove
+/// Ask continuations never run inline on the loop thread: after the loop
+/// completes the ask's TCS it immediately blocks itself, so the queued
+/// continuation provably cannot run on the loop thread (a blocked thread is
+/// never handed pool work).</summary>
+internal sealed record BlockLoopCmd(ManualResetEventSlim Gate) : ICommand;
+
+internal sealed class ThreadProbeActor : ActorBase
+{
+    public ThreadProbeActor(NoOpCmd cmd)
+        : base(cmd) { }
+
+    public ThreadProbeActor() { }
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command) =>
+        command switch
+        {
+            GetLoopThreadId => new ValueTask<object?>(
+                Environment.CurrentManagedThreadId
+            ),
+            BlockLoopCmd b => Block(b.Gate),
+            _ => default,
+        };
+
+    private static ValueTask<object?> Block(ManualResetEventSlim gate)
+    {
+        gate.Wait();
+        return default;
+    }
+}
+
 /// <summary>Actor whose constructor always throws.</summary>
 internal sealed record Explode : ICommand;
 

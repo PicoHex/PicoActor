@@ -143,4 +143,42 @@ public sealed class ActorSystemCallerIdTests
         var value = await system.AskAsync<int>(FixedId, new GetValue());
         await Assert.That(value).IsEqualTo(1);
     }
+
+    [Test]
+    public async Task AskAsync_ContinuationDoesNotRunOnActorLoopThread()
+    {
+        var system = new ActorSystem(new InMemoryEventStore());
+        system.Register<ThreadProbeActor>(
+            cmd =>
+                cmd switch
+                {
+                    NoOpCmd => new ThreadProbeActor((NoOpCmd)cmd),
+                    _ => throw new InvalidOperationException(),
+                },
+            () => new ThreadProbeActor()
+        );
+
+        await system.CreateAsync<ThreadProbeActor>(new NoOpCmd(), FixedId);
+
+        using var gate = new ManualResetEventSlim();
+        try
+        {
+            // Envelope order: ask first, then a blocking message. The loop
+            // completes the ask's TCS and immediately blocks itself on the gate
+            // (never returning to the pool), so the queued continuation must run
+            // on another thread. An inline continuation would run on the loop
+            // thread while it is still inside the TCS completion.
+            var askTask = system.AskAsync<int>(FixedId, new GetLoopThreadId());
+            system.Send(FixedId, new BlockLoopCmd(gate));
+
+            var loopThreadId = await askTask;
+            await Assert.That(Environment.CurrentManagedThreadId).IsNotEqualTo(loopThreadId);
+        }
+        finally
+        {
+            gate.Set(); // release the loop so the actor can stop cleanly
+        }
+
+        await system.StopAsync(FixedId);
+    }
 }

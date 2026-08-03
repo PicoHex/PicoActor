@@ -201,7 +201,9 @@ public sealed class ActorSystem : IActorSystem
         if (!_registry.TryGetValue(id, out var actor))
             throw new KeyNotFoundException($"Actor {id} not found.");
 
-        var tcs = new TaskCompletionSource<object?>();
+        var tcs = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
         actor.Post(new Envelope { Command = command, Tcs = tcs });
 
         var result = await tcs.Task.ConfigureAwait(false);

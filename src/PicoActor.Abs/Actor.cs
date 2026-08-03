@@ -18,8 +18,12 @@ public abstract class Actor : IActor, IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
 
     // TaskCompletionSource (non-generic) not available on netstandard2.0.
-    private readonly TaskCompletionSource<bool> _ready = new();
-    private readonly TaskCompletionSource<bool> _initCompleted = new();
+    // RunContinuationsAsynchronously: the completing thread is the actor's own
+    // loop — continuations must never run inline on it.
+    private readonly TaskCompletionSource<bool> _ready =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<bool> _initCompleted =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _loopTask;
     private int _stopped;
 
