@@ -57,6 +57,12 @@ public interface IActorSystem
     ValueTask StopAsync(Guid id);
 
     /// <summary>
+    /// Gracefully stop every registered actor (host disposal — actor loops/CTSs
+    /// must not leak until process exit). Idempotent per actor.
+    /// </summary>
+    ValueTask StopAllAsync();
+
+    /// <summary>
     /// Create a <see cref="SagaActor"/>, send a command, wait for the result,
     /// and let the saga auto-stop when it marks itself complete.
     /// The caller does not need to call <see cref="StopAsync"/> — the saga
