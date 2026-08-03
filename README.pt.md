@@ -66,7 +66,7 @@ using PicoActor.Abs;
 
 // 1. Configuração
 var store = new InMemoryEventStore();
-var system = new ActorSystem(store);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
 // 2. Registrar fábricas de Atores
 system.Register<Counter>(
@@ -120,7 +120,7 @@ Target `net10.0`, compatível com AOT.
 | `ActorSystem` | `IActorSystem` padrão — registro ConcurrentDictionary, fábricas, roteamento, CancelTurn |
 | `InMemoryEventStore` | Armazenamento em memória lock-free — baseado em ConcurrentDictionary |
 | `ActorConfig` | POCO de configuração — vinculável a partir do PicoCfg |
-| `ActorSystemOptions` | [Obsoleto] Opções com IEventStore e ILogger opcionais — não consumido; use o construtor |
+| `ActorSystemOptions` | Opções — EventStore obrigatório, Logger opcional; consumido pelo construtor de `ActorSystem` |
 | `PicoActorDiExtensions` | Método de extensão `AddPicoActor()` para PicoDI |
 
 ### Ator (Não-ES)

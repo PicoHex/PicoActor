@@ -66,7 +66,7 @@ using PicoActor.Abs;
 
 // 1. Настройка
 var store = new InMemoryEventStore();
-var system = new ActorSystem(store);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
 // 2. Регистрация фабрик Actor
 system.Register<Counter>(
@@ -120,7 +120,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorSystem` | Стандартный `IActorSystem` — реестр ConcurrentDictionary, регистрация фабрик, маршрутизация, CancelTurn |
 | `InMemoryEventStore` | Безблокировочное in-memory хранилище — на основе ConcurrentDictionary |
 | `ActorConfig` | POCO конфигурации — связывается из PicoCfg |
-| `ActorSystemOptions` | [Устарело] Опции с IEventStore и ILogger — не используется; используйте конструктор |
+| `ActorSystemOptions` | Параметры — обязательный EventStore, необязательный Logger; используется конструктором `ActorSystem` |
 | `PicoActorDiExtensions` | Метод расширения `AddPicoActor()` для PicoDI |
 
 ### Actor (не-ES)

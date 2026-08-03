@@ -65,7 +65,7 @@ using PicoActor.Abs;
 
 // 1. 설정
 var store = new InMemoryEventStore();
-var system = new ActorSystem(store);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
 // 2. Actor 팩토리 등록
 system.Register<Counter>(
@@ -119,7 +119,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorSystem` | 기본 `IActorSystem`——ConcurrentDictionary 레지스트리, 팩토리 등록, 메시지 라우팅, CancelTurn |
 | `InMemoryEventStore` | 락-프리 인메모리 저장소——ConcurrentDictionary 기반 |
 | `ActorConfig` | 설정 POCO——PicoCfg에서 바인딩 가능 |
-| `ActorSystemOptions` | [사용되지 않음] 선택적 IEventStore 및 ILogger 옵션 — 미사용; 생성자 사용 |
+| `ActorSystemOptions` | 옵션 — 필수 EventStore, 선택 Logger;`ActorSystem` 생성자에서 사용 |
 | `PicoActorDiExtensions` | PicoDI용 `AddPicoActor()` 확장 메서드 |
 
 ### Actor (비-ES)

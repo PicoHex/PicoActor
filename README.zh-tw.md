@@ -63,7 +63,7 @@ using PicoActor.Abs;
 
 // 1. 初始化
 var store = new InMemoryEventStore();
-var system = new ActorSystem(store);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
 // 2. 註冊 Actor 工廠
 system.Register<Counter>(
@@ -117,7 +117,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorSystem` | 預設 `IActorSystem`——ConcurrentDictionary 註冊表、工廠註冊、訊息路由、CancelTurn |
 | `InMemoryEventStore` | 無鎖記憶體儲存——基於 ConcurrentDictionary |
 | `ActorConfig` | 設定 POCO——可從 PicoCfg 綁定 |
-| `ActorSystemOptions` | [已淘汰] 選用 IEventStore 和 ILogger 的選項——未被使用,請用建構函式 |
+| `ActorSystemOptions` | 選項——必填 EventStore、選用 Logger;由 `ActorSystem` 建構函式使用 |
 | `PicoActorDiExtensions` | PicoDI 的 `AddPicoActor()` 擴充方法 |
 
 ### Actor（非 ES）
