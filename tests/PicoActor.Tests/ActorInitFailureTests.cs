@@ -38,7 +38,7 @@ public sealed class ActorInitFailureTests
     public async Task CreateAsync_WhenPersistenceFails_ThrowsAndRemovesActor()
     {
         var store = new FailingEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<Counter>(cmd =>
             cmd switch
@@ -75,7 +75,7 @@ public sealed class ActorInitFailureTests
     {
         var failingStore = new FailingEventStore();
         var goodStore = new InMemoryEventStore();
-        var system = new ActorSystem(failingStore);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = failingStore });
 
         system.Register<Counter>(cmd =>
             cmd switch
@@ -95,7 +95,7 @@ public sealed class ActorInitFailureTests
         }
 
         // Create a new system with a working store to verify it works
-        var system2 = new ActorSystem(goodStore);
+        var system2 = new ActorSystem(new ActorSystemOptions { EventStore = goodStore });
         system2.Register<Counter>(cmd =>
             cmd switch
             {

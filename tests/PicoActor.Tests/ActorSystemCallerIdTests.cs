@@ -20,7 +20,7 @@ public sealed class ActorSystemCallerIdTests
     [Test]
     public async Task CreateAsync_WithCallerSuppliedId_AssignsId()
     {
-        var system = new ActorSystem(new InMemoryEventStore());
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
         RegisterSimple(system);
 
         var actor = await system.CreateAsync<SimpleActor>(new NoOpCmd(), FixedId);
@@ -33,7 +33,7 @@ public sealed class ActorSystemCallerIdTests
     [Test]
     public async Task CreateAsync_WithCallerSuppliedId_DuplicateId_ThrowsAndSystemUsable()
     {
-        var system = new ActorSystem(new InMemoryEventStore());
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
         RegisterSimple(system);
 
         await system.CreateAsync<SimpleActor>(new NoOpCmd(), FixedId);
@@ -67,12 +67,12 @@ public sealed class ActorSystemCallerIdTests
     public async Task CreateAsync_WithCallerSuppliedId_EventSourced_PersistsUnderThatId()
     {
         var store = new InMemoryEventStore();
-        var systemA = new ActorSystem(store);
+        var systemA = new ActorSystem(new ActorSystemOptions { EventStore = store });
         RegisterCounter(systemA);
         await systemA.CreateAsync<Counter>(new CreateCounter(7), FixedId);
 
         // A fresh system over the same store must rebuild the same actor by id
-        var systemB = new ActorSystem(store);
+        var systemB = new ActorSystem(new ActorSystemOptions { EventStore = store });
         RegisterCounter(systemB);
         var rebuilt = await systemB.GetAsync<Counter>(FixedId);
         await Assert.That(rebuilt).IsNotNull();
@@ -84,13 +84,13 @@ public sealed class ActorSystemCallerIdTests
     public async Task CreateAsync_WithCallerSuppliedId_StoreAlreadyHasEventsForId_Throws()
     {
         var store = new InMemoryEventStore();
-        var systemA = new ActorSystem(store);
+        var systemA = new ActorSystem(new ActorSystemOptions { EventStore = store });
         RegisterCounter(systemA);
         await systemA.CreateAsync<Counter>(new CreateCounter(1), FixedId);
 
         // "Second process" boot over the same store: the aggregate file already
         // exists — CreateAsync(id) must fail loudly, not silently overwrite.
-        var systemB = new ActorSystem(store);
+        var systemB = new ActorSystem(new ActorSystemOptions { EventStore = store });
         RegisterCounter(systemB);
         await Assert
             .That(async () => await systemB.CreateAsync<Counter>(new CreateCounter(2), FixedId))
@@ -107,7 +107,7 @@ public sealed class ActorSystemCallerIdTests
     [Test]
     public async Task CreateAsync_DefaultOverload_StillGeneratesIds()
     {
-        var system = new ActorSystem(new InMemoryEventStore());
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
         RegisterSimple(system);
 
         var a = await system.CreateAsync<SimpleActor>(new NoOpCmd());
@@ -122,7 +122,7 @@ public sealed class ActorSystemCallerIdTests
     public async Task CreateAsync_WithCallerSuppliedId_DuplicateId_EventSourced_ThrowsWithoutCorruptingStore()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
         RegisterCounter(system);
 
         await system.CreateAsync<Counter>(new CreateCounter(1), FixedId);
@@ -145,9 +145,17 @@ public sealed class ActorSystemCallerIdTests
     }
 
     [Test]
+    public async Task ActorSystem_WithNullOptions_ThrowsArgumentNullException()
+    {
+        await Assert
+            .That(() => new ActorSystem(null!))
+            .Throws<ArgumentNullException>();
+    }
+
+    [Test]
     public async Task AskAsync_ContinuationDoesNotRunOnActorLoopThread()
     {
-        var system = new ActorSystem(new InMemoryEventStore());
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
         system.Register<ThreadProbeActor>(
             cmd =>
                 cmd switch

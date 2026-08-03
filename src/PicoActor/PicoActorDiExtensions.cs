@@ -62,7 +62,9 @@ public static class PicoActorDiExtensions
                 )
                     logger = loggerFactory.CreateLogger(nameof(ActorSystem));
 
-                return new ActorSystem(store, logger);
+                return new ActorSystem(
+                    new ActorSystemOptions { EventStore = store, Logger = logger }
+                );
             },
             SvcLifetime.Singleton
         );

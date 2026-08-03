@@ -83,7 +83,7 @@ public sealed class SagaActorLifecycleTests
     public async Task MarkComplete_AutoStops_SendThrows()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<TestSaga>(_ => new TestSaga());
 
@@ -116,7 +116,7 @@ public sealed class SagaActorLifecycleTests
     public async Task GetAsync_CompletedSaga_ReturnsNull()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
@@ -145,7 +145,7 @@ public sealed class SagaActorLifecycleTests
     public async Task GetAsync_CompletedSaga_RepeatedCalls_DoesNotCrash()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
@@ -179,7 +179,7 @@ public sealed class SagaActorLifecycleTests
         await store.AppendAsync(sagaId, 0, [new SagaStep1Started("partial")]);
 
         // Rebuild from events (simulating restart)
-        var system2 = new ActorSystem(store);
+        var system2 = new ActorSystem(new ActorSystemOptions { EventStore = store });
         system2.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
         var rebuilt = await system2.GetAsync<TestSaga>(sagaId);

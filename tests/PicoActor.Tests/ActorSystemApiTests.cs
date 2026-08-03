@@ -19,7 +19,7 @@ public sealed class ActorSystemApiTests
     public async Task CreateAsync_SetsNonEmptyId()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<SimpleActor>(cmd =>
             cmd switch
@@ -47,7 +47,7 @@ public sealed class ActorSystemApiTests
     public async Task Register_DuplicateRegistration_ShouldThrow()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<SimpleActor>(_ => new SimpleActor((NoOpCmd)_!));
         system.Register<SimpleActor>(_ => new SimpleActor((NoOpCmd)_!));
@@ -68,7 +68,7 @@ public sealed class ActorSystemApiTests
     public async Task Send_ToNonexistentActor_Throws()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         await Assert
             .That(() => system.Send(Guid.CreateVersion7(), new NoOpCmd()))
@@ -87,7 +87,7 @@ public sealed class ActorSystemApiTests
     public async Task AskAsync_ToStoppedActor_Throws()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<SimpleActor>(cmd =>
             cmd switch
@@ -114,7 +114,7 @@ public sealed class ActorSystemApiTests
     public async Task AskAsync_ToNonexistentActor_Throws()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         await Assert
             .That(async () => await system.AskAsync<object?>(Guid.CreateVersion7(), new NoOpCmd()))
@@ -132,7 +132,7 @@ public sealed class ActorSystemApiTests
     public async Task Send_MultipleSequentialMessages_ProcessedInOrder()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<Counter>(cmd =>
             cmd switch
@@ -169,7 +169,7 @@ public sealed class ActorSystemApiTests
     public async Task StopAsync_CalledTwice_DoesNotThrow()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<SimpleActor>(cmd =>
             cmd switch

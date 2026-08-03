@@ -66,7 +66,7 @@ public sealed class EventSourcedActorRecoveryTests
     )
     {
         var store = new TransientFailingStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<Counter>(
             cmd =>
@@ -105,7 +105,7 @@ public sealed class EventSourcedActorRecoveryTests
     )
     {
         var store = new TransientFailingStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<Counter>(
             cmd =>

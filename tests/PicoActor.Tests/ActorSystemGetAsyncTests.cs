@@ -12,7 +12,7 @@ public sealed class ActorSystemGetAsyncTests
     public async Task GetAsync_NonEventSourcedType_ReturnsNull()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<SimpleActor>(cmd =>
             cmd switch
@@ -41,7 +41,7 @@ public sealed class ActorSystemGetAsyncTests
     public async Task GetAsync_EventSourcedType_AfterStop_RebuildsFromEvents()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<Counter>(
             cmd =>

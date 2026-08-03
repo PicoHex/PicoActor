@@ -114,7 +114,7 @@ public sealed class ActorSystemGetAsyncRaceTests
         var loserArrived = new TaskCompletionSource<bool>();
         var proceed = new TaskCompletionSource<bool>();
         var store = new RaceEventStore(events, bothEntered, releaseLoser);
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         var rebuildCount = 0;
         system.Register<BlockingReadyActor>(

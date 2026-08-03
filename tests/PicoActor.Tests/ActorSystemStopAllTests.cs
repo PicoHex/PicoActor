@@ -7,7 +7,7 @@ public sealed class ActorSystemStopAllTests
     [Test]
     public async Task StopAllAsync_StopsEveryActor_RegistryEmpty_SubsequentSendThrows()
     {
-        var system = new ActorSystem(new InMemoryEventStore());
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
         system.Register<SimpleActor>(cmd =>
             cmd switch
             {

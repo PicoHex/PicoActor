@@ -15,7 +15,7 @@ Console.WriteLine("=== PicoActor Sample: Event-Sourced Counter ===\n");
 
 // ── Setup: ActorSystem with InMemoryEventStore ─────────────────
 var store = new InMemoryEventStore();
-var system = new ActorSystem(store);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
 system.Register<Counter>(
     createFactory: cmd => cmd switch

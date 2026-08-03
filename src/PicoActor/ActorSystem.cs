@@ -14,13 +14,15 @@ public sealed class ActorSystem : IActorSystem
     private readonly ILogger? _logger;
 
     /// <summary>
-    /// Creates an ActorSystem with the given event store and optional logger.
-    /// Pass <see cref="InMemoryEventStore"/> for pure in-memory mode.
+    /// Creates an ActorSystem from <paramref name="options"/>. This is the single
+    /// construction path — the event store must be chosen explicitly via
+    /// <see cref="ActorSystemOptions.EventStore"/>.
     /// </summary>
-    public ActorSystem(IEventStore eventStore, ILogger? logger = null)
+    public ActorSystem(ActorSystemOptions options)
     {
-        _eventStore = eventStore;
-        _logger = logger;
+        ArgumentNullException.ThrowIfNull(options);
+        _eventStore = options.EventStore;
+        _logger = options.Logger;
     }
 
     // ═══════════════════════════════════════════════════════════

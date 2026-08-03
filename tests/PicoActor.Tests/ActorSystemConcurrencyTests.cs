@@ -15,7 +15,7 @@ public sealed class ActorSystemConcurrencyTests
     )
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<Counter>(
             cmd =>

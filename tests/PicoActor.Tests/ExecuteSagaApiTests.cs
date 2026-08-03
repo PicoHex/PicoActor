@@ -20,7 +20,7 @@ public sealed class ExecuteSagaApiTests
     public async Task ExecuteSaga_ReturnsResult_AndAutoStops()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
@@ -54,7 +54,7 @@ public sealed class ExecuteSagaApiTests
         await store.AppendAsync(sagaId, 0, [new SagaStep1Started("recover-me")]);
 
         // Second attempt with same store — saga should rebuild and complete
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
         system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
         // This would fail without deterministic saga IDs. In a real app,

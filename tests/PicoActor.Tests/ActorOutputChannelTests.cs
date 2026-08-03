@@ -31,7 +31,7 @@ public sealed class ActorOutputChannelTests
     public async Task OutputChannel_SubscriberReceivesEvents()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         var channel = Channel.CreateUnbounded<ActorOutputEvent>();
         var results = new List<ActorOutputEvent>();
@@ -72,7 +72,7 @@ public sealed class ActorOutputChannelTests
     public async Task OutputChannel_NoSubscriber_NoError()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<OutputTestActor>(
             cmd =>

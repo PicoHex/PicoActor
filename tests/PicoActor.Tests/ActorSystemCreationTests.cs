@@ -12,7 +12,7 @@ public sealed class ActorSystemCreationTests
     public async Task CreateAsync_WhenFactoryThrows_PropagatesException()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<ThrowingActor>(cmd =>
             cmd switch
@@ -36,7 +36,7 @@ public sealed class ActorSystemCreationTests
     public async Task CreateAsync_AfterFailedCreation_SystemRemainsUsable()
     {
         var store = new InMemoryEventStore();
-        var system = new ActorSystem(store);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<ThrowingActor>(cmd =>
             cmd switch
