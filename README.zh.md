@@ -94,7 +94,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 类型 | 角色 |
 |------|------|
 | `IActor` | 基础接口——提供 `Id`（UUID v7） |
-| `IActorSystem` | 运行时契约——Register、CreateAsync、GetAsync、Send、AskAsync、StopAsync、ExecuteSaga |
+| `IActorSystem` | 运行时契约——Register、CreateAsync、FindAggregateIds、GetAsync、Send、AskAsync、StopAsync、ExecuteSaga |
 | `ICommand` | 命令标记接口 |
 | `IDomainEvent` | 领域事件标记接口 |
 | `IEventSourcedActor` | 可选接口——Version、ReplayEvents、CommitEvents |
