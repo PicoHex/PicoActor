@@ -147,10 +147,23 @@ public sealed class ActorSystem : IActorSystem
         var es = (IEventSourcedActor)actor;
         ((EventSourcedActor)actor).EventStore = _eventStore;
         ((EventSourcedActor)actor).Publisher = _publisher;
-        es.ReplayEvents(events);
 
-        // Completed sagas stay dead — their JSONL files are audit trails only.
-        if (actor is SagaActor { IsCompleted: true })
+        // 全路径资源清理:重建后任一失败点(重放/init)都标记 discarded + StopAsync + rethrow。
+        // actor 已构造(_loopTask 已启动、gate 未释放)——不清理则泄漏;不带 discarded 标记时
+        // StopAsync 释放 gate 会让部分重放状态误执行 OnReadyAsync(含 saga resume)。
+        try
+        {
+            es.ReplayEvents(events);
+        }
+        catch
+        {
+            actor.MarkDiscarded();
+            await actor.StopAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        // 重建前已存在的终态事件(Completed/Failed)→ 不复活
+        if (actor is SagaActor { IsCompleted: true } or SagaActor { IsFailed: true })
         {
             await actor.StopAsync().ConfigureAwait(false);
             return default;
@@ -161,22 +174,35 @@ public sealed class ActorSystem : IActorSystem
             _logger?.Warning(
                 $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
             );
-            // Read the winner safely. The winner may have been stopped concurrently
-            // while we were stopping our duplicate (the await below yields). Using the
-            // throwing indexer _registry[id] would throw KeyNotFoundException in that
-            // window; TryGetValue avoids it and returns null if the actor is gone.
-            if (_registry.TryGetValue(id, out var winner))
-            {
-                await actor.StopAsync().ConfigureAwait(false);
-                return (T)(IActor)winner;
-            }
-
-            // Winner was stopped concurrently; no live actor remains.
+            actor.MarkDiscarded();
             await actor.StopAsync().ConfigureAwait(false);
+
+            if (_registry.TryGetValue(id, out var winner))
+                return (T)(IActor)winner;
+
             return default;
         }
 
         actor.SignalReady();
+
+        try
+        {
+            await actor.InitCompletedTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // init 失败(如 resume 的 SagaFailed 落盘失败)→ 对称清理
+            _registry.TryRemove(id, out _);
+            try
+            {
+                await actor.StopAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // _loopTask already faulted with the init exception
+            }
+            throw;
+        }
 
         _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
 
