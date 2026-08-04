@@ -55,7 +55,7 @@ public sealed class ExecuteSagaApiTests
             .That(async () => await system.ExecuteSaga<FailSaga, string>(new FailCmd()))
             .Throws<SagaExecutionException>();
 
-        await Assert.That(ex.SagaId).IsNotEqualTo(Guid.Empty);
+        await Assert.That(ex!.SagaId).IsNotEqualTo(Guid.Empty);
         await Assert.That(ex.Reason).Contains("step failed");
 
         // 失败 = 终态:事件流含框架 SagaFailed,GetAsync 不复活
