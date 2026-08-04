@@ -314,6 +314,35 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <inheritdoc/>
+    public async ValueTask<IReadOnlyList<SagaResumeResult>> ResumeInterruptedSagasAsync<TSaga>(
+        string firstEventType,
+        Func<IDomainEvent, bool>? firstEventMatch = null
+    )
+        where TSaga : SagaActor
+    {
+        var ids = await FindAggregateIds(firstEventType, firstEventMatch ?? (_ => true))
+            .ConfigureAwait(false);
+
+        var results = new List<SagaResumeResult>(ids.Count);
+        foreach (var id in ids)
+        {
+            // 活跃命中 → 直接分类不重建;重建前已终态 → GetAsync 返回 null 跳过;
+            // resume 新终态 → 从返回实例读取
+            var saga = await GetAsync<TSaga>(id).ConfigureAwait(false);
+            if (saga is null)
+                continue;
+
+            if (saga.IsCompleted)
+                results.Add(new SagaResumeResult(id, SagaResumeStatus.Completed));
+            else if (saga.IsFailed)
+                results.Add(new SagaResumeResult(id, SagaResumeStatus.Failed, saga.FailedReason));
+            else
+                results.Add(new SagaResumeResult(id, SagaResumeStatus.Running));
+        }
+        return results;
+    }
+
+    /// <inheritdoc/>
     public async ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
         where TSaga : SagaActor
     {
