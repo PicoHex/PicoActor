@@ -268,6 +268,23 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <inheritdoc/>
+    public async ValueTask<IReadOnlyList<Guid>> FindAggregateIds(
+        string firstEventType, Func<IDomainEvent, bool> firstEventMatch)
+    {
+        if (_eventStore is not IEventStoreEnumerator enumerator)
+            return Array.Empty<Guid>();
+
+        var result = new List<Guid>();
+        foreach (var id in enumerator.ListAggregateIds(firstEventType))
+        {
+            var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
+            if (events.Count > 0 && firstEventMatch(events[0]))
+                result.Add(id);
+        }
+        return result;
+    }
+
+    /// <inheritdoc/>
     public async ValueTask<TResult> ExecuteSaga<TSaga, TResult>(ICommand command)
         where TSaga : SagaActor
     {

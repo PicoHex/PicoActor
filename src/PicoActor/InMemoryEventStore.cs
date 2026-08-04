@@ -10,7 +10,7 @@ namespace PicoActor;
 /// <see cref="ConcurrencyException"/>). Lock contention is per actor, so
 /// different actors never block each other.
 /// </summary>
-public sealed class InMemoryEventStore : IEventStore
+public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
 {
     private readonly ConcurrentDictionary<Guid, List<IDomainEvent>> _streams = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
@@ -58,5 +58,17 @@ public sealed class InMemoryEventStore : IEventStore
         {
             gate.Release();
         }
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<Guid> ListAggregateIds(string firstEventType)
+    {
+        var result = new List<Guid>();
+        foreach (var (id, stream) in _streams)
+        {
+            if (stream.Count > 0 && stream[0].GetType().Name == firstEventType)
+                result.Add(id);
+        }
+        return result;
     }
 }

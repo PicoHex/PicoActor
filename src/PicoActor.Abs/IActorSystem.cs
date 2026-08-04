@@ -50,6 +50,14 @@ public interface IActorSystem
     ValueTask StopAllAsync();
 
     /// <summary>
+    /// Enumerate aggregate ids whose FIRST event type name matches, then
+    /// filter by <paramref name="firstEventMatch"/>. Empty if the store does not
+    /// support enumeration. Recovery-path API — not for hot paths.
+    /// </summary>
+    ValueTask<IReadOnlyList<Guid>> FindAggregateIds(
+        string firstEventType, Func<IDomainEvent, bool> firstEventMatch);
+
+    /// <summary>
     /// Create a <see cref="SagaActor"/>, send a command, wait for the result,
     /// and let the saga auto-stop when it marks itself complete.
     /// The caller does not need to call <see cref="StopAsync"/> — the saga
