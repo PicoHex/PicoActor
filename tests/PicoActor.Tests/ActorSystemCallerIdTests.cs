@@ -4,8 +4,6 @@ namespace PicoActor.Tests;
 
 public sealed class ActorSystemCallerIdTests
 {
-    private static readonly Guid FixedId = Guid.Parse("00000000-0000-0000-0000-0000000000a1");
-
     private static void RegisterSimple(ActorSystem system)
     {
         system.Register<SimpleActor>(cmd =>
@@ -15,93 +13,6 @@ public sealed class ActorSystemCallerIdTests
                 _ => throw new InvalidOperationException(),
             }
         );
-    }
-
-    [Test]
-    public async Task CreateAsync_WithCallerSuppliedId_AssignsId()
-    {
-        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
-        RegisterSimple(system);
-
-        var actor = await system.CreateAsync<SimpleActor>(new NoOpCmd(), FixedId);
-
-        await Assert.That(actor.Id).IsEqualTo(FixedId);
-        var viaGet = await system.GetAsync<SimpleActor>(FixedId);
-        await Assert.That(viaGet).IsNotNull();
-    }
-
-    [Test]
-    public async Task CreateAsync_WithCallerSuppliedId_DuplicateId_ThrowsAndSystemUsable()
-    {
-        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
-        RegisterSimple(system);
-
-        await system.CreateAsync<SimpleActor>(new NoOpCmd(), FixedId);
-
-        await Assert
-            .That(async () => await system.CreateAsync<SimpleActor>(new NoOpCmd(), FixedId))
-            .Throws<InvalidOperationException>();
-
-        // System remains usable
-        var other = await system.CreateAsync<SimpleActor>(
-            new NoOpCmd(),
-            Guid.Parse("00000000-0000-0000-0000-0000000000a2")
-        );
-        await Assert.That(other.Id).IsNotEqualTo(FixedId);
-    }
-
-    private static void RegisterCounter(ActorSystem system)
-    {
-        system.Register<Counter>(
-            cmd =>
-                cmd switch
-                {
-                    CreateCounter c => new Counter(c),
-                    _ => throw new InvalidOperationException(),
-                },
-            () => new Counter()
-        );
-    }
-
-    [Test]
-    public async Task CreateAsync_WithCallerSuppliedId_EventSourced_PersistsUnderThatId()
-    {
-        var store = new InMemoryEventStore();
-        var systemA = new ActorSystem(new ActorSystemOptions { EventStore = store });
-        RegisterCounter(systemA);
-        await systemA.CreateAsync<Counter>(new CreateCounter(7), FixedId);
-
-        // A fresh system over the same store must rebuild the same actor by id
-        var systemB = new ActorSystem(new ActorSystemOptions { EventStore = store });
-        RegisterCounter(systemB);
-        var rebuilt = await systemB.GetAsync<Counter>(FixedId);
-        await Assert.That(rebuilt).IsNotNull();
-        var value = await systemB.AskAsync<int>(FixedId, new GetValue());
-        await Assert.That(value).IsEqualTo(7);
-    }
-
-    [Test]
-    public async Task CreateAsync_WithCallerSuppliedId_StoreAlreadyHasEventsForId_Throws()
-    {
-        var store = new InMemoryEventStore();
-        var systemA = new ActorSystem(new ActorSystemOptions { EventStore = store });
-        RegisterCounter(systemA);
-        await systemA.CreateAsync<Counter>(new CreateCounter(1), FixedId);
-
-        // "Second process" boot over the same store: the aggregate file already
-        // exists — CreateAsync(id) must fail loudly, not silently overwrite.
-        var systemB = new ActorSystem(new ActorSystemOptions { EventStore = store });
-        RegisterCounter(systemB);
-        await Assert
-            .That(async () => await systemB.CreateAsync<Counter>(new CreateCounter(2), FixedId))
-            .Throws<ConcurrencyException>();
-
-        // System remains usable
-        var other = await systemB.CreateAsync<Counter>(
-            new CreateCounter(3),
-            Guid.Parse("00000000-0000-0000-0000-0000000000a3")
-        );
-        await Assert.That(other.Id).IsNotEqualTo(FixedId);
     }
 
     [Test]
@@ -116,32 +27,6 @@ public sealed class ActorSystemCallerIdTests
         await Assert.That(a.Id).IsNotEqualTo(Guid.Empty);
         await Assert.That(b.Id).IsNotEqualTo(Guid.Empty);
         await Assert.That(a.Id).IsNotEqualTo(b.Id);
-    }
-
-    [Test]
-    public async Task CreateAsync_WithCallerSuppliedId_DuplicateId_EventSourced_ThrowsWithoutCorruptingStore()
-    {
-        var store = new InMemoryEventStore();
-        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
-        RegisterCounter(system);
-
-        await system.CreateAsync<Counter>(new CreateCounter(1), FixedId);
-
-        // ES duplicate: the discarded actor staged CounterCreated in its constructor.
-        // It must NOT flush to the store (which would race the winner's flush), and
-        // the documented exception type must surface — not ConcurrencyException
-        // from the loser's init flush.
-        await Assert
-            .That(async () => await system.CreateAsync<Counter>(new CreateCounter(2), FixedId))
-            .Throws<InvalidOperationException>();
-
-        // The stream holds exactly ONE event batch — no silent duplicate append
-        var events = await store.LoadAsync(FixedId);
-        await Assert.That(events.Count).IsEqualTo(1);
-
-        // The winner remains functional
-        var value = await system.AskAsync<int>(FixedId, new GetValue());
-        await Assert.That(value).IsEqualTo(1);
     }
 
     [Test]
@@ -166,7 +51,7 @@ public sealed class ActorSystemCallerIdTests
             () => new ThreadProbeActor()
         );
 
-        await system.CreateAsync<ThreadProbeActor>(new NoOpCmd(), FixedId);
+        var probe = await system.CreateAsync<ThreadProbeActor>(new NoOpCmd());
 
         using var gate = new ManualResetEventSlim();
         try
@@ -176,8 +61,8 @@ public sealed class ActorSystemCallerIdTests
             // (never returning to the pool), so the queued continuation must run
             // on another thread. An inline continuation would run on the loop
             // thread while it is still inside the TCS completion.
-            var askTask = system.AskAsync<int>(FixedId, new GetLoopThreadId());
-            system.Send(FixedId, new BlockLoopCmd(gate));
+            var askTask = system.AskAsync<int>(probe.Id, new GetLoopThreadId());
+            system.Send(probe.Id, new BlockLoopCmd(gate));
 
             var loopThreadId = await askTask;
             await Assert.That(Environment.CurrentManagedThreadId).IsNotEqualTo(loopThreadId);
@@ -187,7 +72,7 @@ public sealed class ActorSystemCallerIdTests
             gate.Set(); // release the loop so the actor can stop cleanly
         }
 
-        await system.StopAsync(FixedId);
+        await system.StopAsync(probe.Id);
     }
 
     [Test]

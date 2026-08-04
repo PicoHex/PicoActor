@@ -45,12 +45,8 @@ public sealed class ActorSystem : IActorSystem
     /// <inheritdoc/>
     public async ValueTask<T> CreateAsync<T>(ICommand command)
         where T : IActor
-        => await CreateAsync<T>(command, Guid.CreateVersion7()).ConfigureAwait(false);
-
-    /// <inheritdoc/>
-    public async ValueTask<T> CreateAsync<T>(ICommand command, Guid id)
-        where T : IActor
     {
+        var id = Guid.CreateVersion7();
         if (!_factories.TryGetValue(typeof(T), out var factory))
             throw new InvalidOperationException(
                 $"No factory registered for {typeof(T).Name}. Call Register<T> first."
@@ -59,7 +55,7 @@ public sealed class ActorSystem : IActorSystem
         // 1. Call factory with creation command → constructor processes atomically
         var actor = (ActorBase)factory(command);
 
-        // 2. Assign the caller-supplied id (instead of a framework-generated UUID v7)
+        // 2. Assign a framework-generated UUID v7 — actor ids are framework-owned
         actor.Id = id;
 
         // 2b. Set system reference for spawn operations

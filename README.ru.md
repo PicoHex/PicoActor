@@ -86,8 +86,6 @@ await system.StopAsync(counter.Id);
 var rebuilt = await system.GetAsync<Counter>(counter.Id);
 ```
 
-`CreateAsync<T>(cmd, id)` создаёт actor с id, предоставленным вызывающим кодом — используйте, когда id должен быть известен до создания actor (детерминированная id / восстановление саги). Выбрасывает исключение, если id уже зарегистрирован.
-
 ---
 
 ## Детали модуля
@@ -99,7 +97,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | Тип | Роль |
 |------|------|
 | `IActor` | Базовый интерфейс — предоставляет `Id` (UUID v7) |
-| `IActorSystem` | Контракт времени выполнения — Register, CreateAsync, CreateAsync(id), GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
+| `IActorSystem` | Контракт времени выполнения — Register, CreateAsync, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
 | `ICommand` | Маркерный интерфейс для команд |
 | `IDomainEvent` | Маркерный интерфейс для доменных событий |
 | `IEventSourcedActor` | Опциональный — Version, ReplayEvents, CommitEvents |
