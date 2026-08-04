@@ -219,7 +219,8 @@ public sealed class ActorSystem : IActorSystem
         var tcs = new TaskCompletionSource<object?>(
             TaskCreationOptions.RunContinuationsAsynchronously
         );
-        actor.Post(new Envelope { Command = command, Tcs = tcs });
+        if (!actor.Post(new Envelope { Command = command, Tcs = tcs }))
+            tcs.TrySetException(new InvalidOperationException($"Actor {id} is stopping."));
 
         var result = await tcs.Task.ConfigureAwait(false);
         return (TResult)result!;
@@ -269,7 +270,9 @@ public sealed class ActorSystem : IActorSystem
 
     /// <inheritdoc/>
     public async ValueTask<IReadOnlyList<Guid>> FindAggregateIds(
-        string firstEventType, Func<IDomainEvent, bool> firstEventMatch)
+        string firstEventType,
+        Func<IDomainEvent, bool> firstEventMatch
+    )
     {
         if (_eventStore is not IEventStoreEnumerator enumerator)
             return Array.Empty<Guid>();

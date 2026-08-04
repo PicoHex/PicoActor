@@ -20,12 +20,15 @@ public abstract class Actor : IActor, IAsyncDisposable
     // TaskCompletionSource (non-generic) not available on netstandard2.0.
     // RunContinuationsAsynchronously: the completing thread is the actor's own
     // loop — continuations must never run inline on it.
-    private readonly TaskCompletionSource<bool> _ready =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly TaskCompletionSource<bool> _initCompleted =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<bool> _ready = new(
+        TaskCreationOptions.RunContinuationsAsynchronously
+    );
+    private readonly TaskCompletionSource<bool> _initCompleted = new(
+        TaskCreationOptions.RunContinuationsAsynchronously
+    );
     private readonly Task _loopTask;
     private int _stopped;
+    private int _discarded;
 
     /// <summary>
     /// Framework-generated UUID v7 identity.
@@ -133,8 +136,16 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// </summary>
     internal Task InitCompletedTask => _initCompleted.Task;
 
-    /// <summary>Called by IActorSystem to deliver an envelope.</summary>
-    internal void Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
+    /// <summary>
+    /// 标记为丢弃副本(并发重建的失败方)。RunAsync 跳过 OnReadyAsync——
+    /// 丢弃副本不得执行业务逻辑(含 saga resume)或写事件流,只做资源清理。
+    /// </summary>
+    internal void MarkDiscarded() => Interlocked.Exchange(ref _discarded, 1);
+
+    internal bool IsDiscarded => _discarded != 0;
+
+    /// <summary>Called by IActorSystem to deliver an envelope. False = 投递失败(正在停止)。</summary>
+    internal bool Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
 
     private async Task RunAsync(CancellationToken ct)
     {
@@ -145,17 +156,20 @@ public abstract class Actor : IActor, IAsyncDisposable
         await _ready.Task.ConfigureAwait(false);
 
         // Hook: flush any events produced during construction (EventSourcedActor).
-        // Base implementation is a no-op.
-        try
+        // Base implementation is a no-op. Discarded copies skip it entirely.
+        if (!IsDiscarded)
         {
-            await OnReadyAsync().ConfigureAwait(false);
-            _initCompleted.TrySetResult(true);
+            try
+            {
+                await OnReadyAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _initCompleted.TrySetException(ex);
+                throw;
+            }
         }
-        catch (Exception ex)
-        {
-            _initCompleted.TrySetException(ex);
-            throw;
-        }
+        _initCompleted.TrySetResult(true);
 
         try
         {
