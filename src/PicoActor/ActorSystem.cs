@@ -314,12 +314,13 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <inheritdoc/>
-    public async ValueTask<TResult> ExecuteSaga<TSaga, TResult>(ICommand command)
+    public async ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
         where TSaga : SagaActor
     {
         var saga = await CreateAsync<TSaga>(command).ConfigureAwait(false);
-        return await AskAsync<TResult>(saga.Id, command).ConfigureAwait(false);
+        var result = await AskAsync<TResult>(saga.Id, command).ConfigureAwait(false);
+        return new SagaExecution<TResult>(saga.Id, result);
+        // SagaExecutionException 由 SagaActor.ProcessAsync fault TCS 后经 AskAsync 透传。
         // Saga auto-stops via SagaActor.ProcessAsync → ScheduleStop.
-        // Caller does NOT call StopAsync.
     }
 }

@@ -55,14 +55,15 @@ public interface IActorSystem
     /// support enumeration. Recovery-path API — not for hot paths.
     /// </summary>
     ValueTask<IReadOnlyList<Guid>> FindAggregateIds(
-        string firstEventType, Func<IDomainEvent, bool> firstEventMatch);
+        string firstEventType,
+        Func<IDomainEvent, bool> firstEventMatch
+    );
 
     /// <summary>
-    /// Create a <see cref="SagaActor"/>, send a command, wait for the result,
-    /// and let the saga auto-stop when it marks itself complete.
-    /// The caller does not need to call <see cref="StopAsync"/> — the saga
-    /// self-terminates via <see cref="SagaActor.MarkComplete"/>.
+    /// 创建 SagaActor,发送命令,等待结果,完成后 saga 自动停止。
+    /// 成功返回 SagaExecution(Id, Result);业务失败抛 SagaExecutionException(Id, Reason)。
+    /// 调用者不需要调用 StopAsync——saga 自终止。
     /// </summary>
-    ValueTask<TResult> ExecuteSaga<TSaga, TResult>(ICommand command)
+    ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
         where TSaga : SagaActor;
 }

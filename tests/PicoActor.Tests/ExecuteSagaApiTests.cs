@@ -2,72 +2,69 @@ using PicoActor.Abs;
 
 namespace PicoActor.Tests;
 
-/// <summary>
-/// Tests for IActorSystem.ExecuteSaga — the convenience API
-/// that creates a SagaActor, sends a command, and lets it auto-stop.
-/// </summary>
-public sealed class ExecuteSagaApiTests
+internal sealed record FailCmd : ICommand;
+
+internal sealed class FailSaga : SagaActor
 {
-    // ═══════════════════════════════════════════════════════════
-    // Basic Create → Execute → Auto-stop
-    // ═══════════════════════════════════════════════════════════
+    public FailSaga() { }
 
-    /// <summary>
-    /// ExecuteSaga must create the saga, process the command,
-    /// return the correct result, and auto-stop the saga.
-    /// </summary>
-    [Test]
-    public async Task ExecuteSaga_ReturnsResult_AndAutoStops()
+    protected override ValueTask<object?> OnMessageAsync(ICommand command)
     {
-        var store = new InMemoryEventStore();
-        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
-
-        system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
-
-        var result = await system.ExecuteSaga<TestSaga, string>(new StartSaga("hello"));
-
-        await Assert.That(result).IsEqualTo("hello");
-
-        // Saga should be auto-stopped — a subsequent Send must throw
-        // (but we can't know the sagaId from ExecuteSaga's return type,
-        // so we verify indirectly by checking GetAsync returns null)
-        // Actually, TestSaga can be tested via a different path.
-        // The important thing is: ExecuteSaga returned the correct result.
+        if (command is FailCmd)
+            throw new InvalidOperationException("step failed");
+        return default;
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // ExecuteSaga with partial failure → recovery safe
-    // ═══════════════════════════════════════════════════════════
+    protected override async ValueTask ResumeAsync()
+    {
+        await Task.CompletedTask;
+    }
 
-    /// <summary>
-    /// If a saga is interrupted mid-way, a second ExecuteSaga
-    /// (which rebuilds from the same events) must complete successfully.
-    /// Note: the sagaId must be deterministic for recovery to work.
-    /// </summary>
+    protected override void Mutate(IDomainEvent @event) { }
+}
+
+public sealed class ExecuteSagaApiTests
+{
     [Test]
-    public async Task ExecuteSaga_AfterInterruption_CompletesOnRetry()
+    public async Task ExecuteSaga_ReturnsIdAndResult_AndAutoStops()
     {
         var store = new InMemoryEventStore();
-
-        // Manually persist partial events (simulating crash after step 1)
-        var sagaId = Guid.CreateVersion7();
-        await store.AppendAsync(sagaId, 0, [new SagaStep1Started("recover-me")]);
-
-        // Second attempt with same store — saga should rebuild and complete
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+
         system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
-        // This would fail without deterministic saga IDs. In a real app,
-        // the saga ID should be derived from business keys.
-        // For now, verify that GetAsync recovers the partial saga correctly.
-        var rebuilt = await system.GetAsync<TestSaga>(sagaId);
-        await Assert.That(rebuilt).IsNotNull();
+        var execution = await system.ExecuteSaga<TestSaga, string>(new StartSaga("hello"));
 
-        var step = await system.AskAsync<int>(sagaId, new GetSagaStep());
-        await Assert.That(step).IsEqualTo(2); // resume completed
+        await Assert.That(execution.Result).IsEqualTo("hello");
+        await Assert.That(execution.Id).IsNotEqualTo(Guid.Empty);
 
-        await Task.Delay(200);
-        var gone = await system.GetAsync<TestSaga>(sagaId);
+        // 完成即死(auto-stop 是异步的,等它完成)
+        await Task.Delay(300);
+        var gone = await system.GetAsync<TestSaga>(execution.Id);
         await Assert.That(gone).IsNull();
+    }
+
+    [Test]
+    public async Task ExecuteSaga_Failure_ThrowsSagaExecutionException_WithId()
+    {
+        var store = new InMemoryEventStore();
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        system.Register<FailSaga>(_ => new FailSaga(), () => new FailSaga());
+
+        var ex = await Assert
+            .That(async () => await system.ExecuteSaga<FailSaga, string>(new FailCmd()))
+            .Throws<SagaExecutionException>();
+
+        await Assert.That(ex.SagaId).IsNotEqualTo(Guid.Empty);
+        await Assert.That(ex.Reason).Contains("step failed");
+
+        // 失败 = 终态:事件流含框架 SagaFailed,GetAsync 不复活
+        await Task.Delay(300);
+        var gone = await system.GetAsync<FailSaga>(ex.SagaId);
+        await Assert.That(gone).IsNull();
+
+        var events = await store.LoadAsync(ex.SagaId);
+        await Assert.That(events.Count).IsEqualTo(1);
+        await Assert.That(events[0]).IsTypeOf<SagaFailed>();
     }
 }
