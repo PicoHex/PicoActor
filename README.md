@@ -98,7 +98,7 @@ interfaces and base classes.
 | Type | Role |
 |------|------|
 | `IActor` | Base interface — provides `Id` (UUID v7) |
-| `IActorSystem` | Runtime contract — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
+| `IActorSystem` | Runtime contract — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Marker interface for commands |
 | `IDomainEvent` | Marker interface for domain events |
 | `IEventSourcedActor` | Optional interface — Version, ReplayEvents, CommitEvents |
@@ -106,7 +106,7 @@ interfaces and base classes.
 | `ICancelable` | Optional — CancelCurrentTurn for long-running operations |
 | `Actor` | Abstract base — mailbox, consumption loop, SignalReady, StopAsync |
 | `EventSourcedActor` | ES base — RaiseEvent, Mutate, Persist-then-Mutate pipeline |
-| `SagaActor` | Finite-life ES coordinator — auto-stop after MarkComplete, crash recovery via ResumeAsync |
+| `SagaActor` | Finite-life ES coordinator — framework terminal events (SagaCompleted/SagaFailed), auto-stop, explicit batch recovery via ResumeInterruptedSagasAsync |
 | `Envelope` | Internal — wraps ICommand with optional TaskCompletionSource |
 | `ActorOutputEvent` | Outbound notification — Type, Data, optional ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | Thrown by IEventStore on version mismatch |
@@ -175,12 +175,22 @@ public sealed class Counter : EventSourcedActor
 
 `SagaActor extends EventSourcedActor` — for cross-aggregate operations with a
 finite lifecycle. Unlike a regular EventSourcedActor whose mailbox runs
-forever, a SagaActor **auto-stops** after `MarkComplete()` is called.
+forever, a SagaActor **auto-stops** after the framework persists its terminal
+event.
+
+Terminal state is **framework-generated**: `MarkComplete(result)` appends a
+`SagaCompleted(result)` event to the same batch as your business events
+(atomic append — completion and persistence cannot diverge); an uncaught
+business exception appends `SagaFailed(reason)` (`"ExceptionType: message"`,
+truncated to 512 chars) and propagates `SagaExecutionException(Id, Reason)` to
+the caller. Subclasses never raise or handle these events — `Mutate` only sees
+business events.
 
 ```csharp
 public sealed class OrderSaga : SagaActor
 {
     private int _step;
+    private Guid _orderId;
 
     public OrderSaga() { }  // Parameterless — commands via mailbox
 
@@ -188,12 +198,11 @@ public sealed class OrderSaga : SagaActor
     {
         if (command is PlaceOrder cmd)
         {
-            if (_step < 1) RaiseEvent(new OrderPlaced(cmd.OrderId));
-            if (_step < 2) RaiseEvent(new PaymentReserved(cmd.OrderId));
-            if (_step < 3) { RaiseEvent(new OrderCompleted(cmd.OrderId)); MarkComplete(); }
-            return cmd.OrderId;
+            if (_step < 1) { RaiseEvent(new OrderPlaced(cmd.OrderId)); _orderId = cmd.OrderId; }
+            if (_step < 2) RaiseEvent(new PaymentReserved(_orderId));
+            MarkComplete(_orderId);  // framework appends SagaCompleted(_orderId) atomically
+            return _orderId;
         }
-        if (command is GetStep) return _step;
         return null;
     }
 
@@ -201,17 +210,17 @@ public sealed class OrderSaga : SagaActor
     {
         switch (@event)
         {
-            case OrderPlaced: _step = 1; break;
+            case OrderPlaced e: _step = 1; _orderId = e.OrderId; break;
             case PaymentReserved: _step = 2; break;
-            case OrderCompleted: MarkComplete(); break;
+            // SagaCompleted/SagaFailed are filtered by the framework — never here
         }
     }
 
     protected override async ValueTask ResumeAsync()
     {
-        // Re-drive from persisted state after crash recovery.
-        // Idempotent — _step guards skip completed steps.
-        await OnMessageAsync(new PlaceOrder(/* restored from state */));
+        // Re-evaluate after crash recovery. Idempotent — _step guards skip
+        // completed steps; may AskAsync external aggregates or no-op to wait.
+        await OnMessageAsync(new PlaceOrder(_orderId));
     }
 }
 ```
@@ -219,25 +228,60 @@ public sealed class OrderSaga : SagaActor
 **Lifecycle:**
 
 ```
-CreateAsync(cmd) → mailbox processes cmd → MarkComplete()
-→ ProcessAsync returns → ScheduleStop (fire-and-forget)
-→ Actor auto-stops, removed from registry
+CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
+→ framework appends SagaCompleted(result) in the same flush batch (atomic)
+→ ProcessAsync returns → auto-stop (fire-and-forget) → removed from registry
 ```
 
-**Crash recovery:** events replay via `Mutate` → `OnReadyAsync` detects
-`_completed == false && Version > 0` → calls `ResumeAsync` → re-executes
-from the interrupted step. Every step must be guarded by `_step` checks
-for idempotency.
+Business failure: `OnMessageAsync`/`ResumeAsync` throws → framework discards
+uncommitted business events, appends `SagaFailed(reason)`, auto-stops, and
+faults the Ask caller with `SagaExecutionException(Id, Reason)`. Infrastructure
+failures (store down) are **not** terminal — events roll back and the saga
+stays Running.
+
+**Crash recovery:** `GetAsync` replays events → the framework restores
+`Completed`/`Failed` from `SagaCompleted`/`SagaFailed` (terminal sagas stay
+dead — `GetAsync` returns null). Sagas without a terminal event get
+`ResumeAsync()` called, and if that reaches the terminal state the framework
+persists `SagaCompleted` in the same flush. Recovery is explicit pull, not
+background magic.
+
+**Explicit batch recovery:**
+
+```csharp
+var results = await system.ResumeInterruptedSagasAsync<OrderSaga>(
+    nameof(OrderPlaced));
+
+foreach (var r in results)   // SagaResumeResult(Id, Status, Reason?)
+{
+    // SagaResumeStatus.Completed | Failed (Reason) | Running
+}
+```
+
+`ResumeInterruptedSagasAsync<TSaga>(firstEventType, match?)` enumerates sagas
+by first-event type name, single-flights each through `GetAsync`, and returns
+the post-resume classification: `Completed` / `Failed` (with the framework
+recovered reason) / `Running` (still waiting for external input). Already
+terminal sagas are never resurrected; already-live sagas are classified
+in-place. Idempotent and safe to retry (single-flight per id); a store failure
+fails fast so the caller can retry the whole batch.
+
+**Process manager pattern:** the same base class covers process managers —
+external events are translated to commands by an application-level event
+handler (e.g. a PicoMediator subscriber), which then sends them to the saga's
+mailbox. Events never go directly into actors; the saga only sees commands.
 
 **Convenience API:**
 
 ```csharp
-var result = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId));
-// Saga auto-stops — no need to call StopAsync
+var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId));
+// SagaExecution<Guid>(Id, Result) — saga auto-stops, no StopAsync needed
 ```
 
-`ExecuteSaga<TSaga, TResult>(command)` does `CreateAsync` + `AskAsync` in
-one call. The saga self-terminates via `MarkComplete`.
+`ExecuteSaga<TSaga, TResult>(command)` does `CreateAsync` + `AskAsync` in one
+call. Returns `SagaExecution<TResult>(Id, Result)`; on business failure it
+throws `SagaExecutionException(SagaId, Reason)` so the caller always gets the
+saga id.
 
 ### Persist-then-Mutate Pipeline
 
@@ -355,7 +399,7 @@ public sealed class PostgresEventStore : IEventStore
 ## Use Cases
 
 - **Agentic AI systems** — each AI agent is an actor with conversation state
-- **Workflow orchestration** — SagaActor coordinates cross-aggregate operations with auto-stop and crash recovery
+- **Workflow orchestration** — SagaActor coordinates cross-aggregate operations with framework terminal events, auto-stop, and explicit batch recovery
 - **Game server state** — event-sourced actors for player/game state
 - **IoT device state** — in-memory actors with periodic snapshotting
 

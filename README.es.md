@@ -97,7 +97,7 @@ Target `netstandard2.0` para máxima compatibilidad.
 | Tipo | Rol |
 |------|------|
 | `IActor` | Interfaz base — proporciona `Id` (UUID v7) |
-| `IActorSystem` | Contrato de runtime — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
+| `IActorSystem` | Contrato de runtime — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Interfaz marcadora para comandos |
 | `IDomainEvent` | Interfaz marcadora para eventos de dominio |
 | `IEventSourcedActor` | Interfaz opcional — Version, ReplayEvents, CommitEvents |

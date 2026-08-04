@@ -97,7 +97,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | Тип | Роль |
 |------|------|
 | `IActor` | Базовый интерфейс — предоставляет `Id` (UUID v7) |
-| `IActorSystem` | Контракт времени выполнения — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
+| `IActorSystem` | Контракт времени выполнения — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Маркерный интерфейс для команд |
 | `IDomainEvent` | Маркерный интерфейс для доменных событий |
 | `IEventSourcedActor` | Опциональный — Version, ReplayEvents, CommitEvents |

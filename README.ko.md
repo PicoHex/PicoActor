@@ -96,7 +96,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 타입 | 역할 |
 |------|------|
 | `IActor` | 기본 인터페이스——`Id`(UUID v7) 제공 |
-| `IActorSystem` | 런타임 계약——Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
+| `IActorSystem` | 런타임 계약——Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | 명령용 마커 인터페이스 |
 | `IDomainEvent` | 도메인 이벤트용 마커 인터페이스 |
 | `IEventSourcedActor` | 선택적——Version, ReplayEvents, CommitEvents |

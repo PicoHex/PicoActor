@@ -97,7 +97,7 @@ Ziel `netstandard2.0` für maximale Kompatibilität.
 | Typ | Rolle |
 |------|------|
 | `IActor` | Basisschnittstelle — stellt `Id` (UUID v7) bereit |
-| `IActorSystem` | Laufzeitvertrag — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga |
+| `IActorSystem` | Laufzeitvertrag — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Markierungsschnittstelle für Befehle |
 | `IDomainEvent` | Markierungsschnittstelle für Domänenereignisse |
 | `IEventSourcedActor` | Optional — Version, ReplayEvents, CommitEvents |
