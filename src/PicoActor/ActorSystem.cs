@@ -11,6 +11,7 @@ public sealed class ActorSystem : IActorSystem
     private readonly ConcurrentDictionary<Type, Func<ICommand, object>> _factories = new();
     private readonly ConcurrentDictionary<Type, Func<object>> _rebuildFactories = new();
     private readonly IEventStore _eventStore;
+    private readonly IDomainEventPublisher? _publisher;
     private readonly ILogger? _logger;
 
     /// <summary>
@@ -22,6 +23,7 @@ public sealed class ActorSystem : IActorSystem
     {
         ArgumentNullException.ThrowIfNull(options);
         _eventStore = options.EventStore;
+        _publisher = options.DomainEventPublisher;
         _logger = options.Logger;
     }
 
@@ -64,7 +66,10 @@ public sealed class ActorSystem : IActorSystem
 
         // 3. Wire event store if this is an ES actor
         if (actor is EventSourcedActor es)
+        {
             es.EventStore = _eventStore;
+            es.Publisher = _publisher;
+        }
 
         // 4. Register in the system — a conflict means a duplicate-id bug; fail loudly.
         //    Discard: the creation constructor already staged events (RaiseEvent
@@ -141,6 +146,7 @@ public sealed class ActorSystem : IActorSystem
 
         var es = (IEventSourcedActor)actor;
         ((EventSourcedActor)actor).EventStore = _eventStore;
+        ((EventSourcedActor)actor).Publisher = _publisher;
         es.ReplayEvents(events);
 
         // Completed sagas stay dead — their JSONL files are audit trails only.

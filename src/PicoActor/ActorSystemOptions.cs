@@ -13,4 +13,8 @@ public sealed class ActorSystemOptions
 
     /// <summary>Optional logger. When set, lifecycle events are logged.</summary>
     public ILogger? Logger { get; set; }
+
+    /// <summary>Optional domain-event publisher. When set, events are published
+    /// after each successful persist+mutate. Default null (no publishing).</summary>
+    public IDomainEventPublisher? DomainEventPublisher { get; set; }
 }

@@ -26,6 +26,9 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// </summary>
     internal IEventStore? EventStore { get; set; }
 
+    /// <summary>Set by IActorSystem. Publish hook; default null (no publishing).</summary>
+    internal IDomainEventPublisher? Publisher { get; set; }
+
     /// <summary>Creation path. Chains to Actor(ICommand).</summary>
     protected EventSourcedActor(ICommand creationCommand)
         : base(creationCommand) { }
@@ -113,6 +116,25 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         // Persistence succeeded (or no store) — now safe to mutate state
         foreach (var e in _events)
             Mutate(e);
+
+        // Publish AFTER state is consistent. Replay never reaches this path
+        // (ReplayEvents bypasses FlushEventsAsync), so recovery is silent by
+        // construction. Failures are isolated — events are already durable.
+        if (Publisher is not null && _events.Count > 0)
+        {
+            var actorId = Id;
+            var version = Version;
+            var toPublish = _events.ToList();
+            try
+            {
+                await Publisher.PublishAsync(actorId, version, toPublish).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Contract: implementations must not throw; this is defense in
+                // depth only — never let a publisher failure break the actor.
+            }
+        }
 
         ClearEvents();
     }

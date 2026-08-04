@@ -115,7 +115,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `ActorSystem` | 預設 `IActorSystem`——ConcurrentDictionary 註冊表、工廠註冊、訊息路由、CancelTurn |
 | `InMemoryEventStore` | 無鎖記憶體儲存——基於 ConcurrentDictionary |
 | `ActorConfig` | 設定 POCO——可從 PicoCfg 綁定 |
-| `ActorSystemOptions` | 選項——必填 EventStore、選用 Logger;由 `ActorSystem` 建構函式使用 |
+| `ActorSystemOptions` | 選項——必填 EventStore、選用 Logger、選用 DomainEventPublisher;由 `ActorSystem` 建構函式使用 |
 | `PicoActorDiExtensions` | PicoDI 的 `AddPicoActor()` 擴充方法 |
 
 ### Actor（非 ES）
