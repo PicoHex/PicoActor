@@ -153,6 +153,39 @@ public sealed class ResumeInterruptedSagasTests
             )
             .Throws<IOException>();
     }
+
+    [Test]
+    public async Task Resume_BusinessFailure_ClassifiesFailed_WithReason()
+    {
+        // 中断 saga 的 ResumeAsync 抛业务异常 → 框架追加 SagaFailed(reason) → 归 Failed(reason),
+        // GetAsync 不复活(失败 = 终态)
+        var store = new InMemoryEventStore();
+        var sagaId = Guid.CreateVersion7();
+        await store.AppendAsync(sagaId, 0, [new ResumeBoomStep1()]);
+
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        system.Register<ResumeBoomSaga>(_ => new ResumeBoomSaga(), () => new ResumeBoomSaga());
+
+        var results = await system.ResumeInterruptedSagasAsync<ResumeBoomSaga>(
+            nameof(ResumeBoomStep1)
+        );
+
+        await Assert.That(results.Count).IsEqualTo(1);
+        await Assert.That(results[0].Id).IsEqualTo(sagaId);
+        await Assert.That(results[0].Status).IsEqualTo(SagaResumeStatus.Failed);
+        await Assert.That(results[0].Reason).Contains("resume boom");
+
+        // 事件流含框架 SagaFailed(reason)
+        var events = await store.LoadAsync(sagaId);
+        await Assert.That(events.Count).IsEqualTo(2);
+        await Assert.That(events[0]).IsTypeOf<ResumeBoomStep1>();
+        await Assert.That(events[1]).IsTypeOf<SagaFailed>();
+
+        // 失败 = 终态:auto-stop 后 GetAsync 不复活
+        await Task.Delay(300);
+        var gone = await system.GetAsync<ResumeBoomSaga>(sagaId);
+        await Assert.That(gone).IsNull();
+    }
 }
 
 /// <summary>resume 后仍等待外部命令的 saga(Running 分类验证)。</summary>
@@ -212,4 +245,21 @@ internal sealed class RunningSaga : SagaActor
                 break;
         }
     }
+}
+
+/// <summary>resume 时抛业务异常的 saga——恢复 API Failed 分类验证。</summary>
+internal sealed record ResumeBoomStep1 : IDomainEvent;
+
+internal sealed class ResumeBoomSaga : SagaActor
+{
+    public ResumeBoomSaga() { }
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command) => default;
+
+    protected override async ValueTask ResumeAsync()
+    {
+        throw new InvalidOperationException("resume boom");
+    }
+
+    protected override void Mutate(IDomainEvent @event) { }
 }
