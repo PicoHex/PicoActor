@@ -2,6 +2,35 @@ using PicoActor.Abs;
 
 namespace PicoActor.Tests;
 
+/// <summary>LoadAsync 对指定 id 抛异常的 store——模拟恢复期间 store 抖动(fail-fast 验证)。</summary>
+internal sealed class ThrowingLoadStore : IEventStore, IEventStoreEnumerator
+{
+    private readonly IEventStore _inner;
+    private readonly Guid _throwingId;
+
+    public ThrowingLoadStore(IEventStore inner, Guid throwingId)
+    {
+        _inner = inner;
+        _throwingId = throwingId;
+    }
+
+    public async ValueTask<ulong> AppendAsync(
+        Guid actorId,
+        ulong expectedVersion,
+        IReadOnlyList<IDomainEvent> events
+    ) => await _inner.AppendAsync(actorId, expectedVersion, events);
+
+    public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
+    {
+        if (actorId == _throwingId)
+            throw new IOException("store down");
+        return await _inner.LoadAsync(actorId);
+    }
+
+    public IReadOnlyList<Guid> ListAggregateIds(string firstEventType) =>
+        ((IEventStoreEnumerator)_inner).ListAggregateIds(firstEventType);
+}
+
 public sealed class ResumeInterruptedSagasTests
 {
     [Test]
@@ -101,6 +130,28 @@ public sealed class ResumeInterruptedSagasTests
         await Task.Delay(300);
         var gone = await system.GetAsync<RunningSaga>(sagaId);
         await Assert.That(gone).IsNull();
+    }
+
+    [Test]
+    public async Task Resume_BatchFailure_FailsFast()
+    {
+        // 两个中断 saga:第一个可恢复,第二个 LoadAsync 抛异常
+        // → fail-fast:整个调用抛异常(而非部分恢复后静默继续)
+        var inner = new InMemoryEventStore();
+        var id1 = Guid.CreateVersion7();
+        var id2 = Guid.CreateVersion7();
+        await inner.AppendAsync(id1, 0, [new SagaStep1Started("a")]);
+        await inner.AppendAsync(id2, 0, [new SagaStep1Started("b")]);
+
+        var store = new ThrowingLoadStore(inner, id2);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
+
+        await Assert
+            .That(async () =>
+                await system.ResumeInterruptedSagasAsync<TestSaga>(nameof(SagaStep1Started))
+            )
+            .Throws<IOException>();
     }
 }
 
