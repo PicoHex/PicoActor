@@ -91,9 +91,7 @@ internal sealed class ThreadProbeActor : ActorBase
     protected override ValueTask<object?> OnMessageAsync(ICommand command) =>
         command switch
         {
-            GetLoopThreadId => new ValueTask<object?>(
-                Environment.CurrentManagedThreadId
-            ),
+            GetLoopThreadId => new ValueTask<object?>(Environment.CurrentManagedThreadId),
             BlockLoopCmd b => Block(b.Gate),
             _ => default,
         };
@@ -117,4 +115,64 @@ internal sealed class ThrowingActor : ActorBase
 
     protected override ValueTask<object?> OnMessageAsync(ICommand command) =>
         throw new InvalidOperationException("boom in constructor");
+}
+
+// ═══════════════════════════════════════════════════════════
+// Saga test actor
+// ═══════════════════════════════════════════════════════════
+
+internal sealed record StartSaga(string Name) : ICommand;
+
+internal sealed record GetSagaStep : ICommand;
+
+internal sealed record SagaStep1Started(string Name) : IDomainEvent;
+
+internal sealed record SagaStep2Done : IDomainEvent;
+
+internal sealed class TestSaga : SagaActor
+{
+    private int _step;
+    private string _name = "";
+
+    public TestSaga() { }
+
+    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        if (command is StartSaga s)
+        {
+            if (_step < 1)
+            {
+                RaiseEvent(new SagaStep1Started(s.Name));
+                _name = s.Name;
+            }
+            if (_step < 2)
+                RaiseEvent(new SagaStep2Done());
+            // 无条件调用是刻意的:让“全部步骤已完成但无终态事件”的中断 saga 在 resume 时收敛为完成;
+            // 完成后的重复命令由终态守卫拒绝(不同批落盘,不会重复追加完成事件)
+            MarkComplete(_name);
+            return _name;
+        }
+        if (command is GetSagaStep)
+            return _step;
+        return null;
+    }
+
+    protected override async ValueTask ResumeAsync()
+    {
+        await OnMessageAsync(new StartSaga(_name));
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case SagaStep1Started e:
+                _step = 1;
+                _name = e.Name;
+                break;
+            case SagaStep2Done:
+                _step = 2;
+                break;
+        }
+    }
 }
