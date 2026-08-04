@@ -18,7 +18,9 @@ public sealed class ActorSystemCallerIdTests
     [Test]
     public async Task CreateAsync_DefaultOverload_StillGeneratesIds()
     {
-        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
+        var system = new ActorSystem(
+            new ActorSystemOptions { EventStore = new InMemoryEventStore() }
+        );
         RegisterSimple(system);
 
         var a = await system.CreateAsync<SimpleActor>(new NoOpCmd());
@@ -32,15 +34,15 @@ public sealed class ActorSystemCallerIdTests
     [Test]
     public async Task ActorSystem_WithNullOptions_ThrowsArgumentNullException()
     {
-        await Assert
-            .That(() => new ActorSystem(null!))
-            .Throws<ArgumentNullException>();
+        await Assert.That(() => new ActorSystem(null!)).Throws<ArgumentNullException>();
     }
 
     [Test]
     public async Task AskAsync_ContinuationDoesNotRunOnActorLoopThread()
     {
-        var system = new ActorSystem(new ActorSystemOptions { EventStore = new InMemoryEventStore() });
+        var system = new ActorSystem(
+            new ActorSystemOptions { EventStore = new InMemoryEventStore() }
+        );
         system.Register<ThreadProbeActor>(
             cmd =>
                 cmd switch

@@ -2,7 +2,11 @@ using PicoActor.Abs;
 
 namespace PicoActor.Tests;
 
-internal sealed record PublishRecord(Guid ActorId, ulong Version, IReadOnlyList<IDomainEvent> Events);
+internal sealed record PublishRecord(
+    Guid ActorId,
+    ulong Version,
+    IReadOnlyList<IDomainEvent> Events
+);
 
 internal sealed class RecordingPublisher : IDomainEventPublisher
 {
@@ -42,7 +46,11 @@ public sealed class ActorSystemPublisherTests
     {
         var publisher = new RecordingPublisher();
         var system = new ActorSystem(
-            new ActorSystemOptions { EventStore = new InMemoryEventStore(), DomainEventPublisher = publisher }
+            new ActorSystemOptions
+            {
+                EventStore = new InMemoryEventStore(),
+                DomainEventPublisher = publisher,
+            }
         );
         RegisterCounter(system);
 
@@ -59,7 +67,11 @@ public sealed class ActorSystemPublisherTests
     {
         var publisher = new RecordingPublisher();
         var system = new ActorSystem(
-            new ActorSystemOptions { EventStore = new InMemoryEventStore(), DomainEventPublisher = publisher }
+            new ActorSystemOptions
+            {
+                EventStore = new InMemoryEventStore(),
+                DomainEventPublisher = publisher,
+            }
         );
         RegisterCounter(system);
 
@@ -78,7 +90,11 @@ public sealed class ActorSystemPublisherTests
     {
         var publisher = new RecordingPublisher { ThrowOnPublish = true };
         var system = new ActorSystem(
-            new ActorSystemOptions { EventStore = new InMemoryEventStore(), DomainEventPublisher = publisher }
+            new ActorSystemOptions
+            {
+                EventStore = new InMemoryEventStore(),
+                DomainEventPublisher = publisher,
+            }
         );
         RegisterCounter(system);
 
@@ -146,6 +162,6 @@ public sealed class ActorSystemPublisherTests
         // Replayed event excluded — only resume-produced events
         await Assert.That(record.Events.Count).IsEqualTo(2);
         await Assert.That(record.Events[0]).IsTypeOf<SagaStep2Done>();
-        await Assert.That(record.Events[1]).IsTypeOf<SagaCompleted>();
+        await Assert.That(record.Events[1]).IsTypeOf<PicoActor.Abs.SagaCompleted>();
     }
 }

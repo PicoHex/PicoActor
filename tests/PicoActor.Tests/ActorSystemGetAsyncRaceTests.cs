@@ -4,46 +4,27 @@ namespace PicoActor.Tests;
 
 /// <summary>
 /// Regression tests for the GetAsync rebuild race: when two concurrent
-/// GetAsync calls rebuild the same id, the loser discards its duplicate and
-/// read the winner via the throwing indexer <c>_registry[id]</c>. If the winner
-/// was stopped during the loser's <c>await actor.StopAsync()</c>, that indexer
-/// threw KeyNotFoundException. The fix must read safely and not throw.
+/// GetAsync calls rebuild the same id, one wins the TryAdd; the loser is
+/// marked discarded and its duplicate is stopped WITHOUT running OnReadyAsync
+/// (no business logic, no saga resume, no event-stream writes).
 /// </summary>
 public sealed class ActorSystemGetAsyncRaceTests
 {
     internal sealed record RaceCreated : IDomainEvent;
 
-    /// <summary>
-    /// Actor whose OnReadyAsync blocks on a TCS when configured. The loser
-    /// duplicate's StopAsync runs OnReadyAsync, so blocking there deterministically
-    /// suspends the loser inside the race window.
-    /// </summary>
-    internal sealed class BlockingReadyActor : EventSourcedActor
+    /// <summary>OnReadyAsync 执行计数——单飞验证:只有胜出副本执行恢复路径。</summary>
+    internal sealed class CountingReadyActor : EventSourcedActor
     {
-        private readonly TaskCompletionSource<bool>? _loserArrived;
-        private readonly TaskCompletionSource<bool>? _proceed;
+        public static int ReadyCount;
 
-        public BlockingReadyActor(
-            TaskCompletionSource<bool>? loserArrived = null,
-            TaskCompletionSource<bool>? proceed = null
-        )
-            : base()
-        {
-            _loserArrived = loserArrived;
-            _proceed = proceed;
-        }
+        public CountingReadyActor() { }
 
         protected override ValueTask<object?> OnMessageAsync(ICommand command) => default;
 
         protected override async ValueTask OnReadyAsync()
         {
-            // Winner instance has _proceed == null → returns immediately.
-            // Loser instance blocks here (reached via StopAsync's SignalReady).
-            if (_proceed is not null)
-            {
-                _loserArrived?.TrySetResult(true);
-                await _proceed.Task.ConfigureAwait(false);
-            }
+            Interlocked.Increment(ref ReadyCount);
+            await base.OnReadyAsync();
         }
 
         protected override void Mutate(IDomainEvent @event) { }
@@ -56,7 +37,7 @@ public sealed class ActorSystemGetAsyncRaceTests
     ///   - first LoadAsync entry waits for the second to enter, then returns
     ///     (this caller rebuilds first and wins the TryAdd).
     ///   - second entry signals the first, then waits for the test to release it
-    ///     (this caller rebuilds second, loses TryAdd, and suspends in StopAsync).
+    ///     (this caller rebuilds second and loses TryAdd).
     /// </summary>
     private sealed class RaceEventStore : IEventStore
     {
@@ -97,69 +78,47 @@ public sealed class ActorSystemGetAsyncRaceTests
     }
 
     /// <summary>
-    /// Two concurrent GetAsync rebuilds: the loser's duplicate is stopped while
-    /// the winner is concurrently stopped. The loser must NOT throw
-    /// KeyNotFoundException when reading the (now-gone) winner.
+    /// 两个并发 GetAsync 重建同一 id:单飞语义——一个胜出重建,loser 标记 discarded
+    /// 跳过 OnReadyAsync(不执行恢复/重放路径逻辑)。两个调用都成功返回同一实例,
+    /// OnReadyAsync 只执行一次。
     /// </summary>
     [Test]
     [Timeout(15000)]
-    public async Task GetAsync_LoserWhenWinnerStoppedConcurrently_DoesNotThrow(
+    public async Task GetAsync_ConcurrentRebuilds_SingleFlight_NoDuplicateResume(
         CancellationToken cancellationToken = default
     )
     {
+        CountingReadyActor.ReadyCount = 0;
         var id = Guid.CreateVersion7();
         var events = (IReadOnlyList<IDomainEvent>)new IDomainEvent[] { new RaceCreated() };
         var bothEntered = new TaskCompletionSource<bool>();
         var releaseLoser = new TaskCompletionSource<bool>();
-        var loserArrived = new TaskCompletionSource<bool>();
-        var proceed = new TaskCompletionSource<bool>();
         var store = new RaceEventStore(events, bothEntered, releaseLoser);
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
-        var rebuildCount = 0;
-        system.Register<BlockingReadyActor>(
+        system.Register<CountingReadyActor>(
             _ => throw new InvalidOperationException(),
-            () =>
-            {
-                // First rebuild = winner (fast OnReadyAsync); second = loser (blocks).
-                var n = Interlocked.Increment(ref rebuildCount);
-                return n == 1
-                    ? new BlockingReadyActor()
-                    : new BlockingReadyActor(loserArrived, proceed);
-            }
+            () => new CountingReadyActor()
         );
 
-        // Start two concurrent GetAsync — both find id NOT in memory, both enter LoadAsync.
-        var taskA = Task.Run(() => system.GetAsync<BlockingReadyActor>(id).AsTask());
-        var taskB = Task.Run(() => system.GetAsync<BlockingReadyActor>(id).AsTask());
+        var taskA = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
+        var taskB = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
 
-        // The first to complete is the winner (it rebuilt first and won TryAdd).
-        var winnerTask = await Task.WhenAny(taskA, taskB);
-        var winner = await winnerTask;
-        var loserTask = ReferenceEquals(winnerTask, taskA) ? taskB : taskA;
+        // 先进入 LoadAsync(n==1) 的调用者等 bothEntered,后进入的(n==2)set bothEntered 并等
+        // releaseLoser——因此先完成 LoadAsync 的必然胜出 TryAdd(不依赖 Task.Run 调度顺序)。
+        var firstCompleted = await Task.WhenAny(taskA, taskB);
+        var winner = await firstCompleted;
+        var loserTask = ReferenceEquals(firstCompleted, taskA) ? taskB : taskA;
 
-        // Release the loser's LoadAsync → it rebuilds (instance 2), TryAdd FAILS
-        // (winner present), and StopAsync suspends inside OnReadyAsync.
+        // 释放 loser → 它重建后 TryAdd 失败 → 标记 discarded → 清理 → 返回胜出实例
         releaseLoser.TrySetResult(true);
-        await loserArrived.Task; // loser is now suspended in its duplicate's StopAsync
+        var loserResult = await loserTask;
 
-        // Remove the winner from the registry while the loser is suspended.
-        await system.StopAsync(winner!.Id);
+        await Assert.That(winner).IsNotNull();
+        await Assert.That(loserResult).IsNotNull();
 
-        // Release the loser → its StopAsync completes → it reads the registry.
-        proceed.TrySetResult(true);
-
-        // The loser must NOT throw KeyNotFoundException (the bug).
-        Exception? loserEx = null;
-        try
-        {
-            _ = await loserTask;
-        }
-        catch (Exception ex)
-        {
-            loserEx = ex;
-        }
-
-        await Assert.That(loserEx).IsNull();
+        // 单飞:只有胜出副本执行 OnReadyAsync(恢复/重放路径),loser 被 discarded 跳过
+        await Task.Delay(200);
+        await Assert.That(CountingReadyActor.ReadyCount).IsEqualTo(1);
     }
 }

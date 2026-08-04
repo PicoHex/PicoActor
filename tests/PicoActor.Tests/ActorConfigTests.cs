@@ -1,5 +1,5 @@
-using PicoDI;
 using PicoActor.Abs;
+using PicoDI;
 
 namespace PicoActor.Tests;
 
