@@ -56,6 +56,13 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     protected abstract void Mutate(IDomainEvent @event);
 
     /// <summary>
+    /// 框架事件处理钩子:返回 true 时事件由框架内部处理,不投递给子类 Mutate。
+    /// 基类默认 false(所有事件走 Mutate);SagaActor 覆写以处理 SagaCompleted/SagaFailed。
+    /// 在 FlushEventsAsync(持久化后)与 ReplayEvents(恢复)两条路径中同样生效。
+    /// </summary>
+    protected virtual bool TryHandleFrameworkEvent(IDomainEvent @event) => false;
+
+    /// <summary>
     /// Flush uncommitted events produced during construction.
     /// Called by the consumption loop after SignalReady, before the first mailbox message.
     /// </summary>
@@ -86,7 +93,7 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// Protected so subclasses (e.g., <see cref="SagaActor"/>) can flush after
     /// resuming from an interrupted step.
     /// </summary>
-    protected async ValueTask FlushEventsAsync()
+    protected virtual async ValueTask FlushEventsAsync()
     {
         if (_events.Count == 0)
             return;
@@ -115,7 +122,10 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
 
         // Persistence succeeded (or no store) — now safe to mutate state
         foreach (var e in _events)
-            Mutate(e);
+        {
+            if (!TryHandleFrameworkEvent(e))
+                Mutate(e);
+        }
 
         // Publish AFTER state is consistent. Replay never reaches this path
         // (ReplayEvents bypasses FlushEventsAsync), so recovery is silent by
@@ -150,7 +160,10 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         // Replay bypasses persistence — events are already in the store.
         // Mutate directly, then set Version.
         foreach (var e in events)
-            Mutate(e);
+        {
+            if (!TryHandleFrameworkEvent(e))
+                Mutate(e);
+        }
         Version = (ulong)events.Count;
     }
 }
