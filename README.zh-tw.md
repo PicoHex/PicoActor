@@ -46,7 +46,7 @@ AOT 相容的記憶體 Actor 框架，支援事件溯源（Event Sourcing）。�
 | 事件溯源 | ❌ Proto.Actor、Orleans 無內建 ES | ✅ Persist-then-Mutate，自動復原 |
 | 依賴體積 | ❌ Akka.NET（8+ 套件）、Orleans（10+ 套件） | ✅ 2 個套件，除 Channels 外零依賴 |
 | DI 整合 | ❌ 綁定 Microsoft.Extensions.DI | ✅ 原生 PicoDI，零反射解析 |
-| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 僅部分支援 | ✅ 抽象層目標 netstandard2.0 |
+| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 僅部分支援 | ❌ 僅 net10.0(PicoMediator 執行時要求 net10.0+) |
 | 學習曲線 | ❌ 陡峭——監督樹、叢集、遠端 | ✅ 極簡——Actor + Event + Mailbox |
 
 ---
@@ -89,7 +89,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — 核心抽象
 
-目標框架 `netstandard2.0`，最大相容性。
+目標框架 `net10.0`(PicoMediator 執行時與產生的 bridge 程式碼要求 net10.0+)。
 
 | 類型 | 角色 |
 |------|------|
@@ -294,7 +294,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **事件→命令翻譯是訂閱者(業務層)職責**——PicoActor 只發布;命令只能經 mailbox 進入 actor。
 - 發布發生在 **persist+mutate 之後**——發布失敗不影響 actor 狀態(事件已落盤)。
 - 恢復靜默:replay 不重複發布。
-- **類型化訂閱(base-type bridge)**:介面卡 `Publish<IDomainEvent>`;生成的 bridge 路由到具體類型訂閱者。基類型聲明的訂閱者(`ISubscriber<IDomainEvent>`)也能收到基類型發布,但收不到具體類型發布。框架事件(`SagaCompleted`/`SagaFailed`,定義於 netstandard2.0 的 `PicoActor.Abs`)在 2026.8.1 下無法類型化訂閱——bridge 生成程式碼需要 PicoMediator 主套件;框架事件請用統一 `ISubscriber<IDomainEvent>`(見缺陷報告)。
+- **類型化訂閱(base-type bridge)**:介面卡 `Publish<IDomainEvent>`;生成的 bridge 路由到具體類型訂閱者。基類型聲明的訂閱者(`ISubscriber<IDomainEvent>`)也能收到基類型發布,但收不到具體類型發布。框架事件(`SagaCompleted`/`SagaFailed`)與其他事件一樣可類型化訂閱(Abs 目標 net10.0)。
 - **自動接線任意 scope 安全**:PicoDI 2026.8.1(E1)起 Singleton 工廠使用容器內部根 scope——自動接線的 IMediator 存活至容器釋放。
 
 ---
@@ -306,7 +306,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | **克制 (Restraint / 節制)** | 無分散式共識，無監督樹——只有 Actor 和 Event。 |
 | **专注 (Focus / 專注)** | 每個 Actor 單執行緒。一次一條訊息。 |
 | **优雅 (Elegance / 優雅)** | Persist-then-Mutate：狀態僅在持久化後變更。復原自動完成。 |
-| **高效 (Efficiency / 效率)** | AOT 相容、零反射、`netstandard2.0` 抽象層。 |
+| **高效 (Efficiency / 效率)** | AOT 相容、零反射、`net10.0` 抽象層。 |
 
 ---
 
@@ -323,7 +323,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | 套件 | 目標框架 | 描述 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 執行時：`ActorSystem`、`InMemoryEventStore`、PicoDI 整合 |
 
 ---
@@ -335,7 +335,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | 純記憶體 | ✅ | ✅ | ✅ | ❌ |
 | AOT / 修剪 | ✅ | ❌ | ❌ | ❌ |
 | 事件溯源 | ✅ | ✅ | ❌ | ❌ |
-| netstandard2.0 抽象層 | ✅ | ✅ | ✅ | ❌ |
+| netstandard2.0 抽象層 | ❌ | ✅ | ✅ | ❌ |
 | PicoDI 整合 | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 分散式 / 叢集 | ❌ | ✅ | ✅ | ✅ |

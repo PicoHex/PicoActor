@@ -49,7 +49,7 @@ está sempre consistente com o fluxo de eventos.
 | Event Sourcing | ❌ Proto.Actor, Orleans sem ES integrado | ✅ Persistir-depois-Mutar, rollback automático |
 | Dependências | ❌ Akka.NET (8+ pacotes), Orleans (10+ pacotes) | ✅ 2 pacotes, zero dependências além de Channels |
 | Integração DI | ❌ Acoplado ao Microsoft.Extensions.DI | ✅ PicoDI nativo, resolução sem reflexão |
-| netstandard2.0 | ⚠️ Suporte parcial no Akka.NET / Proto.Actor | ✅ Abstrações target netstandard2.0 |
+| netstandard2.0 | ⚠️ Suporte parcial no Akka.NET / Proto.Actor | ❌ Apenas net10.0 (o runtime do PicoMediator exige net10.0+) |
 | Curva de aprendizado | ❌ Íngreme — árvores de supervisão, clustering, remoting | ✅ Mínima — Actor + Event + Mailbox |
 
 ---
@@ -92,7 +92,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — Abstrações Centrais
 
-Target `netstandard2.0` para máxima compatibilidade.
+Target `net10.0` (o runtime do PicoMediator e o código bridge gerado exigem net10.0+).
 
 | Tipo | Papel |
 |------|------|
@@ -300,7 +300,7 @@ Notas:
 - **A tradução evento→comando é responsabilidade do assinante (camada de negócios)** — o PicoActor apenas publica; comandos entram nos atores exclusivamente via mailbox.
 - A publicação ocorre **após persist+mutate** — uma falha de publicação não corrompe o estado do ator (os eventos já são duráveis).
 - A recuperação é silenciosa: o replay não republica.
-- **Assinatura tipada (bridge de tipo base)**: o adaptador publica `Publish<IDomainEvent>`; os bridges gerados roteiam para assinantes tipados concretos. Assinantes declarados no tipo base (`ISubscriber<IDomainEvent>`) também recebem publicações de tipo base, mas não as de tipos concretos. Eventos do framework (`SagaCompleted`/`SagaFailed`, definidos em `PicoActor.Abs` netstandard2.0) não podem ser assinados tipicamente em 2026.8.1 — o gerador de bridges requer o pacote principal do PicoMediator; use um `ISubscriber<IDomainEvent>` unificado para eles (ver relatório de defeitos).
+- **Assinatura tipada (bridge de tipo base)**: o adaptador publica `Publish<IDomainEvent>`; os bridges gerados roteiam para assinantes tipados concretos. Assinantes declarados no tipo base (`ISubscriber<IDomainEvent>`) também recebem publicações de tipo base, mas não as de tipos concretos. Eventos do framework (`SagaCompleted`/`SagaFailed`) podem ser assinados tipicamente como qualquer outro evento (Abs visa net10.0).
 - **Fiação automática segura de qualquer scope**: desde o PicoDI 2026.8.1 (E1), fábricas de singletons usam o scope raiz interno do contêiner — o IMediator auto-conectado vive até a liberação do contêiner.
 
 ---
@@ -312,7 +312,7 @@ Notas:
 | **克制 (Restraint / Moderação)** | Sem consenso distribuído, sem árvores de supervisão — apenas Atores e Eventos. |
 | **专注 (Focus / Foco)** | Single-threaded por Ator. Uma mensagem por vez. |
 | **优雅 (Elegance / Elegância)** | Persistir-depois-Mutar: estado muda apenas após persistência. Rollback automático. |
-| **高效 (Efficiency / Eficiência)** | Compatível com AOT, zero reflexão, abstrações `netstandard2.0`. |
+| **高效 (Efficiency / Eficiência)** | Compatível com AOT, zero reflexão, abstrações `net10.0`. |
 
 ---
 
@@ -329,7 +329,7 @@ Notas:
 
 | Pacote | Target | Descrição |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | Abstrações centrais: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Abstrações centrais: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `InMemoryEventStore`, integração PicoDI |
 
 ---
@@ -341,7 +341,7 @@ Notas:
 | Apenas em memória | ✅ | ✅ | ✅ | ❌ |
 | AOT / Trimming | ✅ | ❌ | ❌ | ❌ |
 | Event Sourcing | ✅ | ✅ | ❌ | ❌ |
-| Abstrações netstandard2.0 | ✅ | ✅ | ✅ | ❌ |
+| Abstrações netstandard2.0 | ❌ | ✅ | ✅ | ❌ |
 | Integração PicoDI | ✅ | ❌ | ❌ | ❌ |
 | Persistir-depois-Mutar | ✅ | ❌ | ❌ | ❌ |
 | Distribuído / Clustering | ❌ | ✅ | ✅ | ✅ |

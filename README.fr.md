@@ -49,7 +49,7 @@ toujours cohérent avec le flux d'événements.
 | Event Sourcing | ❌ Proto.Actor, Orleans sans ES intégré | ✅ Persist-then-Mutate, rollback automatique |
 | Taille des dépendances | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 2 packages, zéro dépendance au-delà de Channels |
 | Intégration DI | ❌ Couplé à Microsoft.Extensions.DI | ✅ PicoDI natif, résolution sans réflexion |
-| netstandard2.0 | ⚠️ Support partiel dans Akka.NET / Proto.Actor | ✅ Abstractions ciblant netstandard2.0 |
+| netstandard2.0 | ⚠️ Support partiel dans Akka.NET / Proto.Actor | ❌ net10.0 uniquement (le runtime PicoMediator exige net10.0+) |
 | Courbe d'apprentissage | ❌ Raide — arbres de supervision, clustering, remoting | ✅ Minimale — Actor + Event + Mailbox |
 
 ---
@@ -92,7 +92,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — Abstractions Fondamentales
 
-Cible `netstandard2.0` pour une compatibilité maximale.
+Cible `net10.0` (le runtime PicoMediator et le code bridge généré exigent net10.0+).
 
 | Type | Rôle |
 |------|------|
@@ -300,7 +300,7 @@ Notes :
 - **La traduction événement→commande est la responsabilité de l'abonné (couche métier)** — PicoActor ne fait que publier ; les commandes entrent dans les acteurs exclusivement via la mailbox.
 - La publication a lieu **après persist+mutate** — un échec de publication ne corrompt pas l'état de l'acteur (les événements sont déjà durables).
 - La récupération est silencieuse : le replay ne republie pas.
-- **Abonnement typé (bridge de type de base)** : l'adaptateur publie `Publish<IDomainEvent>` ; les bridges générés routent vers les abonnés typés concrets. Les abonnés déclarés au type de base (`ISubscriber<IDomainEvent>`) reçoivent aussi les publications de type de base, mais pas les publications de types concrets. Les événements du framework (`SagaCompleted`/`SagaFailed`, définis dans `PicoActor.Abs` netstandard2.0) ne peuvent pas être abonnés typiquement en 2026.8.1 — le générateur de bridges requiert le paquet principal PicoMediator ; utilisez un `ISubscriber<IDomainEvent>` unifié pour eux (voir le rapport de défauts).
+- **Abonnement typé (bridge de type de base)** : l'adaptateur publie `Publish<IDomainEvent>` ; les bridges générés routent vers les abonnés typés concrets. Les abonnés déclarés au type de base (`ISubscriber<IDomainEvent>`) reçoivent aussi les publications de type de base, mais pas les publications de types concrets. Les événements du framework (`SagaCompleted`/`SagaFailed`) sont abonnables typiquement comme tout autre événement (Abs cible net10.0).
 - **Câblage automatique sûr depuis tout scope** : depuis PicoDI 2026.8.1 (E1), les fabriques de singletons utilisent le scope racine interne du conteneur — l'IMediator auto-câblé vit jusqu'à la libération du conteneur.
 
 ---
@@ -312,7 +312,7 @@ Notes :
 | **克制 (Restraint / Retenue)** | Pas de consensus distribué, pas d'arbres de supervision — juste des Acteurs et des Événements. |
 | **专注 (Focus / Concentration)** | Mono-thread par Acteur. Un message à la fois. |
 | **优雅 (Elegance / Élégance)** | Persist-then-Mutate : l'état ne change qu'après persistance. Rollback automatique. |
-| **高效 (Efficiency / Efficacité)** | Compatible AOT, zéro réflexion, abstractions `netstandard2.0`. |
+| **高效 (Efficiency / Efficacité)** | Compatible AOT, zéro réflexion, abstractions `net10.0`. |
 
 ---
 
@@ -329,7 +329,7 @@ Notes :
 
 | Package | Cible | Description |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | Abstractions fondamentales : `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Abstractions fondamentales : `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Exécution : `ActorSystem`, `InMemoryEventStore`, intégration PicoDI |
 
 ---
@@ -341,7 +341,7 @@ Notes :
 | Mémoire uniquement | ✅ | ✅ | ✅ | ❌ |
 | AOT / Trimming | ✅ | ❌ | ❌ | ❌ |
 | Event Sourcing | ✅ | ✅ | ❌ | ❌ |
-| Abstractions netstandard2.0 | ✅ | ✅ | ✅ | ❌ |
+| Abstractions netstandard2.0 | ❌ | ✅ | ✅ | ❌ |
 | Intégration PicoDI | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Distribué / Clustering | ❌ | ✅ | ✅ | ✅ |

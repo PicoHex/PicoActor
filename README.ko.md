@@ -48,7 +48,7 @@ Event Sourcing Actor는 **Persist-then-Mutate**(영속화 후 변경)를 따릅�
 | Event Sourcing | ❌ Proto.Actor, Orleans는 ES 미내장 | ✅ Persist-then-Mutate, 자동 롤백 |
 | 의존성 크기 | ❌ Akka.NET(8+ 패키지), Orleans(10+ 패키지) | ✅ 패키지 2개, Channels 외 제로 의존성 |
 | DI 통합 | ❌ Microsoft.Extensions.DI에 종속 | ✅ 네이티브 PicoDI, 제로 리플렉션 |
-| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 일부만 지원 | ✅ 추상화 계층 netstandard2.0 타겟 |
+| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 일부만 지원 | ❌ net10.0 전용(PicoMediator 런타임은 net10.0+ 필요) |
 | 학습 곡선 | ❌ 가파름——감독 트리, 클러스터링, 리모팅 | ✅ 최소——Actor + Event + Mailbox |
 
 ---
@@ -91,7 +91,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — 핵심 추상화
 
-`netstandard2.0` 타겟, 최대 호환성.
+`net10.0` 타겟(PicoMediator 런타임과 생성된 bridge 코드는 net10.0+ 필요).
 
 | 타입 | 역할 |
 |------|------|
@@ -296,7 +296,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **이벤트→명령 변환은 구독자(비즈니스 계층)의 책임**——PicoActor는 발행만;명령은 mailbox로만 actor에 진입합니다.
 - 발행은 **persist+mutate 이후**——발행 실패는 actor 상태에 영향을 주지 않습니다(이벤트는 이미 영속화됨).
 - 복구는 조용함:replay는 재발행하지 않습니다.
-- **형식화 구독(base-type bridge)**:어댑터는 `Publish<IDomainEvent>`;생성된 bridge가 구체 형식 구독자로 라우팅합니다.베이스 형식 선언 구독자(`ISubscriber<IDomainEvent>`)도 베이스 형식 발행을 받지만 구체 형식 발행은 받지 못합니다.프레임워크 이벤트(`SagaCompleted`/`SagaFailed`, netstandard2.0의 `PicoActor.Abs`에 정의)는 2026.8.1에서 형식화 구독 불가——bridge 생성 코드는 PicoMediator 메인 패키지가 필요합니다;프레임워크 이벤트는 통합 `ISubscriber<IDomainEvent>`를 사용하세요(결함 보고서 참조).
+- **형식화 구독(base-type bridge)**:어댑터는 `Publish<IDomainEvent>`;생성된 bridge가 구체 형식 구독자로 라우팅합니다.베이스 형식 선언 구독자(`ISubscriber<IDomainEvent>`)도 베이스 형식 발행을 받지만 구체 형식 발행은 받지 못합니다.프레임워크 이벤트(`SagaCompleted`/`SagaFailed`)는 다른 이벤트와 마찬가지로 형식화 구독 가능(Abs는 net10.0 대상).
 - **자동 배선은 임의 scope에서 안전**:PicoDI 2026.8.1(E1)부터 Singleton 팩토리는 컨테이너 내부 루트 scope를 사용——자동 배선된 IMediator는 컨테이너 해제까지 생존합니다.
 
 ---
@@ -308,7 +308,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | **克制 (Restraint / 절제)** | 분산 합의 없음, 감독 트리 없음——Actor와 Event만. |
 | **专注 (Focus / 집중)** | Actor당 단일 스레드. 한 번에 하나의 메시지. |
 | **优雅 (Elegance / 우아함)** | Persist-then-Mutate: 영속화 후에만 상태 변경. 롤백 자동. |
-| **高效 (Efficiency / 효율)** | AOT 호환, 제로 리플렉션, `netstandard2.0` 추상화. |
+| **高效 (Efficiency / 효율)** | AOT 호환, 제로 리플렉션, `net10.0` 추상화. |
 
 ---
 
@@ -325,7 +325,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | 패키지 | 타겟 | 설명 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 런타임: `ActorSystem`, `InMemoryEventStore`, PicoDI 통합 |
 
 ---
@@ -337,7 +337,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | 인메모리 전용 | ✅ | ✅ | ✅ | ❌ |
 | AOT / 트리밍 | ✅ | ❌ | ❌ | ❌ |
 | Event Sourcing | ✅ | ✅ | ❌ | ❌ |
-| netstandard2.0 추상화 | ✅ | ✅ | ✅ | ❌ |
+| netstandard2.0 추상화 | ❌ | ✅ | ✅ | ❌ |
 | PicoDI 통합 | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 분산 / 클러스터링 | ❌ | ✅ | ✅ | ✅ |

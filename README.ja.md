@@ -48,7 +48,7 @@ Event Sourcing Actor は**Persist-then-Mutate**（永続化してから変更）
 | Event Sourcing | ❌ Proto.Actor、Orleans は ES 非内蔵 | ✅ Persist-then-Mutate、自動ロールバック |
 | 依存サイズ | ❌ Akka.NET（8+ パッケージ）、Orleans（10+ パッケージ） | ✅ 2 パッケージ、Channels 以外ゼロ依存 |
 | DI 統合 | ❌ Microsoft.Extensions.DI に依存 | ✅ ネイティブ PicoDI、ゼロリフレクション |
-| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor は一部のみ | ✅ 抽象層が netstandard2.0 ターゲット |
+| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor は一部のみ | ❌ net10.0 のみ(PicoMediator ランタイムは net10.0+ 必須) |
 | 学習曲線 | ❌ 急峻——監視ツリー、クラスタリング、リモート | ✅ 最小限——Actor + Event + Mailbox |
 
 ---
@@ -91,7 +91,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — コア抽象
 
-`netstandard2.0` ターゲット、最大互換性。
+`net10.0` ターゲット(PicoMediator ランタイムと生成 bridge コードは net10.0+ 必須)。
 
 | 型 | 役割 |
 |------|------|
@@ -296,7 +296,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
 - 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
 - リカバリは静粛:replay は再公開しません。
-- **型付きサブスクリプション(base-type bridge)**:アダプタは `Publish<IDomainEvent>`;生成された bridge が具象型サブスクライバへルーティングします。ベース型宣言のサブスクライバ(`ISubscriber<IDomainEvent>`)もベース型パブリッシュを受信しますが、具象型パブリッシュは受信しません。フレームワークイベント(`SagaCompleted`/`SagaFailed`、netstandard2.0 の `PicoActor.Abs` で定義)は 2026.8.1 では型付きサブスクリプション不可——bridge 生成コードは PicoMediator メインパッケージを必要とします;フレームワークイベントは統合 `ISubscriber<IDomainEvent>` を使用してください(欠陥レポート参照)。
+- **型付きサブスクリプション(base-type bridge)**:アダプタは `Publish<IDomainEvent>`;生成された bridge が具象型サブスクライバへルーティングします。ベース型宣言のサブスクライバ(`ISubscriber<IDomainEvent>`)もベース型パブリッシュを受信しますが、具象型パブリッシュは受信しません。フレームワークイベント(`SagaCompleted`/`SagaFailed`)は他のイベントと同様に型付きサブスクリプション可能(Abs は net10.0 ターゲット)。
 - **自動配線は任意の scope から安全**:PicoDI 2026.8.1(E1)以降、Singleton ファクトリはコンテナ内部ルート scope を使用——自動配線された IMediator はコンテナ破棄まで生存します。
 
 ---
@@ -308,7 +308,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | **克制 (Restraint / 抑制)** | 分散コンセンサスなし、監視ツリーなし——Actor と Event だけ。 |
 | **专注 (Focus / 集中)** | 各 Actor シングルスレッド。一度に一つのメッセージ。 |
 | **优雅 (Elegance / 優雅)** | Persist-then-Mutate：永続化成功後にのみ状態変更。ロールバックは自動。 |
-| **高效 (Efficiency / 効率)** | AOT 互換、ゼロリフレクション、`netstandard2.0` 抽象層。 |
+| **高效 (Efficiency / 効率)** | AOT 互換、ゼロリフレクション、`net10.0` 抽象層. |
 
 ---
 
@@ -325,7 +325,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | パッケージ | ターゲット | 説明 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | コア抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | コア抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | ランタイム：`ActorSystem`、`InMemoryEventStore`、PicoDI 統合 |
 
 ---
@@ -337,7 +337,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | インメモリのみ | ✅ | ✅ | ✅ | ❌ |
 | AOT / トリミング | ✅ | ❌ | ❌ | ❌ |
 | Event Sourcing | ✅ | ✅ | ❌ | ❌ |
-| netstandard2.0 抽象層 | ✅ | ✅ | ✅ | ❌ |
+| netstandard2.0 抽象層 | ❌ | ✅ | ✅ | ❌ |
 | PicoDI 統合 | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 分散 / クラスタリング | ❌ | ✅ | ✅ | ✅ |

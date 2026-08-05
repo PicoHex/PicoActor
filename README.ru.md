@@ -49,7 +49,7 @@ Event Sourcing Actors следуют **Persist-then-Mutate** (Сначала с�
 | Event Sourcing | ❌ Proto.Actor, Orleans без встроенного ES | ✅ Persist-then-Mutate, автоматический откат |
 | Размер зависимостей | ❌ Akka.NET (8+ пакетов), Orleans (10+ пакетов) | ✅ 2 пакета, ноль зависимостей кроме Channels |
 | Интеграция DI | ❌ Привязан к Microsoft.Extensions.DI | ✅ Нативный PicoDI, разрешение без рефлексии |
-| netstandard2.0 | ⚠️ Частичная поддержка в Akka.NET / Proto.Actor | ✅ Абстракции нацелены на netstandard2.0 |
+| netstandard2.0 | ⚠️ Частичная поддержка в Akka.NET / Proto.Actor | ❌ Только net10.0 (среда PicoMediator требует net10.0+) |
 | Кривая обучения | ❌ Крутая — деревья супервизии, кластеризация, remoting | ✅ Минимальная — Actor + Event + Mailbox |
 
 ---
@@ -92,7 +92,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — Основные абстракции
 
-Цель `netstandard2.0` для максимальной совместимости.
+Цель `net10.0` (среда PicoMediator и сгенерированный bridge-код требуют net10.0+).
 
 | Тип | Роль |
 |------|------|
@@ -300,7 +300,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **Перевод событие→команда — обязанность подписчика (бизнес-слоя)** — PicoActor только публикует; команды входят в акторы исключительно через mailbox.
 - Публикация происходит **после persist+mutate** — сбой публикации не повреждает состояние актора (события уже долговечны).
 - Восстановление молчаливо: replay не публикует повторно.
-- **Типизированная подписка (bridge базового типа)**: адаптер публикует `Publish<IDomainEvent>`; сгенерированные bridge маршрутизируют к конкретным типизированным подписчикам. Подписчики, объявленные на базовом типе (`ISubscriber<IDomainEvent>`), также получают публикации базового типа, но не получают публикации конкретных типов. События фреймворка (`SagaCompleted`/`SagaFailed`, определённые в `PicoActor.Abs` netstandard2.0) нельзя типизированно подписать в 2026.8.1 — генератор bridge требует основной пакет PicoMediator; используйте для них унифицированный `ISubscriber<IDomainEvent>` (см. отчёт о дефектах).
+- **Типизированная подписка (bridge базового типа)**: адаптер публикует `Publish<IDomainEvent>`; сгенерированные bridge маршрутизируют к конкретным типизированным подписчикам. Подписчики, объявленные на базовом типе (`ISubscriber<IDomainEvent>`), также получают публикации базового типа, но не получают публикации конкретных типов. События фреймворка (`SagaCompleted`/`SagaFailed`) можно типизированно подписать, как и любые другие события (Abs нацелен на net10.0).
 - **Автоподключение безопасно из любого scope**: с PicoDI 2026.8.1 (E1) фабрики синглтонов используют внутренний корневой scope контейнера — автоматически подключённый IMediator живёт до освобождения контейнера.
 
 ---
@@ -312,7 +312,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | **克制 (Restraint / Сдержанность)** | Без распределённого консенсуса, без деревьев супервизии — только Actors и Events. |
 | **专注 (Focus / Сосредоточенность)** | Однопоточность на актор. Одно сообщение за раз. |
 | **优雅 (Elegance / Элегантность)** | Persist-then-Mutate: состояние меняется только после сохранения. Откат автоматический. |
-| **高效 (Efficiency / Эффективность)** | AOT-совместимость, ноль рефлексии, абстракции `netstandard2.0`. |
+| **高效 (Efficiency / Эффективность)** | AOT-совместимость, ноль рефлексии, абстракции `net10.0`. |
 
 ---
 
@@ -329,7 +329,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | Пакет | Цель | Описание |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | Основные абстракции: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Основные абстракции: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Среда выполнения: `ActorSystem`, `InMemoryEventStore`, интеграция PicoDI |
 
 ---
@@ -341,7 +341,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | Только in-memory | ✅ | ✅ | ✅ | ❌ |
 | AOT / Trimming | ✅ | ❌ | ❌ | ❌ |
 | Event Sourcing | ✅ | ✅ | ❌ | ❌ |
-| Абстракции netstandard2.0 | ✅ | ✅ | ✅ | ❌ |
+| Абстракции netstandard2.0 | ❌ | ✅ | ✅ | ❌ |
 | Интеграция PicoDI | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Распределённый / Кластеризация | ❌ | ✅ | ✅ | ✅ |

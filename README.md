@@ -49,7 +49,7 @@ is always consistent with the event stream.
 | Event Sourcing | ❌ Proto.Actor, Orleans lack built-in ES | ✅ Persist-then-Mutate, automatic rollback |
 | Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 2 packages, zero dependency beyond Channels |
 | DI Integration | ❌ Tied to Microsoft.Extensions.DI | ✅ Native PicoDI, zero-reflection resolution |
-| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor only | ✅ Abstractions target netstandard2.0 |
+| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor only | ❌ net10.0-only (PicoMediator runtime requires net10.0+) |
 | Learning Curve | ❌ Steep — supervision trees, clustering, remoting | ✅ Minimal — actors + events + mailbox |
 
 ---
@@ -92,7 +92,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — Core Abstractions
 
-Targets `netstandard2.0` for maximum compatibility. Contains all
+Targets `net10.0` (PicoMediator runtime + generated bridge code require net10.0+). Contains all
 interfaces and base classes.
 
 | Type | Role |
@@ -425,10 +425,8 @@ Notes:
   `Publish<IDomainEvent>`; generated bridges route to concrete typed
   subscribers. Base-declared subscribers (`ISubscriber<IDomainEvent>`) also
   receive base-typed publishes, but do NOT receive concrete-typed publishes.
-  Framework events (`SagaCompleted`/`SagaFailed`, defined in netstandard2.0
-  `PicoActor.Abs`) cannot be typed-subscribed on 2026.8.1 — the bridge
-  generator requires the PicoMediator main package; use a unified
-  `ISubscriber<IDomainEvent>` for them (see defect report).
+  Framework events (`SagaCompleted`/`SagaFailed`) are typed-subscribable
+  like any other event (Abs targets net10.0).
 - **Auto-wiring is safe from any resolving scope**: since PicoDI 2026.8.1 (E1)
   singleton factories run against the container-internal root scope, the
   auto-wired IMediator lives until container disposal.
@@ -442,7 +440,7 @@ Notes:
 | **克制 (Restraint)** | No distributed consensus, no supervision trees — just actors and events. |
 | **专注 (Focus)** | Single-threaded per-actor. One message at a time. |
 | **优雅 (Elegance)** | Persist-then-Mutate: state changes only after persistence. Rollback is automatic. |
-| **高效 (Efficiency)** | AOT-compatible, zero reflection, `netstandard2.0` abstractions. |
+| **高效 (Efficiency)** | AOT-compatible, zero reflection, `net10.0` abstractions. |
 
 ---
 
@@ -459,7 +457,7 @@ Notes:
 
 | Package | Target | Description |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | Core abstractions: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Core abstractions: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `InMemoryEventStore`, PicoDI integration |
 
 ---
@@ -471,7 +469,7 @@ Notes:
 | In-memory only | ✅ | ✅ | ✅ | ❌ |
 | AOT / Trimming | ✅ | ❌ | ❌ | ❌ |
 | Event Sourcing | ✅ | ✅ | ❌ | ❌ |
-| netstandard2.0 abstractions | ✅ | ✅ | ✅ | ❌ |
+| netstandard2.0 abstractions | ❌ | ✅ | ✅ | ❌ |
 | PicoDI integration | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Distributed / Clustering | ❌ | ✅ | ✅ | ✅ |

@@ -46,7 +46,7 @@ AOT 兼容的内存 Actor 框架，支持事件溯源（Event Sourcing）。轻�
 | 事件溯源 | ❌ Proto.Actor、Orleans 无内置 ES | ✅ Persist-then-Mutate，自动回滚 |
 | 依赖体积 | ❌ Akka.NET（8+ 包）、Orleans（10+ 包） | ✅ 2 个包，除 Channels 外零依赖 |
 | DI 集成 | ❌ 绑定 Microsoft.Extensions.DI | ✅ 原生 PicoDI，零反射解析 |
-| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 仅部分支持 | ✅ 抽象层目标 netstandard2.0 |
+| netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 仅部分支持 | ❌ 仅 net10.0(PicoMediator 运行时要求 net10.0+) |
 | 学习曲线 | ❌ 陡峭——监督树、集群、远程 | ✅ 极简——Actor + Event + Mailbox |
 
 ---
@@ -89,7 +89,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 ### PicoActor.Abs — 核心抽象
 
-目标框架 `netstandard2.0`，最大兼容性。
+目标框架 `net10.0`(PicoMediator 运行时与生成的 bridge 代码要求 net10.0+)。
 
 | 类型 | 角色 |
 |------|------|
@@ -294,7 +294,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **事件→命令翻译是订阅者(业务层)职责**——PicoActor 只发布;命令只能经 mailbox 进入 actor。
 - 发布发生在 **persist+mutate 之后**——发布失败不影响 actor 状态(事件已落盘)。
 - 恢复静默:replay 不重复发布。
-- **类型化订阅(base-type bridge)**:适配器 `Publish<IDomainEvent>`;生成的 bridge 路由到具体类型订阅者。基类型声明的订阅者(`ISubscriber<IDomainEvent>`)也能收到基类型发布,但收不到具体类型发布。框架事件(`SagaCompleted`/`SagaFailed`,定义于 netstandard2.0 的 `PicoActor.Abs`)在 2026.8.1 下无法类型化订阅——bridge 生成代码需要 PicoMediator 主包;框架事件请用统一 `ISubscriber<IDomainEvent>`(见缺陷报告)。
+- **类型化订阅(base-type bridge)**:适配器 `Publish<IDomainEvent>`;生成的 bridge 路由到具体类型订阅者。基类型声明的订阅者(`ISubscriber<IDomainEvent>`)也能收到基类型发布,但收不到具体类型发布。框架事件(`SagaCompleted`/`SagaFailed`)与其他事件一样可类型化订阅(Abs 目标 net10.0)。
 - **自动接线任意 scope 安全**:PicoDI 2026.8.1(E1)起 Singleton 工厂使用容器内部根 scope——自动接线的 IMediator 存活至容器释放。
 
 ---
@@ -306,7 +306,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | **克制 (Restraint)** | 无分布式共识，无监督树——只有 Actor 和 Event。 |
 | **专注 (Focus)** | 每个 Actor 单线程。一次一条消息。 |
 | **优雅 (Elegance)** | Persist-then-Mutate：状态仅在持久化后变更。回滚自动完成。 |
-| **高效 (Efficiency)** | AOT 兼容、零反射、`netstandard2.0` 抽象层。 |
+| **高效 (Efficiency)** | AOT 兼容、零反射、`net10.0` 抽象层。 |
 
 ---
 
@@ -323,7 +323,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | 包 | 目标框架 | 描述 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `netstandard2.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 运行时：`ActorSystem`、`InMemoryEventStore`、PicoDI 集成 |
 
 ---
