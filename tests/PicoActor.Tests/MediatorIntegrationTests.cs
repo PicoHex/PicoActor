@@ -17,6 +17,29 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     }
 }
 
+/// <summary>类型化订阅(2026.8.1 bridge 路由)——代替统一 handler switch。</summary>
+internal sealed class MedIntegrationStartedSub : ISubscriber<MedIntegrationStarted>
+{
+    public static readonly List<MedIntegrationStarted> Received = [];
+
+    public ValueTask Handle(MedIntegrationStarted e, CancellationToken ct = default)
+    {
+        Received.Add(e);
+        return default;
+    }
+}
+
+internal sealed class SagaCompletedSub : ISubscriber<SagaCompleted>
+{
+    public static readonly List<SagaCompleted> Received = [];
+
+    public ValueTask Handle(SagaCompleted e, CancellationToken ct = default)
+    {
+        Received.Add(e);
+        return default;
+    }
+}
+
 internal sealed record MedIntegrationCmd(string Name) : ICommand;
 
 internal sealed record MedIntegrationStarted(string Name) : IDomainEvent;
@@ -154,5 +177,32 @@ public sealed class MediatorIntegrationTests
         await system.AskAsync<string>(sagaId, new MedIntegrationCmd("x"));
 
         await Assert.That(DomainEventRouter.Received.Count).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task EventOutflow_BasePublishBridge_ReachesTypedSubscribers()
+    {
+        MedIntegrationStartedSub.Received.Clear();
+        SagaCompletedSub.Received.Clear();
+
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoMediator();
+        container.AddPicoActor();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
+        system.Register<MedIntegrationSaga>(
+            _ => new MedIntegrationSaga(),
+            () => new MedIntegrationSaga()
+        );
+
+        // 适配器 Publish<IDomainEvent>(静态基类型)→ bridge → 具体类型订阅者
+        await system.ExecuteSaga<MedIntegrationSaga, string>(new MedIntegrationCmd("hello"));
+        await Task.Delay(300);
+
+        await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(SagaCompletedSub.Received[0].Result).IsEqualTo("hello");
     }
 }
