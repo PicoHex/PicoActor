@@ -148,18 +148,18 @@ public sealed class MediatorIntegrationTests
     }
 
     [Test]
-    public async Task AutoWiring_FirstResolutionFromChildScope_DisposedScope_KillsOutflow()
+    public async Task AutoWiring_ChildScopeFirstResolution_SurvivesDisposal()
     {
-        DomainEventRouter.Received.Clear();
+        MedIntegrationStartedSub.Received.Clear();
+        SagaCompletedSub.Received.Clear();
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
         container.AddPicoActor();
         container.Build();
 
-        // 已知限制(captive dependency):首次解析 ActorSystem 的 scope 决定 Mediator 绑定。
-        // 从短命 scope 首次解析 → dispose 后 Publish 抛 ObjectDisposedException →
-        // 适配器逐事件隔离吞掉 → 事件流出失效(文档化契约,非 bug——推荐从 root scope 解析)。
+        // E1(2026.8.1):Singleton 工厂使用容器内部根 scope——子 scope 首次解析也安全
+        // (2026.8.0 的 captive dependency 契约测试:dispose 后流出失效——已由 E1 修复)
         IActorSystem system;
         Guid sagaId;
         await using (var childScope = container.CreateScope())
@@ -173,10 +173,13 @@ public sealed class MediatorIntegrationTests
             sagaId = saga.Id;
         }
 
-        // childScope 已释放:actor 本身不受影响(事件仍落盘),但发布静默失效
+        // 子 scope 已释放:Mediator 绑定根 scope(存活)——事件流出不受影响
+        // (创建命令经参数less工厂不产生事件;AskAsync("x") 产生 1 个 MedIntegrationStarted)
         await system.AskAsync<string>(sagaId, new MedIntegrationCmd("x"));
+        await Task.Delay(300);
 
-        await Assert.That(DomainEventRouter.Received.Count).IsEqualTo(0);
+        await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(0); // 框架事件类型化订阅不可达(见缺陷报告)
     }
 
     [Test]
