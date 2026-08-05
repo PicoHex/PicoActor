@@ -278,13 +278,9 @@ public sealed class PostgresEventStore : IEventStore
 ```csharp
 // Abonné : declare-and-subscribe — enregistré automatiquement par le scan Gen, zéro câblage manuel.
 // La traduction événement→commande est la responsabilité de la couche métier.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* traduire en commande */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* traduire en commande */ return default; }
 }
 
 // Câblage : AddPicoMediator enregistre IMediator ; AddPicoActor() le détecte dans la
@@ -304,7 +300,8 @@ Notes :
 - **La traduction événement→commande est la responsabilité de l'abonné (couche métier)** — PicoActor ne fait que publier ; les commandes entrent dans les acteurs exclusivement via la mailbox.
 - La publication a lieu **après persist+mutate** — un échec de publication ne corrompt pas l'état de l'acteur (les événements sont déjà durables).
 - La récupération est silencieuse : le replay ne republie pas.
-- **Dépendance captive du câblage automatique** : `AddPicoActor()` lie l'IMediator au scope qui résout `IActorSystem` en premier — résolvez-le depuis un scope de niveau application (racine) ; une première résolution depuis un scope de requête éphémère stoppe la sortie d'événements après sa libération (l'adaptateur journalise un diagnostic).
+- **Abonnement typé (bridge de type de base)** : l'adaptateur publie `Publish<IDomainEvent>` ; les bridges générés routent vers les abonnés typés concrets. Les abonnés déclarés au type de base (`ISubscriber<IDomainEvent>`) reçoivent aussi les publications de type de base, mais pas les publications de types concrets. Les événements du framework (`SagaCompleted`/`SagaFailed`, définis dans `PicoActor.Abs` netstandard2.0) ne peuvent pas être abonnés typiquement en 2026.8.1 — le générateur de bridges requiert le paquet principal PicoMediator ; utilisez un `ISubscriber<IDomainEvent>` unifié pour eux (voir le rapport de défauts).
+- **Câblage automatique sûr depuis tout scope** : depuis PicoDI 2026.8.1 (E1), les fabriques de singletons utilisent le scope racine interne du conteneur — l'IMediator auto-câblé vit jusqu'à la libération du conteneur.
 
 ---
 

@@ -273,13 +273,9 @@ public sealed class PostgresEventStore : IEventStore
 
 ```csharp
 // 訂閱者:宣告即訂閱——Gen 掃描自動註冊,零手動註冊。事件→命令的翻譯是業務層職責。
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* 翻譯成命令 */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* 翻譯成命令 */ return default; }
 }
 
 // 接線:AddPicoMediator 註冊 IMediator;AddPicoActor() 在 ActorSystem 工廠內
@@ -298,7 +294,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **事件→命令翻譯是訂閱者(業務層)職責**——PicoActor 只發布;命令只能經 mailbox 進入 actor。
 - 發布發生在 **persist+mutate 之後**——發布失敗不影響 actor 狀態(事件已落盤)。
 - 恢復靜默:replay 不重複發布。
-- **自動接線 captive dependency**:`AddPicoActor()` 把 IMediator 綁定到首次解析 `IActorSystem` 的 scope——請從應用級(根)scope 解析;從短命請求 scope 首次解析會在其釋放後導致事件流出失效(介面卡會輸出診斷)。
+- **類型化訂閱(base-type bridge)**:介面卡 `Publish<IDomainEvent>`;生成的 bridge 路由到具體類型訂閱者。基類型聲明的訂閱者(`ISubscriber<IDomainEvent>`)也能收到基類型發布,但收不到具體類型發布。框架事件(`SagaCompleted`/`SagaFailed`,定義於 netstandard2.0 的 `PicoActor.Abs`)在 2026.8.1 下無法類型化訂閱——bridge 生成程式碼需要 PicoMediator 主套件;框架事件請用統一 `ISubscriber<IDomainEvent>`(見缺陷報告)。
+- **自動接線任意 scope 安全**:PicoDI 2026.8.1(E1)起 Singleton 工廠使用容器內部根 scope——自動接線的 IMediator 存活至容器釋放。
 
 ---
 

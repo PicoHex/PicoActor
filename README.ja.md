@@ -275,13 +275,9 @@ public sealed class PostgresEventStore : IEventStore
 
 ```csharp
 // サブスクライバ:宣言即登録——Gen スキャンで自動登録、手動登録ゼロ。イベント→コマンド変換は業務層の責務。
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* コマンドに変換 */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* コマンドに変換 */ return default; }
 }
 
 // 配線:AddPicoMediator が IMediator を登録;AddPicoActor() が ActorSystem ファクトリ内で
@@ -300,7 +296,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
 - 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
 - リカバリは静粛:replay は再公開しません。
-- **自動配線の captive dependency**:`AddPicoActor()` は IMediator を `IActorSystem` を最初に解決した scope にバインド——アプリケーションレベルの(ルート)scope から解決してください;短命のリクエスト scope から最初に解決すると、その scope 破棄後にイベント流出が機能しなくなります(アダプタが診断を出力)。
+- **型付きサブスクリプション(base-type bridge)**:アダプタは `Publish<IDomainEvent>`;生成された bridge が具象型サブスクライバへルーティングします。ベース型宣言のサブスクライバ(`ISubscriber<IDomainEvent>`)もベース型パブリッシュを受信しますが、具象型パブリッシュは受信しません。フレームワークイベント(`SagaCompleted`/`SagaFailed`、netstandard2.0 の `PicoActor.Abs` で定義)は 2026.8.1 では型付きサブスクリプション不可——bridge 生成コードは PicoMediator メインパッケージを必要とします;フレームワークイベントは統合 `ISubscriber<IDomainEvent>` を使用してください(欠陥レポート参照)。
+- **自動配線は任意の scope から安全**:PicoDI 2026.8.1(E1)以降、Singleton ファクトリはコンテナ内部ルート scope を使用——自動配線された IMediator はコンテナ破棄まで生存します。
 
 ---
 

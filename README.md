@@ -394,15 +394,12 @@ each event via `Publish<IDomainEvent>` (compile-time generic, AOT-safe) with
 per-event isolation — one failing subscriber never blocks later events.
 
 ```csharp
-// Subscriber: declare-and-subscribe — auto-registered by Gen scanning, zero manual wiring.
-// Event→command translation is the business layer's job.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+// Typed subscriber: declare-and-subscribe — auto-registered by Gen scanning.
+// The base-type publish bridge (2026.8.1+) routes IDomainEvent publishes to
+// concrete typed subscribers. Event→command translation is the business layer's job.
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* translate to a command */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* translate to a command */ return default; }
 }
 
 // Wiring: AddPicoMediator registers IMediator; AddPicoActor() auto-detects it in the
@@ -424,7 +421,17 @@ Notes:
 - Publish runs **after persist+mutate** — a failed publish never corrupts
   actor state; events are already durable.
 - Recovery is silent: replay never republishes events.
-- **Auto-wiring captive dependency**: `AddPicoActor()` binds the IMediator to the scope that first resolves `IActorSystem` — resolve it from an application-level (root) scope; first resolution from a short-lived request scope kills event outflow after that scope is disposed (the adapter logs a diagnostic).
+- **Typed subscription via base-type bridge**: the adapter publishes
+  `Publish<IDomainEvent>`; generated bridges route to concrete typed
+  subscribers. Base-declared subscribers (`ISubscriber<IDomainEvent>`) also
+  receive base-typed publishes, but do NOT receive concrete-typed publishes.
+  Framework events (`SagaCompleted`/`SagaFailed`, defined in netstandard2.0
+  `PicoActor.Abs`) cannot be typed-subscribed on 2026.8.1 — the bridge
+  generator requires the PicoMediator main package; use a unified
+  `ISubscriber<IDomainEvent>` for them (see defect report).
+- **Auto-wiring is safe from any resolving scope**: since PicoDI 2026.8.1 (E1)
+  singleton factories run against the container-internal root scope, the
+  auto-wired IMediator lives until container disposal.
 
 ---
 

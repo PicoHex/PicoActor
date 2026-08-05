@@ -278,13 +278,9 @@ public sealed class PostgresEventStore : IEventStore
 ```csharp
 // Suscriptor: declare-and-subscribe — registrado automáticamente por el escaneo de Gen, cero cableado manual.
 // La traducción evento→comando es responsabilidad de la capa de negocio.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* traducir a comando */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* traducir a comando */ return default; }
 }
 
 // Cableado: AddPicoMediator registra IMediator; AddPicoActor() lo detecta en la
@@ -304,7 +300,8 @@ Notas:
 - **La traducción evento→comando es responsabilidad del suscriptor (capa de negocio)** — PicoActor solo publica; los comandos entran a los actores exclusivamente vía mailbox.
 - La publicación ocurre **después de persist+mutate** — un fallo de publicación no corrompe el estado del actor (los eventos ya son duraderos).
 - La recuperación es silenciosa: el replay no vuelve a publicar.
-- **Dependencia cautiva del cableado automático**: `AddPicoActor()` vincula el IMediator al scope que primero resuelve `IActorSystem` — resuélvalo desde un scope de nivel de aplicación (raíz); la primera resolución desde un scope de solicitud de corta vida detiene la salida de eventos tras su eliminación (el adaptador registra un diagnóstico).
+- **Suscripción tipada (bridge de tipo base)**: el adaptador publica `Publish<IDomainEvent>`; los bridges generados enrutan a suscriptores tipados concretos. Los suscriptores declarados en el tipo base (`ISubscriber<IDomainEvent>`) también reciben publicaciones de tipo base, pero no las de tipos concretos. Los eventos del framework (`SagaCompleted`/`SagaFailed`, definidos en `PicoActor.Abs` netstandard2.0) no pueden suscribirse tipadamente en 2026.8.1 — el generador de bridges requiere el paquete principal de PicoMediator; use un `ISubscriber<IDomainEvent>` unificado para ellos (ver informe de defectos).
+- **Cableado automático seguro desde cualquier scope**: desde PicoDI 2026.8.1 (E1), las fábricas de singletons usan el scope raíz interno del contenedor — el IMediator auto-cableado vive hasta la liberación del contenedor.
 
 ---
 

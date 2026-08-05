@@ -275,13 +275,9 @@ public sealed class PostgresEventStore : IEventStore
 
 ```csharp
 // 구독자:선언 즉시 구독——Gen 스캔으로 자동 등록, 수동 등록 제로. 이벤트→명령 변환은 비즈니스 계층의 책임.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* 명령으로 변환 */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* 명령으로 변환 */ return default; }
 }
 
 // 배선:AddPicoMediator가 IMediator를 등록;AddPicoActor()가 ActorSystem 팩토리 내에서
@@ -300,7 +296,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **이벤트→명령 변환은 구독자(비즈니스 계층)의 책임**——PicoActor는 발행만;명령은 mailbox로만 actor에 진입합니다.
 - 발행은 **persist+mutate 이후**——발행 실패는 actor 상태에 영향을 주지 않습니다(이벤트는 이미 영속화됨).
 - 복구는 조용함:replay는 재발행하지 않습니다.
-- **자동 배선 captive dependency**:`AddPicoActor()`는 IMediator를 `IActorSystem`을 처음 해석한 scope에 바인딩——애플리케이션 수준(루트) scope에서 해석하세요;수명이 짧은 요청 scope에서 처음 해석하면 해당 scope 폐기 후 이벤트 유출이 중단됩니다(어댑터가 진단을 출력).
+- **형식화 구독(base-type bridge)**:어댑터는 `Publish<IDomainEvent>`;생성된 bridge가 구체 형식 구독자로 라우팅합니다.베이스 형식 선언 구독자(`ISubscriber<IDomainEvent>`)도 베이스 형식 발행을 받지만 구체 형식 발행은 받지 못합니다.프레임워크 이벤트(`SagaCompleted`/`SagaFailed`, netstandard2.0의 `PicoActor.Abs`에 정의)는 2026.8.1에서 형식화 구독 불가——bridge 생성 코드는 PicoMediator 메인 패키지가 필요합니다;프레임워크 이벤트는 통합 `ISubscriber<IDomainEvent>`를 사용하세요(결함 보고서 참조).
+- **자동 배선은 임의 scope에서 안전**:PicoDI 2026.8.1(E1)부터 Singleton 팩토리는 컨테이너 내부 루트 scope를 사용——자동 배선된 IMediator는 컨테이너 해제까지 생존합니다.
 
 ---
 

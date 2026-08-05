@@ -278,13 +278,9 @@ public sealed class PostgresEventStore : IEventStore
 ```csharp
 // Assinante: declare-and-subscribe — registrado automaticamente pela varredura Gen, zero fiação manual.
 // A tradução evento→comando é responsabilidade da camada de negócios.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* traduzir para comando */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* traduzir para comando */ return default; }
 }
 
 // Fiação: AddPicoMediator registra IMediator; AddPicoActor() o detecta na
@@ -304,7 +300,8 @@ Notas:
 - **A tradução evento→comando é responsabilidade do assinante (camada de negócios)** — o PicoActor apenas publica; comandos entram nos atores exclusivamente via mailbox.
 - A publicação ocorre **após persist+mutate** — uma falha de publicação não corrompe o estado do ator (os eventos já são duráveis).
 - A recuperação é silenciosa: o replay não republica.
-- **Dependência cativa da fiação automática**: `AddPicoActor()` vincula o IMediator ao scope que primeiro resolve `IActorSystem` — resolva-o de um scope de nível de aplicação (raiz); a primeira resolução de um scope de solicitação de curta duração interrompe a saída de eventos após sua liberação (o adaptador registra um diagnóstico).
+- **Assinatura tipada (bridge de tipo base)**: o adaptador publica `Publish<IDomainEvent>`; os bridges gerados roteiam para assinantes tipados concretos. Assinantes declarados no tipo base (`ISubscriber<IDomainEvent>`) também recebem publicações de tipo base, mas não as de tipos concretos. Eventos do framework (`SagaCompleted`/`SagaFailed`, definidos em `PicoActor.Abs` netstandard2.0) não podem ser assinados tipicamente em 2026.8.1 — o gerador de bridges requer o pacote principal do PicoMediator; use um `ISubscriber<IDomainEvent>` unificado para eles (ver relatório de defeitos).
+- **Fiação automática segura de qualquer scope**: desde o PicoDI 2026.8.1 (E1), fábricas de singletons usam o scope raiz interno do contêiner — o IMediator auto-conectado vive até a liberação do contêiner.
 
 ---
 

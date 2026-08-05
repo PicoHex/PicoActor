@@ -278,13 +278,9 @@ public sealed class PostgresEventStore : IEventStore
 ```csharp
 // Подписчик: declare-and-subscribe — автоматическая регистрация сканированием Gen, ноль ручной настройки.
 // Перевод событие→команда — обязанность бизнес-слоя.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* перевести в команду */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* перевести в команду */ return default; }
 }
 
 // Подключение: AddPicoMediator регистрирует IMediator; AddPicoActor() обнаруживает его в
@@ -304,7 +300,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **Перевод событие→команда — обязанность подписчика (бизнес-слоя)** — PicoActor только публикует; команды входят в акторы исключительно через mailbox.
 - Публикация происходит **после persist+mutate** — сбой публикации не повреждает состояние актора (события уже долговечны).
 - Восстановление молчаливо: replay не публикует повторно.
-- **Захваченная зависимость автоматического подключения**: `AddPicoActor()` привязывает IMediator к scope, который первым разрешает `IActorSystem` — разрешайте его из scope уровня приложения (корневого); первое разрешение из короткоживущего scope запроса останавливает вывод событий после его освобождения (адаптер выводит диагностику).
+- **Типизированная подписка (bridge базового типа)**: адаптер публикует `Publish<IDomainEvent>`; сгенерированные bridge маршрутизируют к конкретным типизированным подписчикам. Подписчики, объявленные на базовом типе (`ISubscriber<IDomainEvent>`), также получают публикации базового типа, но не получают публикации конкретных типов. События фреймворка (`SagaCompleted`/`SagaFailed`, определённые в `PicoActor.Abs` netstandard2.0) нельзя типизированно подписать в 2026.8.1 — генератор bridge требует основной пакет PicoMediator; используйте для них унифицированный `ISubscriber<IDomainEvent>` (см. отчёт о дефектах).
+- **Автоподключение безопасно из любого scope**: с PicoDI 2026.8.1 (E1) фабрики синглтонов используют внутренний корневой scope контейнера — автоматически подключённый IMediator живёт до освобождения контейнера.
 
 ---
 

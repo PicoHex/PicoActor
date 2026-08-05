@@ -278,13 +278,9 @@ public sealed class PostgresEventStore : IEventStore
 ```csharp
 // Subscriber: declare-and-subscribe — automatisch per Gen-Scan registriert, null manuelle Verdrahtung.
 // Die Event→Command-Übersetzung ist Aufgabe der Geschäftsebene.
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
 {
-    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
-    {
-        OrderPaid op => /* in Command übersetzen */,
-        _ => default,
-    };
+    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* in Command übersetzen */ return default; }
 }
 
 // Verdrahtung: AddPicoMediator registriert IMediator; AddPicoActor() erkennt ihn in der
@@ -304,7 +300,8 @@ Hinweise:
 - **Event→Command-Übersetzung ist Aufgabe des Subscribers (Geschäftsebene)** — PicoActor veröffentlicht nur; Commands gelangen ausschließlich über die Mailbox in Actor.
 - Veröffentlichung erfolgt **nach persist+mutate** — ein fehlgeschlagener Publish beeinträchtigt den Actor-Zustand nicht (Events sind bereits dauerhaft).
 - Wiederherstellung ist still: Replay veröffentlicht nicht erneut.
-- **Captive Dependency der Auto-Verdrahtung**: `AddPicoActor()` bindet den IMediator an den Scope, der `IActorSystem` zuerst auflöst — von einem Anwendungs-(Root-)Scope auflösen; erste Auflösung aus einem kurzlebigen Request-Scope stoppt den Event-Ausgang nach dessen Freigabe (der Adapter protokolliert eine Diagnose).
+- **Typisierte Subskription (Base-Type-Bridge)**: Der Adapter publiziert `Publish<IDomainEvent>`; generierte Bridges routen zu konkreten typisierten Subscribern. Basistyp-deklarierte Subscriber (`ISubscriber<IDomainEvent>`) empfangen ebenfalls Basistyp-Publishes, aber keine konkreten. Framework-Events (`SagaCompleted`/`SagaFailed`, definiert in netstandard2.0 `PicoActor.Abs`) können unter 2026.8.1 nicht typisiert abonniert werden — der Bridge-Generator benötigt das PicoMediator-Hauptpaket; nutzen Sie für sie einen einheitlichen `ISubscriber<IDomainEvent>` (siehe Fehlerbericht).
+- **Auto-Verdrahtung aus jedem Scope sicher**: Seit PicoDI 2026.8.1 (E1) laufen Singleton-Factories gegen den container-internen Root-Scope — der auto-verdrahtete IMediator lebt bis zur Container-Freigabe.
 
 ---
 
