@@ -133,7 +133,7 @@ public sealed class MarkCompleteGuardTests
                 )
                 .Throws<InvalidOperationException>();
 
-            await Assert.That(ex.Message).Contains("MarkComplete");
+            await Assert.That(ex!.Message).Contains("MarkComplete");
         }
         finally
         {

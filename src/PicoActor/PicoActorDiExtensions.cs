@@ -1,5 +1,7 @@
 namespace PicoActor;
 
+using PicoMediator.Abs;
+
 /// <summary>PicoDI registration extensions for PicoActor.</summary>
 public static class PicoActorDiExtensions
 {
@@ -64,6 +66,48 @@ public static class PicoActorDiExtensions
 
                 return new ActorSystem(
                     new ActorSystemOptions { EventStore = store, Logger = logger }
+                );
+            },
+            SvcLifetime.Singleton
+        );
+
+        return container;
+    }
+
+    /// <summary>
+    /// 注册 PicoActor 服务并接线 PicoMediator 事件流出。
+    /// ActorSystem 的 DomainEventPublisher = MediatorDomainEventPublisher(publisher)。
+    /// IEventStore 默认 InMemory;若容器已注册 IEventStore 则优先使用。
+    /// </summary>
+    public static ISvcContainer AddPicoActor(this ISvcContainer container, IPublisher publisher)
+    {
+        ArgumentNullException.ThrowIfNull(container);
+        ArgumentNullException.ThrowIfNull(publisher);
+
+        // 复用主路径(EventStore 默认 InMemory + ActorSystem 注册),再覆盖 publisher 接线
+        AddPicoActor(container, eventStore: null);
+
+        container.Register(
+            typeof(IActorSystem),
+            scope =>
+            {
+                var store = (IEventStore)scope.GetService(typeof(IEventStore));
+
+                // 可选:解析 PicoLog 日志
+                ILogger? logger = null;
+                if (
+                    scope.TryGetService(typeof(ILoggerFactory), out var factoryObj)
+                    && factoryObj is ILoggerFactory loggerFactory
+                )
+                    logger = loggerFactory.CreateLogger(nameof(ActorSystem));
+
+                return new ActorSystem(
+                    new ActorSystemOptions
+                    {
+                        EventStore = store,
+                        Logger = logger,
+                        DomainEventPublisher = new MediatorDomainEventPublisher(publisher, logger),
+                    }
                 );
             },
             SvcLifetime.Singleton
