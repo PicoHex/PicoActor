@@ -12,6 +12,7 @@
     <PackageReference Include="PicoMediator.Abs" />
     <PackageReference Include="PicoMediator" />
     <PackageReference Include="PicoMediator.DI" />
+    <PackageReference Include="PicoLog.Abs" />
     <ProjectReference Include="..\..\src\PicoActor\PicoActor.csproj" />
   </ItemGroup>
 </Project>

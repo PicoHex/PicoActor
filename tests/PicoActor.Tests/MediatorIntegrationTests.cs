@@ -58,6 +58,8 @@ internal sealed class MedIntegrationSaga : SagaActor
     }
 }
 
+/// <summary>共享静态 DomainEventRouter.Received——同类测试必须串行。</summary>
+[NotInParallel]
 public sealed class MediatorIntegrationTests
 {
     [Test]
@@ -90,5 +92,67 @@ public sealed class MediatorIntegrationTests
         await Assert.That(DomainEventRouter.Received[0]).IsTypeOf<MedIntegrationStarted>();
         await Assert.That(DomainEventRouter.Received[1]).IsTypeOf<SagaCompleted>();
         await Assert.That(((SagaCompleted)DomainEventRouter.Received[1]).Result).IsEqualTo("hello");
+    }
+
+    [Test]
+    public async Task AutoWiring_RootScopeBinding_SurvivesChildScopeDisposal()
+    {
+        DomainEventRouter.Received.Clear();
+
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoMediator();
+        container.AddPicoActor();
+        container.Build();
+
+        // 推荐用法:ActorSystem 从应用级(root)scope 首次解析 → Mediator 绑定该 scope
+        await using var rootScope = container.CreateScope();
+        var system = (IActorSystem)rootScope.GetService(typeof(IActorSystem));
+        system.Register<MedIntegrationSaga>(
+            _ => new MedIntegrationSaga(),
+            () => new MedIntegrationSaga()
+        );
+
+        // 短命子 scope 的创建与释放不影响 root 绑定的流出
+        await using (var childScope = container.CreateScope()) { }
+
+        var execution = await system.ExecuteSaga<MedIntegrationSaga, string>(
+            new MedIntegrationCmd("root")
+        );
+        await Task.Delay(300);
+
+        await Assert.That(DomainEventRouter.Received.Count).IsEqualTo(2);
+        await Assert.That(DomainEventRouter.Received[1]).IsTypeOf<SagaCompleted>();
+    }
+
+    [Test]
+    public async Task AutoWiring_FirstResolutionFromChildScope_DisposedScope_KillsOutflow()
+    {
+        DomainEventRouter.Received.Clear();
+
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoMediator();
+        container.AddPicoActor();
+        container.Build();
+
+        // 已知限制(captive dependency):首次解析 ActorSystem 的 scope 决定 Mediator 绑定。
+        // 从短命 scope 首次解析 → dispose 后 Publish 抛 ObjectDisposedException →
+        // 适配器逐事件隔离吞掉 → 事件流出失效(文档化契约,非 bug——推荐从 root scope 解析)。
+        IActorSystem system;
+        Guid sagaId;
+        await using (var childScope = container.CreateScope())
+        {
+            system = (IActorSystem)childScope.GetService(typeof(IActorSystem));
+            system.Register<MedIntegrationSaga>(
+                _ => new MedIntegrationSaga(),
+                () => new MedIntegrationSaga()
+            );
+            var saga = await system.CreateAsync<MedIntegrationSaga>(new MedIntegrationCmd("init"));
+            sagaId = saga.Id;
+        }
+
+        // childScope 已释放:actor 本身不受影响(事件仍落盘),但发布静默失效
+        await system.AskAsync<string>(sagaId, new MedIntegrationCmd("x"));
+
+        await Assert.That(DomainEventRouter.Received.Count).IsEqualTo(0);
     }
 }

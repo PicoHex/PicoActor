@@ -1,4 +1,5 @@
 using PicoActor.Abs;
+using PicoLog.Abs;
 using PicoMediator.Abs;
 
 namespace PicoActor.Tests;
@@ -21,6 +22,112 @@ internal sealed class RecordingMediatorPublisher : IPublisher
 
     public ValueTask PublishParallel<TEvent>(TEvent @event, CancellationToken ct = default)
         where TEvent : IEvent => throw new NotImplementedException();
+}
+
+/// <summary>Publish 抛 ObjectDisposedException——captive dependency 场景(Mediator 绑定已释放 scope)。</summary>
+internal sealed class ThrowingDisposedPublisher : IPublisher
+{
+    public ValueTask Publish<TEvent>(TEvent @event, CancellationToken ct = default)
+        where TEvent : IEvent => throw new ObjectDisposedException("SvcScope");
+
+    public ValueTask PublishParallel<TEvent>(TEvent @event, CancellationToken ct = default)
+        where TEvent : IEvent => throw new NotImplementedException();
+}
+
+/// <summary>记录日志消息的假 ILogger。</summary>
+internal sealed class RecordingLogSink : ILogger
+{
+    public List<string> Messages = [];
+
+    public IDisposable BeginScope<TState>(TState state)
+        where TState : notnull => NullScope.Instance;
+
+    public void Log(
+        LogLevel logLevel,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Messages.Add(message);
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Messages.Add(message);
+        return Task.CompletedTask;
+    }
+
+    public void Log(
+        LogLevel logLevel,
+        EventId eventId,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Messages.Add(message);
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        EventId eventId,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Messages.Add(message);
+        return Task.CompletedTask;
+    }
+
+    public void Log(
+        LogLevel logLevel,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Messages.Add(message.ToString());
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Messages.Add(message.ToString());
+        return Task.CompletedTask;
+    }
+
+    public void Log(
+        LogLevel logLevel,
+        EventId eventId,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Messages.Add(message.ToString());
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        EventId eventId,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Messages.Add(message.ToString());
+        return Task.CompletedTask;
+    }
+
+    private sealed class NullScope : IDisposable
+    {
+        public static readonly NullScope Instance = new();
+
+        public void Dispose() { }
+    }
 }
 
 internal sealed record PubEventA(int Value) : IDomainEvent;
@@ -72,5 +179,44 @@ public sealed class MediatorDomainEventPublisherTests
         await sut.PublishAsync(ActorId, 0, Array.Empty<IDomainEvent>());
 
         await Assert.That(publisher.Published.Count).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task PublishAsync_ObjectDisposedException_LogsRootScopeGuidance()
+    {
+        var publisher = new ThrowingDisposedPublisher();
+        var log = new RecordingLogSink();
+        var sut = new MediatorDomainEventPublisher(publisher, log);
+
+        await sut.PublishAsync(ActorId, 7, new IDomainEvent[] { new PubEventA(1) });
+
+        // 专门的诊断信息:提示 captive dependency(Mediator 绑定已释放的 scope)
+        await Assert.That(log.Messages.Count).IsEqualTo(1);
+        await Assert.That(log.Messages[0]).Contains("root scope");
+        await Assert.That(log.Messages[0]).Contains("PubEventA");
+    }
+
+    [Test]
+    public async Task PublishAsync_ObjectDisposedException_NoLogger_WritesDiagnostic()
+    {
+        var publisher = new ThrowingDisposedPublisher();
+        var sut = new MediatorDomainEventPublisher(publisher);
+
+        var original = Console.Error;
+        try
+        {
+            using var writer = new StringWriter();
+            Console.SetError(writer);
+
+            await sut.PublishAsync(ActorId, 7, new IDomainEvent[] { new PubEventA(1) });
+
+            var output = writer.ToString();
+            await Assert.That(output).Contains("[PicoActor]");
+            await Assert.That(output).Contains("root scope");
+        }
+        finally
+        {
+            Console.SetError(original);
+        }
     }
 }
