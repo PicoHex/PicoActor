@@ -174,7 +174,10 @@ public abstract class SagaActor : EventSourcedActor
     {
         var reason = MakeReason(ex);
 
-        // 丢弃未提交业务事件与 pending(现有原子性语义:失败时事件未落盘)
+        // 丢弃未提交业务事件与 pending(现有原子性语义:失败时事件未落盘)。
+        // Version 必须同步回滚——CommitEvents 只清列表,保留 Version 会让后续
+        // SagaFailed 的 flush 算出错误的 expectedVersion(ConcurrencyException)。
+        Version -= (ulong)((IEventSourcedActor)this).GetUncommittedEvents().Count;
         ((IEventSourcedActor)this).CommitEvents();
         _pendingComplete = false;
         _pendingResult = null;
