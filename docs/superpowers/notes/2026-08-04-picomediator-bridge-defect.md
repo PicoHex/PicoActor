@@ -2,6 +2,12 @@
 
 > 日期: 2026-08-04 · 版本: PicoMediator/PicoDI 2026.8.1 · 来源: PicoActor mediator-81 迁移
 > 两个缺陷均在 PicoActor 迁移中实证（测试 + 探针），已用 workaround 落地，需 PicoMediator 侧修复。
+>
+> **状态更新（2026-08-04 晚）**: 缺陷 1 已由 PicoActor 侧根治——`PicoActor.Abs` 目标框架改为 **net10.0**，
+> bridge 生成代码可编译，框架事件（`SagaCompleted`/`SagaFailed`）现已**可类型化订阅**（测试实证：
+> `SagaCompletedSub` 收到事件）；统一订阅者已迁移为类型化订阅并删除。缺陷 1 的 PicoMediator 侧修复
+>（注册设施下沉 Abs / 生成开关）仍建议推进，惠及其他 netstandard2.0 消费集。缺陷 2 在 2026.8.2
+> 已由 `85caefd`（deterministic configurator ordering）修复。
 
 ---
 
@@ -30,9 +36,14 @@ MediatorEventDispatchers.PicoActor_Abs.g.cs(107,6): error CS0246: The type or na
 - PicoActor 的具体后果：框架事件 `SagaCompleted`/`SagaFailed`（定义于 `PicoActor.Abs`）在 2026.8.1 下**无法被类型化订阅**（`ISubscriber<SagaCompleted>` 收不到——测试 canary 锁定为 0）
 - 框架事件只能走统一订阅者 `ISubscriber<IDomainEvent>`（base-key 直接订阅，见缺陷 2 契约）
 
-### Workaround（PicoActor 已落地）
+### Workaround（PicoActor 已落地——2026-08-04 晚由 TFM 变更根治，workaround 已移除）
 
-`PicoActor.Abs.csproj` 在 `CoreCompile` 前移除 Gen analyzer（NuGet analyzer 资产在构建期多个 target 注入，`ExcludeAssets` 无效，须 `BeforeTargets="CoreCompile"`）：
+**已移除**：`PicoActor.Abs` 改为目标 **net10.0**（`IsAotCompatible`/`IsTrimmable`），并增加
+`PicoMediator`（主包）与 `PicoDI.Abs` 引用（`PrivateAssets=all`，仅生成代码内部使用）——
+bridge 在 Abs 正常生成，框架事件可类型化订阅。原先的 `BeforeTargets="CoreCompile"`
+analyzer 移除 Target 已删除。
+
+保留此节供其他 netstandard2.0 消费集参考：
 
 ```xml
 <Target Name="ExcludePicoMediatorGenAnalyzer" BeforeTargets="CoreCompile">
