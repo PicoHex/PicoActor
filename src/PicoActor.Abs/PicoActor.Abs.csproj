@@ -20,6 +20,7 @@
   <ItemGroup>
     <PackageReference Include="System.Threading.Channels" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
+    <PackageReference Include="PicoMediator.Abs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />

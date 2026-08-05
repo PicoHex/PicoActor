@@ -15,6 +15,10 @@
     <PackageVersion Include="PicoDI" Version="2026.7.3" />
     <PackageVersion Include="PicoDI.Abs" Version="2026.7.3" />
     <PackageVersion Include="PicoLog.Abs" Version="2026.7.3" />
+    <PackageVersion Include="PicoMediator" Version="2026.8.0" />
+    <PackageVersion Include="PicoMediator.Abs" Version="2026.8.0" />
+    <PackageVersion Include="PicoMediator.DI" Version="2026.8.0" />
+    <PackageVersion Include="PicoMediator.Gen" Version="2026.8.0" />
     <PackageVersion Include="System.Threading.Channels" Version="10.0.9" />
     <PackageVersion Include="TUnit" Version="1.59.0" />
   </ItemGroup>
