@@ -2,6 +2,9 @@ using PicoActor.Abs;
 using PicoLog.Abs;
 using PicoMediator.Abs;
 
+// TUnit0055:ODE 诊断测试故意重定向 Console.Error(验证无 logger 时的 stderr 诊断),finally 已还原。
+#pragma warning disable TUnit0055
+
 namespace PicoActor.Tests;
 
 /// <summary>记录发布内容并可注入失败的假 IPublisher。</summary>
