@@ -284,19 +284,16 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     };
 }
 
-// 配線:Mediator → アダプタ → ActorSystem
+// 配線:AddPicoMediator が IMediator を登録;AddPicoActor() が ActorSystem ファクトリ内で
+// 自動検出してイベント流出を配線(遅延解決、Scoped ライフサイクルと互換)。
 var container = new SvcContainer();
-container.AddPicoMediator();                       // declare-and-subscribe
+container.AddPicoMediator();  // declare-and-subscribe:サブスクライバ自動登録
+container.AddPicoActor();     // MediatorDomainEventPublisher を自動配線
 container.Build();
 await using var scope = container.CreateScope();
-var mediator = (IMediator)scope.GetService(typeof(IMediator));
-var system = new ActorSystem(new ActorSystemOptions
-{
-    EventStore = new InMemoryEventStore(),
-    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-});
+var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
-// DI 便利オーバーロード:AddPicoActor(IPublisher) が同じ配線を登録(publisher インスタンスは Build() 前に必要)。
+// カスタム publisher の明示的配線:AddPicoActor(IPublisher)(インスタンスは Build() 前に必要)。
 ```
 
 注意:

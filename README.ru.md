@@ -287,20 +287,17 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     };
 }
 
-// Подключение: Mediator → адаптер → ActorSystem
+// Подключение: AddPicoMediator регистрирует IMediator; AddPicoActor() обнаруживает его в
+// фабрике ActorSystem и подключает вывод событий (лениво — совместимо со Scoped).
 var container = new SvcContainer();
-container.AddPicoMediator();                       // declare-and-subscribe
+container.AddPicoMediator();  // declare-and-subscribe: подписчики регистрируются автоматически
+container.AddPicoActor();     // автоматически подключает MediatorDomainEventPublisher
 container.Build();
 await using var scope = container.CreateScope();
-var mediator = (IMediator)scope.GetService(typeof(IMediator));
-var system = new ActorSystem(new ActorSystemOptions
-{
-    EventStore = new InMemoryEventStore(),
-    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-});
+var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
-// DI-перегрузка: AddPicoActor(IPublisher) регистрирует то же подключение
-// (экземпляр publisher должен быть доступен до Build()).
+// Явное подключение для пользовательских publisher: AddPicoActor(IPublisher)
+// (экземпляр должен быть доступен до Build()).
 ```
 
 Примечания:

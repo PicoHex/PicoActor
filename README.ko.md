@@ -284,19 +284,16 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     };
 }
 
-// 배선:Mediator → 어댑터 → ActorSystem
+// 배선:AddPicoMediator가 IMediator를 등록;AddPicoActor()가 ActorSystem 팩토리 내에서
+// 자동 감지하여 이벤트 유출을 배선(지연 해석, Scoped 수명 주기와 호환).
 var container = new SvcContainer();
-container.AddPicoMediator();                       // declare-and-subscribe
+container.AddPicoMediator();  // declare-and-subscribe:구독자 자동 등록
+container.AddPicoActor();     // MediatorDomainEventPublisher 자동 배선
 container.Build();
 await using var scope = container.CreateScope();
-var mediator = (IMediator)scope.GetService(typeof(IMediator));
-var system = new ActorSystem(new ActorSystemOptions
-{
-    EventStore = new InMemoryEventStore(),
-    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-});
+var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
-// DI 편의 오버로드:AddPicoActor(IPublisher)가 동일한 배선을 등록(publisher 인스턴스는 Build() 전에 필요).
+// 사용자 지정 publisher 명시적 배선:AddPicoActor(IPublisher)(인스턴스는 Build() 전에 필요).
 ```
 
 참고:

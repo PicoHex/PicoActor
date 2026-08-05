@@ -282,19 +282,16 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     };
 }
 
-// 接线:Mediator → 适配器 → ActorSystem
+// 接线:AddPicoMediator 注册 IMediator;AddPicoActor() 在 ActorSystem 工厂内
+// 自动检测并接线事件流出(延迟解析,与 Scoped 生命周期兼容)。
 var container = new SvcContainer();
-container.AddPicoMediator();                       // declare-and-subscribe
+container.AddPicoMediator();  // declare-and-subscribe:自动注册订阅者
+container.AddPicoActor();     // 自动接线 MediatorDomainEventPublisher
 container.Build();
 await using var scope = container.CreateScope();
-var mediator = (IMediator)scope.GetService(typeof(IMediator));
-var system = new ActorSystem(new ActorSystemOptions
-{
-    EventStore = new InMemoryEventStore(),
-    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-});
+var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
-// DI 便捷重载:AddPicoActor(IPublisher) 注册同一接线(publisher 实例需在 Build() 之前可用)。
+// 自定义 publisher 显式接线:AddPicoActor(IPublisher)(实例需在 Build() 前可用)。
 ```
 
 注意:

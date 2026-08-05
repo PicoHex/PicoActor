@@ -287,20 +287,17 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     };
 }
 
-// Cableado: Mediator → adaptador → ActorSystem
+// Cableado: AddPicoMediator registra IMediator; AddPicoActor() lo detecta en la
+// fábrica de ActorSystem y cablea la salida de eventos (perezoso — compatible con Scoped).
 var container = new SvcContainer();
-container.AddPicoMediator();                       // declare-and-subscribe
+container.AddPicoMediator();  // declare-and-subscribe: suscriptores registrados automáticamente
+container.AddPicoActor();     // cablea automáticamente MediatorDomainEventPublisher
 container.Build();
 await using var scope = container.CreateScope();
-var mediator = (IMediator)scope.GetService(typeof(IMediator));
-var system = new ActorSystem(new ActorSystemOptions
-{
-    EventStore = new InMemoryEventStore(),
-    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-});
+var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
-// Sobrecarga DI: AddPicoActor(IPublisher) registra el mismo cableado
-// (la instancia de publisher debe estar disponible antes de Build()).
+// Cableado explícito para publishers personalizados: AddPicoActor(IPublisher)
+// (la instancia debe estar disponible antes de Build()).
 ```
 
 Notas:

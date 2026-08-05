@@ -287,20 +287,17 @@ public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
     };
 }
 
-// Verdrahtung: Mediator → Adapter → ActorSystem
+// Verdrahtung: AddPicoMediator registriert IMediator; AddPicoActor() erkennt ihn in der
+// ActorSystem-Factory und verdrahtet den Event-Ausgang (lazy — Scoped-kompatibel).
 var container = new SvcContainer();
-container.AddPicoMediator();                       // declare-and-subscribe
+container.AddPicoMediator();  // declare-and-subscribe: Subscriber automatisch registriert
+container.AddPicoActor();     // MediatorDomainEventPublisher automatisch verdrahtet
 container.Build();
 await using var scope = container.CreateScope();
-var mediator = (IMediator)scope.GetService(typeof(IMediator));
-var system = new ActorSystem(new ActorSystemOptions
-{
-    EventStore = new InMemoryEventStore(),
-    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-});
+var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
-// DI-Kurzform: AddPicoActor(IPublisher) registriert dieselbe Verdrahtung
-// (publisher-Instanz muss vor Build() verfügbar sein).
+// Explizite Verdrahtung für eigene Publisher: AddPicoActor(IPublisher)
+// (die Instanz muss vor Build() verfügbar sein).
 ```
 
 Hinweise:
