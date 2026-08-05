@@ -269,6 +269,45 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### Salida de eventos (PicoMediator)
+
+`IDomainEvent : IEvent` — los eventos de dominio son notificaciones de primera clase para PicoMediator. Después de persist+mutate, el framework los publica mediante el hook `IDomainEventPublisher`; el replay (recuperación) no vuelve a publicar.
+
+`MediatorDomainEventPublisher` es el adaptador listo para usar: publica cada evento mediante `Publish<IDomainEvent>` (genérico en tiempo de compilación, seguro para AOT) con aislamiento por evento — un suscriptor que falla no bloquea los eventos posteriores.
+
+```csharp
+// Suscriptor: declare-and-subscribe — registrado automáticamente por el escaneo de Gen, cero cableado manual.
+// La traducción evento→comando es responsabilidad de la capa de negocio.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* traducir a comando */,
+        _ => default,
+    };
+}
+
+// Cableado: Mediator → adaptador → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// Sobrecarga DI: AddPicoActor(IPublisher) registra el mismo cableado
+// (la instancia de publisher debe estar disponible antes de Build()).
+```
+
+Notas:
+- **La traducción evento→comando es responsabilidad del suscriptor (capa de negocio)** — PicoActor solo publica; los comandos entran a los actores exclusivamente vía mailbox.
+- La publicación ocurre **después de persist+mutate** — un fallo de publicación no corrompe el estado del actor (los eventos ya son duraderos).
+- La recuperación es silenciosa: el replay no vuelve a publicar.
+
 ---
 
 ## Filosofía de Diseño (克制 / 专注 / 优雅 / 高效)

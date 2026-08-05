@@ -265,6 +265,43 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### 事件流出(PicoMediator)
+
+`IDomainEvent : IEvent`——领域事件是 PicoMediator 一等公民通知。persist+mutate 之后,框架经 `IDomainEventPublisher` 钩子发布;replay(恢复)不重复发布。
+
+`MediatorDomainEventPublisher` 是开箱即用适配器:逐事件 `Publish<IDomainEvent>`(编译期泛型,AOT 安全),逐事件隔离——单个订阅者失败不影响后续事件。
+
+```csharp
+// 订阅者:声明即订阅——Gen 扫描自动注册,零手动注册。事件→命令的翻译是业务层职责。
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* 翻译成命令 */,
+        _ => default,
+    };
+}
+
+// 接线:Mediator → 适配器 → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// DI 便捷重载:AddPicoActor(IPublisher) 注册同一接线(publisher 实例需在 Build() 之前可用)。
+```
+
+注意:
+- **事件→命令翻译是订阅者(业务层)职责**——PicoActor 只发布;命令只能经 mailbox 进入 actor。
+- 发布发生在 **persist+mutate 之后**——发布失败不影响 actor 状态(事件已落盘)。
+- 恢复静默:replay 不重复发布。
+
 ---
 
 ## 设计哲学（克制 / 专注 / 优雅 / 高效）

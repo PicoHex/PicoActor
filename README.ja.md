@@ -267,6 +267,43 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### イベント流出(PicoMediator)
+
+`IDomainEvent : IEvent`——ドメインイベントは PicoMediator の一級市民通知。persist+mutate の後、フレームワークは `IDomainEventPublisher` フック経由で公開します;replay(リカバリ)は再公開しません。
+
+`MediatorDomainEventPublisher` はすぐ使えるアダプタ:イベントごとに `Publish<IDomainEvent>`(コンパイル時ジェネリック、AOT 安全)、イベントごとに分離——1 つのサブスクライバ失敗が後続イベントを妨げません。
+
+```csharp
+// サブスクライバ:宣言即登録——Gen スキャンで自動登録、手動登録ゼロ。イベント→コマンド変換は業務層の責務。
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* コマンドに変換 */,
+        _ => default,
+    };
+}
+
+// 配線:Mediator → アダプタ → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// DI 便利オーバーロード:AddPicoActor(IPublisher) が同じ配線を登録(publisher インスタンスは Build() 前に必要)。
+```
+
+注意:
+- **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
+- 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
+- リカバリは静粛:replay は再公開しません。
+
 ---
 
 ## 設計哲学（克制 / 专注 / 优雅 / 高效）

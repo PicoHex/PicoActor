@@ -269,6 +269,45 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### Saída de eventos (PicoMediator)
+
+`IDomainEvent : IEvent` — eventos de domínio são notificações de primeira classe para o PicoMediator. Após persist+mutate, o framework os publica por meio do hook `IDomainEventPublisher`; o replay (recuperação) não republica.
+
+`MediatorDomainEventPublisher` é o adaptador pronto para uso: publica cada evento via `Publish<IDomainEvent>` (genérico em tempo de compilação, seguro para AOT) com isolamento por evento — um assinante com falha não bloqueia os eventos seguintes.
+
+```csharp
+// Assinante: declare-and-subscribe — registrado automaticamente pela varredura Gen, zero fiação manual.
+// A tradução evento→comando é responsabilidade da camada de negócios.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* traduzir para comando */,
+        _ => default,
+    };
+}
+
+// Fiação: Mediator → adaptador → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// Sobrecarga DI: AddPicoActor(IPublisher) registra a mesma fiação
+// (a instância do publisher deve estar disponível antes de Build()).
+```
+
+Notas:
+- **A tradução evento→comando é responsabilidade do assinante (camada de negócios)** — o PicoActor apenas publica; comandos entram nos atores exclusivamente via mailbox.
+- A publicação ocorre **após persist+mutate** — uma falha de publicação não corrompe o estado do ator (os eventos já são duráveis).
+- A recuperação é silenciosa: o replay não republica.
+
 ---
 
 ## Filosofia de Design (克制 / 专注 / 优雅 / 高效)

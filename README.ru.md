@@ -269,6 +269,45 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### Вывод событий (PicoMediator)
+
+`IDomainEvent : IEvent` — доменные события являются уведомлениями первого класса для PicoMediator. После persist+mutate фреймворк публикует их через хук `IDomainEventPublisher`; replay (восстановление) не публикует повторно.
+
+`MediatorDomainEventPublisher` — готовый адаптер: публикует каждое событие через `Publish<IDomainEvent>` (обобщение времени компиляции, безопасно для AOT) с изоляцией по событиям — сбой одного подписчика не блокирует последующие события.
+
+```csharp
+// Подписчик: declare-and-subscribe — автоматическая регистрация сканированием Gen, ноль ручной настройки.
+// Перевод событие→команда — обязанность бизнес-слоя.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* перевести в команду */,
+        _ => default,
+    };
+}
+
+// Подключение: Mediator → адаптер → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// DI-перегрузка: AddPicoActor(IPublisher) регистрирует то же подключение
+// (экземпляр publisher должен быть доступен до Build()).
+```
+
+Примечания:
+- **Перевод событие→команда — обязанность подписчика (бизнес-слоя)** — PicoActor только публикует; команды входят в акторы исключительно через mailbox.
+- Публикация происходит **после persist+mutate** — сбой публикации не повреждает состояние актора (события уже долговечны).
+- Восстановление молчаливо: replay не публикует повторно.
+
 ---
 
 ## Философия дизайна (克制 / 专注 / 优雅 / 高效)

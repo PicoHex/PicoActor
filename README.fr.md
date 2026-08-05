@@ -269,6 +269,45 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### Sortie d'événements (PicoMediator)
+
+`IDomainEvent : IEvent` — les événements de domaine sont des notifications de première classe pour PicoMediator. Après persist+mutate, le framework les publie via le hook `IDomainEventPublisher` ; le replay (récupération) ne republie pas.
+
+`MediatorDomainEventPublisher` est l'adaptateur prêt à l'emploi : publie chaque événement via `Publish<IDomainEvent>` (générique à la compilation, sûr pour AOT) avec isolation par événement — un abonné en échec ne bloque pas les événements suivants.
+
+```csharp
+// Abonné : declare-and-subscribe — enregistré automatiquement par le scan Gen, zéro câblage manuel.
+// La traduction événement→commande est la responsabilité de la couche métier.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* traduire en commande */,
+        _ => default,
+    };
+}
+
+// Câblage : Mediator → adaptateur → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// Surcharge DI : AddPicoActor(IPublisher) enregistre le même câblage
+// (l'instance publisher doit être disponible avant Build()).
+```
+
+Notes :
+- **La traduction événement→commande est la responsabilité de l'abonné (couche métier)** — PicoActor ne fait que publier ; les commandes entrent dans les acteurs exclusivement via la mailbox.
+- La publication a lieu **après persist+mutate** — un échec de publication ne corrompt pas l'état de l'acteur (les événements sont déjà durables).
+- La récupération est silencieuse : le replay ne republie pas.
+
 ---
 
 ## Philosophie de Conception (克制 / 专注 / 优雅 / 高效)

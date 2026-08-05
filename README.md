@@ -383,6 +383,51 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### Event Outflow (PicoMediator)
+
+`IDomainEvent : IEvent` — domain events are first-class PicoMediator
+notifications. After persist+mutate, the framework publishes them through the
+`IDomainEventPublisher` hook; replay (recovery) never republishes.
+
+`MediatorDomainEventPublisher` is the out-of-the-box adapter: it publishes
+each event via `Publish<IDomainEvent>` (compile-time generic, AOT-safe) with
+per-event isolation — one failing subscriber never blocks later events.
+
+```csharp
+// Subscriber: declare-and-subscribe — auto-registered by Gen scanning, zero manual wiring.
+// Event→command translation is the business layer's job.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* translate to a command */,
+        _ => default,
+    };
+}
+
+// 接线:Mediator → 适配器 → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// DI 便捷重载:AddPicoActor(IPublisher) 注册同一接线
+// (publisher 实例需在 Build() 之前可用)。
+```
+
+Notes:
+- **Event → command translation is the subscriber's (business-layer) job** —
+  PicoActor only publishes; commands enter actors exclusively via the mailbox.
+- Publish runs **after persist+mutate** — a failed publish never corrupts
+  actor state; events are already durable.
+- Recovery is silent: replay never republishes events.
+
 ---
 
 ## Design Philosophy (克制 / 专注 / 优雅 / 高效)

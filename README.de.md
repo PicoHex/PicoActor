@@ -269,6 +269,45 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### Event-Ausgang (PicoMediator)
+
+`IDomainEvent : IEvent` — Domain-Events sind First-Class-Benachrichtigungen für PicoMediator. Nach persist+mutate veröffentlicht das Framework sie über den `IDomainEventPublisher`-Hook; Replay (Wiederherstellung) veröffentlicht nicht erneut.
+
+`MediatorDomainEventPublisher` ist der Out-of-the-Box-Adapter: veröffentlicht jedes Event einzeln per `Publish<IDomainEvent>` (Compile-Time-Generic, AOT-sicher) mit Isolation pro Event — ein fehlgeschlagener Subscriber blockiert keine weiteren Events.
+
+```csharp
+// Subscriber: declare-and-subscribe — automatisch per Gen-Scan registriert, null manuelle Verdrahtung.
+// Die Event→Command-Übersetzung ist Aufgabe der Geschäftsebene.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* in Command übersetzen */,
+        _ => default,
+    };
+}
+
+// Verdrahtung: Mediator → Adapter → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// DI-Kurzform: AddPicoActor(IPublisher) registriert dieselbe Verdrahtung
+// (publisher-Instanz muss vor Build() verfügbar sein).
+```
+
+Hinweise:
+- **Event→Command-Übersetzung ist Aufgabe des Subscribers (Geschäftsebene)** — PicoActor veröffentlicht nur; Commands gelangen ausschließlich über die Mailbox in Actor.
+- Veröffentlichung erfolgt **nach persist+mutate** — ein fehlgeschlagener Publish beeinträchtigt den Actor-Zustand nicht (Events sind bereits dauerhaft).
+- Wiederherstellung ist still: Replay veröffentlicht nicht erneut.
+
 ---
 
 ## Designphilosophie (克制 / 专注 / 优雅 / 高效)

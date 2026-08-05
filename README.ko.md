@@ -267,6 +267,43 @@ public sealed class PostgresEventStore : IEventStore
 }
 ```
 
+### 이벤트 유출(PicoMediator)
+
+`IDomainEvent : IEvent`——도메인 이벤트는 PicoMediator 1급 알림입니다. persist+mutate 이후 프레임워크가 `IDomainEventPublisher` 훅으로 발행하며;replay(복구)는 재발행하지 않습니다.
+
+`MediatorDomainEventPublisher`는 즉시 사용 가능한 어댑터:이벤트별 `Publish<IDomainEvent>`(컴파일 타임 제네릭, AOT 안전), 이벤트별 격리——구독자 하나의 실패가 이후 이벤트를 막지 않습니다.
+
+```csharp
+// 구독자:선언 즉시 구독——Gen 스캔으로 자동 등록, 수동 등록 제로. 이벤트→명령 변환은 비즈니스 계층의 책임.
+public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
+{
+    public ValueTask Handle(IDomainEvent e, CancellationToken ct) => e switch
+    {
+        OrderPaid op => /* 명령으로 변환 */,
+        _ => default,
+    };
+}
+
+// 배선:Mediator → 어댑터 → ActorSystem
+var container = new SvcContainer();
+container.AddPicoMediator();                       // declare-and-subscribe
+container.Build();
+await using var scope = container.CreateScope();
+var mediator = (IMediator)scope.GetService(typeof(IMediator));
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = new InMemoryEventStore(),
+    DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
+});
+
+// DI 편의 오버로드:AddPicoActor(IPublisher)가 동일한 배선을 등록(publisher 인스턴스는 Build() 전에 필요).
+```
+
+참고:
+- **이벤트→명령 변환은 구독자(비즈니스 계층)의 책임**——PicoActor는 발행만;명령은 mailbox로만 actor에 진입합니다.
+- 발행은 **persist+mutate 이후**——발행 실패는 actor 상태에 영향을 주지 않습니다(이벤트는 이미 영속화됨).
+- 복구는 조용함:replay는 재발행하지 않습니다.
+
 ---
 
 ## 설계 철학 (克制 / 专注 / 优雅 / 高效)
