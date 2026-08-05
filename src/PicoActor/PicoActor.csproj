@@ -18,6 +18,7 @@
   <ItemGroup>
     <PackageReference Include="PicoDI.Abs" PrivateAssets="Build" />
     <PackageReference Include="PicoLog.Abs" PrivateAssets="Build" />
+    <PackageReference Include="PicoMediator.Abs" PrivateAssets="Build" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
     <ProjectReference Include="..\PicoActor.Abs\PicoActor.Abs.csproj" />
