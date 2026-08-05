@@ -1,14 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="PublishAot">
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <PublishAot>false</PublishAot>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
     <IsPackable>true</IsPackable>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageId>PicoActor.Abs</PackageId>
-    <Description>Core abstractions for PicoActor in-memory actor framework. Targets netstandard2.0 for maximum compatibility.</Description>
+    <Description>Core abstractions for PicoActor in-memory actor framework. Targets net10.0 (PicoMediator runtime + generated bridge code require net10.0+).</Description>
     <PackageTags>PicoHex;PicoNode;AOT;Actor;ActorModel;Abstractions</PackageTags>
   </PropertyGroup>
   <ItemGroup>
@@ -18,18 +20,13 @@
     <InternalsVisibleTo Include="PicoNode.Agent.Core.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="System.Threading.Channels" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
+    <!-- IDomainEvent : IEvent 的基接口需传递(消费者编译时解析) -->
     <PackageReference Include="PicoMediator.Abs" />
+    <!-- 2026.8.1+ 的 bridge 生成代码引用主包 MediatorAutoSubscriptionRegistry + PicoDI.Abs——
+         仅生成代码内部使用,不进入公共 API,PrivateAssets=all 保持包面干净 -->
+    <PackageReference Include="PicoMediator" PrivateAssets="all" />
+    <PackageReference Include="PicoDI.Abs" PrivateAssets="all" />
   </ItemGroup>
-  <Target Name="ExcludePicoMediatorGenAnalyzer" BeforeTargets="CoreCompile">
-    <!-- 2026.8.1 的 bridge 生成代码引用 PicoMediator 主包(net10.0)/PicoDI.Abs/ModuleInitializer——
-         netstandard2.0 零依赖的 Abs 无法编译生成产物。排除 analyzer 阻止 bridge 生成
-         (NuGet analyzer 资产在构建期多个 target 注入,须在 CoreCompile 前移除)。 -->
-    <ItemGroup>
-      <Analyzer Remove="@(Analyzer)" Condition="'%(Filename)' == 'PicoMediator.Gen'" />
-    </ItemGroup>
-  </Target>
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>

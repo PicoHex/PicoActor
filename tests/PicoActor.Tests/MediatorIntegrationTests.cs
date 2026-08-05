@@ -5,19 +5,7 @@ using PicoMediator.DI;
 
 namespace PicoActor.Tests;
 
-/// <summary>声明即订阅:Gen 扫描 → AddPicoMediator 自动注册。switch 翻译是业务层职责。</summary>
-public sealed class DomainEventRouter : ISubscriber<IDomainEvent>
-{
-    public static readonly List<IDomainEvent> Received = [];
-
-    public ValueTask Handle(IDomainEvent @event, CancellationToken ct = default)
-    {
-        Received.Add(@event);
-        return default;
-    }
-}
-
-/// <summary>类型化订阅(2026.8.1 bridge 路由)——代替统一 handler switch。</summary>
+/// <summary>类型化订阅(bridge 路由)——代替统一 handler switch。事件→命令的翻译是业务层职责。</summary>
 internal sealed class MedIntegrationStartedSub : ISubscriber<MedIntegrationStarted>
 {
     public static readonly List<MedIntegrationStarted> Received = [];
@@ -81,18 +69,18 @@ internal sealed class MedIntegrationSaga : SagaActor
     }
 }
 
-/// <summary>共享静态 DomainEventRouter.Received——同类测试必须串行。</summary>
+/// <summary>共享静态订阅者 Received 列表——同类测试必须串行。</summary>
 [NotInParallel]
 public sealed class MediatorIntegrationTests
 {
     [Test]
     public async Task EventOutflow_DeclareAndSubscribe_ReachesSubscriber()
     {
-        DomainEventRouter.Received.Clear();
+        MedIntegrationStartedSub.Received.Clear();
+        SagaCompletedSub.Received.Clear();
 
-        // 1. PicoDI 容器 + declare-and-subscribe(Gen 扫描 → DomainEventRouter 自动注册,零手动注册)
+        // 1. PicoDI 容器 + declare-and-subscribe(Gen 扫描 → 类型化订阅者自动注册,零手动注册)
         // 2. AddPicoActor() 在 ActorSystem 工厂内自动解析已注册的 IMediator 并接线事件流出
-        //    (与 Scoped 生命周期兼容——修复前只能手工构造适配器或传 Build 前实例)
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
         container.AddPicoActor();
@@ -105,22 +93,23 @@ public sealed class MediatorIntegrationTests
             () => new MedIntegrationSaga()
         );
 
-        // 3. saga 完成 → 事件流出 → 自动注册的订阅者收到
+        // 3. saga 完成 → 事件流出 → 类型化订阅者收到(业务事件 + 框架终态事件经 Abs bridge)
         var execution = await system.ExecuteSaga<MedIntegrationSaga, string>(
             new MedIntegrationCmd("hello")
         );
         await Task.Delay(300); // 发布异步(在 ProcessAsync 的 flush 内——ExecuteSaga 返回前已发布;Delay 防御性保留)
 
-        await Assert.That(DomainEventRouter.Received.Count).IsEqualTo(2);
-        await Assert.That(DomainEventRouter.Received[0]).IsTypeOf<MedIntegrationStarted>();
-        await Assert.That(DomainEventRouter.Received[1]).IsTypeOf<SagaCompleted>();
-        await Assert.That(((SagaCompleted)DomainEventRouter.Received[1]).Result).IsEqualTo("hello");
+        await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(MedIntegrationStartedSub.Received[0].Name).IsEqualTo("hello");
+        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(SagaCompletedSub.Received[0].Result).IsEqualTo("hello");
     }
 
     [Test]
     public async Task AutoWiring_RootScopeBinding_SurvivesChildScopeDisposal()
     {
-        DomainEventRouter.Received.Clear();
+        MedIntegrationStartedSub.Received.Clear();
+        SagaCompletedSub.Received.Clear();
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
@@ -143,8 +132,8 @@ public sealed class MediatorIntegrationTests
         );
         await Task.Delay(300);
 
-        await Assert.That(DomainEventRouter.Received.Count).IsEqualTo(2);
-        await Assert.That(DomainEventRouter.Received[1]).IsTypeOf<SagaCompleted>();
+        await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(1);
     }
 
     [Test]
@@ -179,7 +168,7 @@ public sealed class MediatorIntegrationTests
         await Task.Delay(300);
 
         await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
-        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(0); // 框架事件类型化订阅不可达(见缺陷报告)
+        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(1); // Abs 为 net10.0——框架事件可类型化订阅
     }
 
     [Test]
@@ -207,10 +196,8 @@ public sealed class MediatorIntegrationTests
         await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
         await Assert.That(MedIntegrationStartedSub.Received[0].Name).IsEqualTo("hello");
 
-        // 已知限制(2026.8.1):框架事件(SagaCompleted/SagaFailed 定义于 netstandard2.0 的
-        // PicoActor.Abs)无法被类型化订阅——bridge 生成代码引用 PicoMediator 主包(net10.0),
-        // Abs 无法生成 bridge(见 docs/superpowers/notes 缺陷报告)。
-        // 框架事件订阅走统一订阅者 ISubscriber<IDomainEvent>(既有测试覆盖)。
-        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(0);
+        // Abs 改为 net10.0 后生成自己的 bridge——框架事件可类型化订阅
+        await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(1);
+        await Assert.That(SagaCompletedSub.Received[0].Result).IsEqualTo("hello");
     }
 }

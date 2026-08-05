@@ -17,7 +17,6 @@ public abstract class Actor : IActor, IAsyncDisposable
     private readonly Channel<Envelope> _mailbox;
     private readonly CancellationTokenSource _cts = new();
 
-    // TaskCompletionSource (non-generic) not available on netstandard2.0.
     // RunContinuationsAsynchronously: the completing thread is the actor's own
     // loop — continuations must never run inline on it.
     private readonly TaskCompletionSource<bool> _ready = new(
