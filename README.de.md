@@ -304,6 +304,7 @@ Hinweise:
 - **Event→Command-Übersetzung ist Aufgabe des Subscribers (Geschäftsebene)** — PicoActor veröffentlicht nur; Commands gelangen ausschließlich über die Mailbox in Actor.
 - Veröffentlichung erfolgt **nach persist+mutate** — ein fehlgeschlagener Publish beeinträchtigt den Actor-Zustand nicht (Events sind bereits dauerhaft).
 - Wiederherstellung ist still: Replay veröffentlicht nicht erneut.
+- **Captive Dependency der Auto-Verdrahtung**: `AddPicoActor()` bindet den IMediator an den Scope, der `IActorSystem` zuerst auflöst — von einem Anwendungs-(Root-)Scope auflösen; erste Auflösung aus einem kurzlebigen Request-Scope stoppt den Event-Ausgang nach dessen Freigabe (der Adapter protokolliert eine Diagnose).
 
 ---
 

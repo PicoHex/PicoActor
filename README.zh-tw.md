@@ -298,6 +298,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **事件→命令翻譯是訂閱者(業務層)職責**——PicoActor 只發布;命令只能經 mailbox 進入 actor。
 - 發布發生在 **persist+mutate 之後**——發布失敗不影響 actor 狀態(事件已落盤)。
 - 恢復靜默:replay 不重複發布。
+- **自動接線 captive dependency**:`AddPicoActor()` 把 IMediator 綁定到首次解析 `IActorSystem` 的 scope——請從應用級(根)scope 解析;從短命請求 scope 首次解析會在其釋放後導致事件流出失效(介面卡會輸出診斷)。
 
 ---
 

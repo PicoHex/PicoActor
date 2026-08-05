@@ -304,6 +304,7 @@ Notes :
 - **La traduction événement→commande est la responsabilité de l'abonné (couche métier)** — PicoActor ne fait que publier ; les commandes entrent dans les acteurs exclusivement via la mailbox.
 - La publication a lieu **après persist+mutate** — un échec de publication ne corrompt pas l'état de l'acteur (les événements sont déjà durables).
 - La récupération est silencieuse : le replay ne republie pas.
+- **Dépendance captive du câblage automatique** : `AddPicoActor()` lie l'IMediator au scope qui résout `IActorSystem` en premier — résolvez-le depuis un scope de niveau application (racine) ; une première résolution depuis un scope de requête éphémère stoppe la sortie d'événements après sa libération (l'adaptateur journalise un diagnostic).
 
 ---
 

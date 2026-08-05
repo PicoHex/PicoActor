@@ -300,6 +300,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **이벤트→명령 변환은 구독자(비즈니스 계층)의 책임**——PicoActor는 발행만;명령은 mailbox로만 actor에 진입합니다.
 - 발행은 **persist+mutate 이후**——발행 실패는 actor 상태에 영향을 주지 않습니다(이벤트는 이미 영속화됨).
 - 복구는 조용함:replay는 재발행하지 않습니다.
+- **자동 배선 captive dependency**:`AddPicoActor()`는 IMediator를 `IActorSystem`을 처음 해석한 scope에 바인딩——애플리케이션 수준(루트) scope에서 해석하세요;수명이 짧은 요청 scope에서 처음 해석하면 해당 scope 폐기 후 이벤트 유출이 중단됩니다(어댑터가 진단을 출력).
 
 ---
 

@@ -300,6 +300,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
 - 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
 - リカバリは静粛:replay は再公開しません。
+- **自動配線の captive dependency**:`AddPicoActor()` は IMediator を `IActorSystem` を最初に解決した scope にバインド——アプリケーションレベルの(ルート)scope から解決してください;短命のリクエスト scope から最初に解決すると、その scope 破棄後にイベント流出が機能しなくなります(アダプタが診断を出力)。
 
 ---
 

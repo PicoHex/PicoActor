@@ -31,6 +31,15 @@ public static class PicoActorDiExtensions
     /// IEventStore defaults to <see cref="InMemoryEventStore"/>.
     /// If <see cref="ILoggerFactory"/> is registered in the container,
     /// a logger is automatically resolved and injected into <see cref="ActorSystem"/>.
+    /// If <see cref="IMediator"/> (e.g. via AddPicoMediator) is registered,
+    /// event outflow is auto-wired through <see cref="MediatorDomainEventPublisher"/>.
+    /// <para>
+    /// <b>Captive dependency note:</b> the auto-wired IMediator is bound to the
+    /// scope that first resolves <see cref="IActorSystem"/> (PicoDI singleton
+    /// factories run in the first resolving scope). Resolve IActorSystem from an
+    /// application-level (root) scope; first resolution from a short-lived
+    /// request scope kills event outflow after that scope is disposed.
+    /// </para>
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container)
     {
@@ -67,6 +76,8 @@ public static class PicoActorDiExtensions
                 // 事件流出:若容器已注册 IMediator(如 AddPicoMediator),自动接线
                 // MediatorDomainEventPublisher。工厂内延迟解析与 Scoped 生命周期兼容——
                 // 无需 Build 前的 publisher 实例(修复前 AddPicoActor(IPublisher) 无法用于真实 Mediator)。
+                // 注意 captive dependency:Mediator 绑定首次解析 ActorSystem 的 scope——
+                // 应从应用级(根)scope 解析(见 AddPicoActor() XML 文档)。
                 IDomainEventPublisher? domainEventPublisher = null;
                 if (
                     scope.TryGetService(typeof(IMediator), out var mediatorObj)

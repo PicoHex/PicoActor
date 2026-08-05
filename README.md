@@ -424,6 +424,7 @@ Notes:
 - Publish runs **after persist+mutate** — a failed publish never corrupts
   actor state; events are already durable.
 - Recovery is silent: replay never republishes events.
+- **Auto-wiring captive dependency**: `AddPicoActor()` binds the IMediator to the scope that first resolves `IActorSystem` — resolve it from an application-level (root) scope; first resolution from a short-lived request scope kills event outflow after that scope is disposed (the adapter logs a diagnostic).
 
 ---
 
