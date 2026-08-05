@@ -12,8 +12,8 @@
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.300" />
     <PackageVersion Include="PicoActor" Version="$(Version)" />
     <PackageVersion Include="PicoActor.Abs" Version="$(Version)" />
-    <PackageVersion Include="PicoDI" Version="2026.7.3" />
-    <PackageVersion Include="PicoDI.Abs" Version="2026.7.3" />
+    <PackageVersion Include="PicoDI" Version="2026.8.0" />
+    <PackageVersion Include="PicoDI.Abs" Version="2026.8.0" />
     <PackageVersion Include="PicoLog.Abs" Version="2026.7.3" />
     <PackageVersion Include="PicoMediator" Version="2026.8.0" />
     <PackageVersion Include="PicoMediator.Abs" Version="2026.8.0" />

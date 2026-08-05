@@ -10,6 +10,8 @@
     <PackageReference Include="TUnit" />
     <PackageReference Include="PicoDI" />
     <PackageReference Include="PicoMediator.Abs" />
+    <PackageReference Include="PicoMediator" />
+    <PackageReference Include="PicoMediator.DI" />
     <ProjectReference Include="..\..\src\PicoActor\PicoActor.csproj" />
   </ItemGroup>
 </Project>
