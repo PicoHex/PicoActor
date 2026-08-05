@@ -66,22 +66,15 @@ public sealed class MediatorIntegrationTests
         DomainEventRouter.Received.Clear();
 
         // 1. PicoDI 容器 + declare-and-subscribe(Gen 扫描 → DomainEventRouter 自动注册,零手动注册)
+        // 2. AddPicoActor() 在 ActorSystem 工厂内自动解析已注册的 IMediator 并接线事件流出
+        //    (与 Scoped 生命周期兼容——修复前只能手工构造适配器或传 Build 前实例)
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
 
-        // 2. 接线 Mediator 事件流出。IMediator 是 Scoped,只能在 Build 后从 scope 解析;
-        //    AddPicoActor(IPublisher) 需要实例先于 Build 存在——此处用与 DI 重载内部相同的
-        //    适配器路径手工接线(DI 重载本身由 PicoActorDiExtensionsTests 覆盖)。
-        var mediator = (IMediator)scope.GetService(typeof(IMediator));
-        var system = new ActorSystem(
-            new ActorSystemOptions
-            {
-                EventStore = new InMemoryEventStore(),
-                DomainEventPublisher = new MediatorDomainEventPublisher(mediator),
-            }
-        );
+        var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
         system.Register<MedIntegrationSaga>(
             _ => new MedIntegrationSaga(),
             () => new MedIntegrationSaga()

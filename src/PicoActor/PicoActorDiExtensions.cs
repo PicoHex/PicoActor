@@ -64,8 +64,23 @@ public static class PicoActorDiExtensions
                 )
                     logger = loggerFactory.CreateLogger(nameof(ActorSystem));
 
+                // 事件流出:若容器已注册 IMediator(如 AddPicoMediator),自动接线
+                // MediatorDomainEventPublisher。工厂内延迟解析与 Scoped 生命周期兼容——
+                // 无需 Build 前的 publisher 实例(修复前 AddPicoActor(IPublisher) 无法用于真实 Mediator)。
+                IDomainEventPublisher? domainEventPublisher = null;
+                if (
+                    scope.TryGetService(typeof(IMediator), out var mediatorObj)
+                    && mediatorObj is IMediator mediator
+                )
+                    domainEventPublisher = new MediatorDomainEventPublisher(mediator, logger);
+
                 return new ActorSystem(
-                    new ActorSystemOptions { EventStore = store, Logger = logger }
+                    new ActorSystemOptions
+                    {
+                        EventStore = store,
+                        Logger = logger,
+                        DomainEventPublisher = domainEventPublisher,
+                    }
                 );
             },
             SvcLifetime.Singleton
