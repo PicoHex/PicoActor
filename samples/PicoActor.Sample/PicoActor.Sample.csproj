@@ -10,8 +10,10 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\PicoActor\PicoActor.csproj" />
-    <!-- 2026.8.1 bridge 生成代码需要(PicoMediator 主包的 MediatorAutoSubscriptionRegistry + PicoDI.Abs) -->
+    <!-- Bridge-generated code needs the PicoMediator runtime (MediatorAutoSubscriptionRegistry) + PicoDI -->
     <PackageReference Include="PicoMediator" />
+    <PackageReference Include="PicoMediator.DI" />
+    <PackageReference Include="PicoDI" />
     <PackageReference Include="PicoDI.Abs" />
   </ItemGroup>
 </Project>

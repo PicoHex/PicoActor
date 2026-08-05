@@ -88,7 +88,63 @@ Console.WriteLine(
     $"[GetAsync]    Re-rebuild (ES actor persists) → {(reRebuilt is not null ? "found" : "null (non-ES)")}"
 );
 
+// ═══════════════════════════════════════════════════════════════
+// Saga + Event Outflow (PicoMediator) — order payment process manager
+// ═══════════════════════════════════════════════════════════════
+
+await SagaAndEventOutflowDemoAsync();
+
 Console.WriteLine("\n=== Done ===");
+
+// ═══════════════════════════════════════════════════════════════
+// Demo: saga + event outflow via PicoMediator (process-manager pattern)
+// ═══════════════════════════════════════════════════════════════
+
+static async Task SagaAndEventOutflowDemoAsync()
+{
+    Console.WriteLine("\n=== Saga + Event Outflow (PicoMediator) ===\n");
+
+    // 1. DI wiring: AddPicoMediator (declare-and-subscribe scans OrderPaidSub/SagaCompletedSub)
+    //    + AddPicoActor (auto-wires the registered IMediator for event outflow)
+    var store = new InMemoryEventStore();
+    var container = new SvcContainer(autoConfigureFromGenerator: false);
+    container.AddPicoMediator();
+    container.AddPicoActor(store);
+    container.Build();
+    await using var scope = container.CreateScope();
+
+    var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
+    SampleContext.System = system;
+    system.Register<OrderActor>(_ => new OrderActor(), () => new OrderActor());
+    system.Register<PaymentSaga>(_ => new PaymentSaga(), () => new PaymentSaga());
+
+    var order = await system.CreateAsync<OrderActor>(new CreateOrder(Guid.NewGuid()));
+
+    // 2. ExecuteSaga starts the process manager (step 1: order registered for payment)
+    var execution = await system.ExecuteSaga<PaymentSaga, string>(new StartPayment(order.Id));
+    Console.WriteLine($"[ExecuteSaga] result={execution.Result}, sagaId={execution.Id}");
+    SampleContext.PaymentSagaId = execution.Id;
+
+    // 3. External payment gateway marks the order paid → OrderPaid event flows out
+    //    → OrderPaidSub translates it into PaymentReceived → saga mailbox
+    await system.AskAsync<object?>(order.Id, new MarkPaid(order.Id));
+    await Task.Delay(300);
+
+    // 4. Saga completed via event loopback; terminal event flowed out; auto-stopped
+    var gone = await system.GetAsync<PaymentSaga>(execution.Id);
+    Console.WriteLine($"[Loopback]   saga auto-stopped: {gone is null}");
+    Console.WriteLine($"[Outflow]    SagaCompleted events received: {SagaCompletedSub.Received.Count}");
+    Console.WriteLine($"[Outflow]    SagaCompleted result: {SagaCompletedSub.Received.LastOrDefault()?.Result}");
+
+    // 5. Recovery: interrupt a saga after step 1 (no terminal event), then resume explicitly
+    var interruptedId = Guid.CreateVersion7();
+    await store.AppendAsync(interruptedId, 0, [new PaymentStep1Started(order.Id)]);
+    var results = await system.ResumeInterruptedSagasAsync<PaymentSaga>(
+        nameof(PaymentStep1Started)
+    );
+    foreach (var r in results)
+        Console.WriteLine($"[Resume]     saga {r.Id}: {r.Status}");
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Domain types (below top-level statements)
@@ -173,5 +229,155 @@ public sealed class Counter : EventSourcedActor
             case CounterDecremented e: _value -= e.Delta;     break;
             case CounterReset e:       _value = e.NewValue;   break;
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Order payment domain — aggregate + process-manager saga + typed subscriber
+// ═══════════════════════════════════════════════════════════════
+
+// ── Commands ───────────────────────────────────────────────────
+public sealed record CreateOrder(Guid OrderId) : ICommand;
+public sealed record MarkPaid(Guid OrderId) : ICommand;
+public sealed record GetPaymentStatus : ICommand;
+public sealed record StartPayment(Guid OrderId) : ICommand;
+public sealed record PaymentReceived(Guid OrderId) : ICommand;
+
+// ── Domain Events ──────────────────────────────────────────────
+public sealed record OrderCreated(Guid OrderId) : IDomainEvent;
+public sealed record OrderPaid(Guid OrderId) : IDomainEvent;
+public sealed record PaymentStep1Started(Guid OrderId) : IDomainEvent;
+public sealed record PaymentStep2Done : IDomainEvent;
+
+/// <summary>Shared context for the typed subscriber (demo-only wiring).</summary>
+public static class SampleContext
+{
+    public static IActorSystem? System;
+    public static Guid? PaymentSagaId;
+}
+
+/// <summary>Order aggregate — command-driven, produces business events.</summary>
+public sealed class OrderActor : EventSourcedActor
+{
+    private bool _paid;
+
+    public OrderActor() { }
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        switch (command)
+        {
+            case CreateOrder c:
+                RaiseEvent(new OrderCreated(c.OrderId));
+                return default;
+            case MarkPaid c:
+                RaiseEvent(new OrderPaid(c.OrderId));
+                return default;
+            case GetPaymentStatus:
+                return new ValueTask<object?>(_paid);
+        }
+        return default;
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case OrderPaid:
+                _paid = true;
+                break;
+        }
+    }
+}
+
+/// <summary>Payment saga (process-manager style) — driven by the translated PaymentReceived
+/// command. Terminal state is a framework event (SagaCompleted("paid")).</summary>
+public sealed class PaymentSaga : SagaActor
+{
+    private int _step;
+    private Guid _orderId;
+
+    public PaymentSaga() { }
+
+    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        switch (command)
+        {
+            case StartPayment c:
+                if (_step < 1)
+                {
+                    RaiseEvent(new PaymentStep1Started(c.OrderId));
+                    _orderId = c.OrderId;
+                }
+                return "started";
+            case PaymentReceived:
+                if (_step < 2)
+                {
+                    RaiseEvent(new PaymentStep2Done());
+                    MarkComplete("paid");
+                }
+                return "paid";
+        }
+        return default;
+    }
+
+    protected override async ValueTask ResumeAsync()
+    {
+        // Recovery semantics: the saga replays only its own stream — actively query
+        // the aggregate to learn external state (events are not replayed to the saga).
+        if (_step < 2 && _orderId != Guid.Empty && System is not null)
+        {
+            var order = await System.GetAsync<OrderActor>(_orderId);
+            if (order is not null)
+            {
+                var paid = await System.AskAsync<bool>(_orderId, new GetPaymentStatus());
+                if (paid)
+                {
+                    RaiseEvent(new PaymentStep2Done());
+                    MarkComplete("paid");
+                }
+            }
+        }
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case PaymentStep1Started e:
+                _step = 1;
+                _orderId = e.OrderId;
+                break;
+            case PaymentStep2Done:
+                _step = 2;
+                break;
+        }
+    }
+}
+
+/// <summary>Typed subscriber — event-to-command translation is a business-layer concern.
+/// The bridge routes the base-typed publish (IDomainEvent) to this concrete subscriber.</summary>
+public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+{
+    public static int Handled;
+
+    public ValueTask Handle(OrderPaid e, CancellationToken ct = default)
+    {
+        Handled++;
+        if (SampleContext.System is { } system && SampleContext.PaymentSagaId is { } sagaId)
+            system.Send(sagaId, new PaymentReceived(e.OrderId)); // translation → saga mailbox
+        return default;
+    }
+}
+
+/// <summary>Typed subscriber for the framework terminal event.</summary>
+public sealed class SagaCompletedSub : ISubscriber<SagaCompleted>
+{
+    public static readonly List<SagaCompleted> Received = [];
+
+    public ValueTask Handle(SagaCompleted e, CancellationToken ct = default)
+    {
+        Received.Add(e);
+        return default;
     }
 }
