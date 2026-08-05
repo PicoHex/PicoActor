@@ -8,6 +8,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="TUnit" />
+    <!-- 2026.8.1 bridge 生成代码需要(PicoMediator 主包的 MediatorAutoSubscriptionRegistry + PicoDI.Abs) -->
+    <PackageReference Include="PicoMediator" />
+    <PackageReference Include="PicoDI.Abs" />
     <ProjectReference Include="..\..\src\PicoActor.Abs\PicoActor.Abs.csproj" />
   </ItemGroup>
 </Project>

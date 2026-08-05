@@ -32,7 +32,9 @@ public sealed class MediatorDomainEventPublisher : IDomainEventPublisher
         {
             try
             {
+#pragma warning disable PMGEN001 // 跨程序集基类型发布:具体事件在应用集,bridge 在应用集编译时生成
                 await _publisher.Publish(e).ConfigureAwait(false);
+#pragma warning restore PMGEN001
             }
             catch (ObjectDisposedException ex)
             {

@@ -22,6 +22,14 @@
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
     <PackageReference Include="PicoMediator.Abs" />
   </ItemGroup>
+  <Target Name="ExcludePicoMediatorGenAnalyzer" BeforeTargets="CoreCompile">
+    <!-- 2026.8.1 的 bridge 生成代码引用 PicoMediator 主包(net10.0)/PicoDI.Abs/ModuleInitializer——
+         netstandard2.0 零依赖的 Abs 无法编译生成产物。排除 analyzer 阻止 bridge 生成
+         (NuGet analyzer 资产在构建期多个 target 注入,须在 CoreCompile 前移除)。 -->
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="'%(Filename)' == 'PicoMediator.Gen'" />
+    </ItemGroup>
+  </Target>
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
