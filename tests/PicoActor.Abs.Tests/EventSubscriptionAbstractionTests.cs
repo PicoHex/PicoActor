@@ -61,6 +61,8 @@ public sealed class EventSubscriptionAbstractionTests
     {
         public void Send(Guid actorId, ICommand command) { }
         public ValueTask<TResult> AskAsync<TResult>(Guid actorId, ICommand command) => default;
-        public ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command) => default;
+        public ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
+            where TSaga : SagaActor
+            => default;
     }
 }

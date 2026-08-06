@@ -97,6 +97,17 @@ public static class PicoActorDiExtensions
             SvcLifetime.Singleton
         );
 
+        // ICommandSender — narrow port for event handlers (Send/AskAsync/ExecuteSaga).
+        // Resolves the singleton IActorSystem lazily so any registration order works.
+        container.Register(
+            typeof(ICommandSender),
+            scope =>
+                new ActorSystemCommandSender(
+                    (IActorSystem)scope.GetService(typeof(IActorSystem))
+                ),
+            SvcLifetime.Singleton
+        );
+
         return container;
     }
 

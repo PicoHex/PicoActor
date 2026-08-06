@@ -15,5 +15,6 @@ public interface ICommandSender
 
     /// <summary>Run a saga: create + ask + auto-stop. Business failure throws
     /// <see cref="SagaExecutionException"/>.</summary>
-    ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command);
+    ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
+        where TSaga : SagaActor;
 }
