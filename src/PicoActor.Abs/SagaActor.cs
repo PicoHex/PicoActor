@@ -13,9 +13,10 @@ namespace PicoActor.Abs;
 ///   → auto-stop → AskAsync 调用者收 SagaExecutionException(Id, Reason)
 ///
 /// 崩溃恢复:
-///   GetAsync 重建 → ReplayEvents(框架恢复终态标志)→ 无终态事件则 ResumeAsync()
-///   → 框架 flush 包装消费 resume 期间的 pending(推进到完成时 SagaCompleted 同批落盘)
-///   → 到达终态则 auto-stop。恢复是显式拉取(ResumeInterruptedSagasAsync),无后台魔法。
+///   GetAsync 重建 → ReplayEvents(框架恢复终态标志)→ 无终态事件则 OnReadyAsync 自动
+///   ResumeAsync()(Version > 0 时;这就是“后台恢复”的机制本体,ResumeInterruptedSagasAsync
+///   只是它的批量化 + 状态分类入口)——框架 flush 包装消费 resume 期间的 pending(推进到
+///   完成时 SagaCompleted 同批落盘)→ 到达终态则 auto-stop。
 /// </summary>
 public abstract class SagaActor : EventSourcedActor
 {
