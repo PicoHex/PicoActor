@@ -153,8 +153,13 @@ public sealed class MediatorDomainEventPublisherTests
         await sut.PublishAsync(ActorId, 7, events);
 
         await Assert.That(publisher.Published.Count).IsEqualTo(2);
-        await Assert.That(publisher.Published[0]).IsTypeOf<PubEventA>();
-        await Assert.That(publisher.Published[1]).IsTypeOf<PubEventB>();
+        await Assert.That(publisher.Published[0]).IsTypeOf<DomainEventEnvelope>();
+        var envelope0 = (DomainEventEnvelope)publisher.Published[0];
+        await Assert.That(envelope0.ActorId).IsEqualTo(ActorId);
+        await Assert.That(envelope0.Version).IsEqualTo(7ul);
+        await Assert.That(envelope0.Event).IsTypeOf<PubEventA>();
+        var envelope1 = (DomainEventEnvelope)publisher.Published[1];
+        await Assert.That(envelope1.Event).IsTypeOf<PubEventB>();
     }
 
     [Test]
@@ -169,8 +174,8 @@ public sealed class MediatorDomainEventPublisherTests
         await sut.PublishAsync(ActorId, 7, events); // does not throw — per-event isolation
 
         await Assert.That(publisher.Published.Count).IsEqualTo(2); // events 1 and 3 arrive
-        await Assert.That(publisher.Published[0]).IsTypeOf<PubEventA>();
-        await Assert.That(publisher.Published[1]).IsTypeOf<PubEventA>();
+        await Assert.That(((DomainEventEnvelope)publisher.Published[0]).Event).IsTypeOf<PubEventA>();
+        await Assert.That(((DomainEventEnvelope)publisher.Published[1]).Event).IsTypeOf<PubEventA>();
     }
 
     [Test]

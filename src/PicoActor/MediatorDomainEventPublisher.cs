@@ -7,9 +7,10 @@ namespace PicoActor;
 /// <summary>
 /// PicoMediator implementation of IDomainEventPublisher — the out-of-the-box
 /// channel for event outflow.
-/// Publishes each event via Publish&lt;IDomainEvent&gt; (compile-time generic, AOT-safe);
+/// Publishes each event wrapped in a <see cref="DomainEventEnvelope"/> (concrete
+/// transport type carrying the source aggregate context: ActorId + Version);
 /// event→command translation is the business responsibility of subscribers
-/// (ISubscriber&lt;IDomainEvent&gt;), unrelated to PicoActor.
+/// (IDomainEventSubscriber&lt;TEvent&gt;), unrelated to PicoActor.
 /// Per-event isolation: a failure in one event/subscriber does not affect
 /// publishing of subsequent events.
 /// </summary>
@@ -35,9 +36,12 @@ public sealed class MediatorDomainEventPublisher : IDomainEventPublisher
         {
             try
             {
-#pragma warning disable PMGEN001 // Cross-assembly base-type publish: concrete events live in the app assembly; the bridge is generated when the app assembly compiles
-                await _publisher.Publish(e).ConfigureAwait(false);
-#pragma warning restore PMGEN001
+                // Concrete-type publish (DomainEventEnvelope) — direct key match,
+                // no base-type bridge needed. The generated PicoActor bridge
+                // narrows envelope.Event to its concrete type for subscribers.
+                await _publisher
+                    .Publish(new DomainEventEnvelope(actorId, version, e))
+                    .ConfigureAwait(false);
             }
             catch (ObjectDisposedException ex)
             {
