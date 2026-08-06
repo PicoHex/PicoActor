@@ -5,7 +5,7 @@ namespace PicoActor.Tests;
 
 internal sealed record GuardProbeEvent : IDomainEvent;
 
-/// <summary>Mutate 里调 MarkComplete——迁移期旧代码模式,必须 loud 失败。</summary>
+/// <summary>Calls MarkComplete inside Mutate — the legacy migration-era pattern that must fail loudly.</summary>
 internal sealed class MutateMarkCompleteSaga : SagaActor
 {
     public MutateMarkCompleteSaga() { }
@@ -19,7 +19,7 @@ internal sealed class MutateMarkCompleteSaga : SagaActor
 
     protected override void Mutate(IDomainEvent @event)
     {
-        MarkComplete(); // 旧代码:在 Mutate 里标记完成
+        MarkComplete(); // legacy pattern: marking complete inside Mutate
     }
 }
 
@@ -31,7 +31,7 @@ internal sealed record PendingStep1 : IDomainEvent;
 
 internal sealed record PendingStep2 : IDomainEvent;
 
-/// <summary>第一条命令只推进,第二条命令推进 + MarkComplete——验证 pending 在失败 flush 后被清除。</summary>
+/// <summary>First command only advances; second advances + MarkComplete — verifies pending is cleared after a failed flush.</summary>
 internal sealed class PendingProbeSaga : SagaActor
 {
     public PendingProbeSaga() { }
@@ -60,7 +60,7 @@ internal sealed class PendingProbeSaga : SagaActor
     protected override void Mutate(IDomainEvent @event) { }
 }
 
-/// <summary>同一消息内重复 MarkComplete——只应产生一个 SagaCompleted。</summary>
+/// <summary>MarkComplete called twice within the same message — only one SagaCompleted may be produced.</summary>
 internal sealed record DoubleCompleteCmd : ICommand;
 
 internal sealed class DoubleCompleteSaga : SagaActor
@@ -73,7 +73,7 @@ internal sealed class DoubleCompleteSaga : SagaActor
         {
             RaiseEvent(new PendingStep1());
             MarkComplete("first");
-            MarkComplete("second"); // 幂等:不追加第二个完成事件
+            MarkComplete("second"); // idempotent: no second completion event is appended
             return new ValueTask<object?>("first");
         }
         return default;
@@ -87,7 +87,7 @@ internal sealed class DoubleCompleteSaga : SagaActor
     protected override void Mutate(IDomainEvent @event) { }
 }
 
-/// <summary>第 N 次 AppendAsync 抛一次异常的 store——pending 失败清除验证。</summary>
+/// <summary>Store that throws on the Nth AppendAsync call — pending-failure clearing verification.</summary>
 internal sealed class FailOnceStore : IEventStore
 {
     private readonly InMemoryEventStore _inner = new();
@@ -115,7 +115,7 @@ internal sealed class FailOnceStore : IEventStore
 public sealed class MarkCompleteGuardTests
 {
     // ═══════════════════════════════════════════════════════════
-    // I2: MarkComplete 位置约束——Mutate 内调用必须 loud 失败
+    // I2: MarkComplete location constraint — calling from Mutate must fail loudly
     // ═══════════════════════════════════════════════════════════
 
     [Test]
@@ -144,13 +144,13 @@ public sealed class MarkCompleteGuardTests
     }
 
     // ═══════════════════════════════════════════════════════════
-    // M1: 失败 flush 后 pending 清除——下次 flush 不追加虚假 SagaCompleted
+    // M1: pending is cleared after a failed flush — the next flush appends no spurious SagaCompleted
     // ═══════════════════════════════════════════════════════════
 
     [Test]
     public async Task FailedFlush_ClearsPending_NoSpuriousSagaCompletedOnNextFlush()
     {
-        var store = new FailOnceStore { FailOnCall = 2 }; // 第 2 次 append(PendingFinish 批)失败
+        var store = new FailOnceStore { FailOnCall = 2 }; // the 2nd append (PendingFinish batch) fails
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
         system.Register<PendingProbeSaga>(
             _ => new PendingProbeSaga(),
@@ -160,8 +160,8 @@ public sealed class MarkCompleteGuardTests
         var saga = await system.CreateAsync<PendingProbeSaga>(new PendingStart());
         await system.AskAsync<object?>(saga.Id, new PendingStart()); // append #1 OK
 
-        // append #2 失败:[PendingStep2 + SagaCompleted] 整批丢弃,pending 清除
-        // → FailAsync 的 SagaFailed flush 不得携带残留的 SagaCompleted
+        // append #2 fails: the whole [PendingStep2 + SagaCompleted] batch is dropped,
+        // pending is cleared → FailAsync's SagaFailed flush must not carry a stale SagaCompleted
         await Assert
             .That(async () => await system.AskAsync<string>(saga.Id, new PendingFinish()))
             .Throws<SagaExecutionException>();
@@ -174,7 +174,7 @@ public sealed class MarkCompleteGuardTests
     }
 
     // ═══════════════════════════════════════════════════════════
-    // M2: 同一消息内重复 MarkComplete 幂等——只追加一个 SagaCompleted
+    // M2: repeated MarkComplete within one message is idempotent — only one SagaCompleted is appended
     // ═══════════════════════════════════════════════════════════
 
     [Test]

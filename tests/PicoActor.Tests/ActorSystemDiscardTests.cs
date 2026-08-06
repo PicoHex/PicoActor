@@ -4,11 +4,12 @@ namespace PicoActor.Tests;
 
 internal sealed record DiscardProbeCmd : ICommand;
 
-/// <summary>OnReadyAsync 执行计数——验证丢弃副本不执行 OnReadyAsync。</summary>
+/// <summary>Counts OnReadyAsync executions — verifies discarded copies never run OnReadyAsync.</summary>
 internal sealed class DiscardProbeActor : EventSourcedActor
 {
-    // 实例字段而非 static:TUnit 类内测试并行执行,静态计数会被同类的
-    // AskAsync_ToStoppedActor 测试的 CreateAsync(正常走 OnReadyAsync)干扰。
+    // Instance field rather than static: tests within a TUnit class run in parallel,
+    // so a static counter would be disturbed by AskAsync_ToStoppedActor's CreateAsync
+    // (which runs OnReadyAsync normally).
     public int ReadyCount;
 
     public DiscardProbeActor() { }
@@ -33,7 +34,7 @@ public sealed class ActorSystemDiscardTests
         actor.Id = Guid.CreateVersion7();
         actor.MarkDiscarded();
 
-        await actor.StopAsync(); // 释放 gate → RunAsync 醒来 → 跳过 OnReadyAsync → 退出
+        await actor.StopAsync(); // releases the gate → RunAsync wakes → skips OnReadyAsync → exits
 
         await Assert.That(actor.ReadyCount).IsEqualTo(0);
     }
@@ -48,7 +49,7 @@ public sealed class ActorSystemDiscardTests
         var actor = await system.CreateAsync<DiscardProbeActor>(new DiscardProbeCmd());
         await system.StopAsync(actor.Id);
 
-        // StopAsync 后 registry 已移除 → AskAsync 抛 KeyNotFoundException(loud,不挂起)
+        // After StopAsync the registry entry is removed → AskAsync throws KeyNotFoundException (loud, no hang)
         await Assert
             .That(async () => await system.AskAsync<int>(actor.Id, new DiscardProbeCmd()))
             .Throws<KeyNotFoundException>();

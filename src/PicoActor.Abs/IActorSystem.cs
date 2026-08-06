@@ -60,12 +60,16 @@ public interface IActorSystem
     );
 
     /// <summary>
-    /// 显式恢复所有中断的 saga:按首事件类型名枚举(Type.Name 精确匹配、大小写敏感),
-    /// 逐个 GetAsync 单飞恢复。重建前已终态(Completed/Failed)的 saga 被过滤(不复活);
-    /// resume 路径新产生的终态按状态归类。无匹配返回空列表。
-    /// 批量失败语义:不传 <paramref name="onItemError"/> 时,任一 saga 恢复遇异常
-    /// fail-fast 中止并向上传播(调用者可整体重试);传入后按项隔离——异常项记入回调
-    /// (异常, sagaId),同类型其余 saga 继续恢复。
+    /// Explicitly resumes all interrupted sagas: enumerates by first-event type name
+    /// (Type.Name exact match, case-sensitive) and recovers each via GetAsync
+    /// single-flight. Sagas already terminal (Completed/Failed) before the rebuild
+    /// are filtered out (not resurrected); terminal states newly produced on the
+    /// resume path are classified by status. Returns an empty list when nothing matches.
+    /// Batch failure semantics: without <paramref name="onItemError"/>, any saga
+    /// recovery exception fails fast and propagates upward (the caller can retry the
+    /// whole batch); with it, items are isolated — the failing item is reported to
+    /// the callback (exception, sagaId) and the remaining sagas of the same type
+    /// continue recovery.
     /// </summary>
     ValueTask<IReadOnlyList<SagaResumeResult>> ResumeInterruptedSagasAsync<TSaga>(
         string firstEventType,
@@ -75,9 +79,11 @@ public interface IActorSystem
         where TSaga : SagaActor;
 
     /// <summary>
-    /// 创建 SagaActor,发送命令,等待结果,完成后 saga 自动停止。
-    /// 成功返回 SagaExecution(Id, Result);业务失败抛 SagaExecutionException(Id, Reason)。
-    /// 调用者不需要调用 StopAsync——saga 自终止。
+    /// Creates a SagaActor, sends a command, waits for the result, and the saga
+    /// auto-stops when finished.
+    /// On success returns SagaExecution(Id, Result); on business failure throws
+    /// SagaExecutionException(Id, Reason). Callers do not need to call StopAsync —
+    /// the saga terminates itself.
     /// </summary>
     ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
         where TSaga : SagaActor;

@@ -92,13 +92,13 @@ public sealed class SagaActorLifecycleTests
         var rebuilt = await system2.GetAsync<TestSaga>(sagaId);
         await Assert.That(rebuilt).IsNotNull();
 
-        // resume 推进到完成:GetAsync await init 后 saga 已 auto-stop
+        // Resume advances to completion: after GetAsync awaits init, the saga has auto-stopped
         await Task.Delay(300);
         await Assert
             .That(() => system2.Send(sagaId, new GetSagaStep()))
             .Throws<KeyNotFoundException>();
 
-        // 事件流含 resume 追加的框架完成事件
+        // The stream contains the framework completion event appended by resume
         var events = await store.LoadAsync(sagaId);
         await Assert.That(events.Count).IsEqualTo(3);
         await Assert.That(events[1]).IsTypeOf<SagaStep2Done>();

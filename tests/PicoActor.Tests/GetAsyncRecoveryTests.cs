@@ -3,7 +3,7 @@ using PicoActor.Abs;
 
 namespace PicoActor.Tests;
 
-/// <summary>Mutate 抛异常的 actor——验证 GetAsync 重放失败路径的资源清理。</summary>
+/// <summary>Actor whose Mutate throws — verifies resource cleanup on the GetAsync replay-failure path.</summary>
 internal sealed record PoisonEvent : IDomainEvent;
 
 internal sealed class PoisonReplayActor : EventSourcedActor
@@ -19,7 +19,7 @@ internal sealed class PoisonReplayActor : EventSourcedActor
     }
 }
 
-/// <summary>append 抛异常的 store——验证恢复失败时 saga 保持可重试(非终态)。</summary>
+/// <summary>Store whose append throws — verifies a saga stays retryable (non-terminal) when recovery fails.</summary>
 internal sealed class FailAppendStore : IEventStore
 {
     private readonly IReadOnlyList<IDomainEvent> _existing;
@@ -63,7 +63,7 @@ public sealed class GetAsyncRecoveryTests
             .That(async () => await system.GetAsync<PoisonReplayActor>(id))
             .Throws<InvalidOperationException>();
 
-        // 清理验证:重复 GetAsync 不应累积(不再抛 KeyNotFoundException 或泄漏)
+        // Cleanup verification: repeated GetAsync must not accumulate (no KeyNotFoundException or leaks)
         await Assert
             .That(async () => await system.GetAsync<PoisonReplayActor>(id))
             .Throws<InvalidOperationException>();
@@ -77,13 +77,15 @@ public sealed class GetAsyncRecoveryTests
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
         system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
 
-        // resume 追加 SagaStep2Done + SagaCompleted 时 append 失败 → 原始 store 异常传播
+        // Append fails while resume persists SagaStep2Done + SagaCompleted → the original store exception propagates
         await Assert
             .That(async () => await system.GetAsync<TestSaga>(sagaId))
             .Throws<IOException>();
         await Assert.That(store.AppendAttempts).IsEqualTo(1);
 
-        // 非终态:saga 未产生 SagaFailed 事件,store 恢复后可重试
-        // (FailAppendStore 的 LoadAsync 返回固定事件——重试仍会失败,但异常类型证明走的是基础设施路径)
+        // Non-terminal: the saga produced no SagaFailed event, so it can be retried
+        // once the store recovers (FailAppendStore.LoadAsync returns fixed events —
+        // a retry still fails, but the exception type proves it went through the
+        // infrastructure path)
     }
 }

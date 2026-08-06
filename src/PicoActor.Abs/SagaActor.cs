@@ -1,22 +1,29 @@
 namespace PicoActor.Abs;
 
 /// <summary>
-/// Saga Actor — 有限生命周期的协调 actor(同时覆盖 saga 与 process manager 模式)。
-/// 继承 EventSourcedActor;进度由业务事件记录,终态(完成/失败)由框架生成的事件
-/// (SagaCompleted/SagaFailed)承载——replay 时由框架恢复,不依赖子类纪律。
+/// Saga Actor — a finite-lifetime coordination actor (covers both the saga and
+/// the process-manager patterns). Inherits EventSourcedActor; progress is recorded
+/// by business events, and the terminal state (completed/failed) is carried by
+/// framework-generated events (SagaCompleted/SagaFailed) that the framework
+/// restores on replay — no subclass discipline required.
 ///
-/// 生命周期:
-///   CreateAsync/ExecuteSaga → 命令经 mailbox 驱动(无构造期命令处理)
-///   → MarkComplete(result) → 框架同批追加 SagaCompleted(result) 原子落盘
-///   → auto-stop(异步,Task.Run + Task.Yield)
-///   或 OnMessageAsync/ResumeAsync 抛未捕获业务异常 → 框架追加 SagaFailed(reason)
-///   → auto-stop → AskAsync 调用者收 SagaExecutionException(Id, Reason)
+/// Lifecycle:
+///   CreateAsync/ExecuteSaga → commands driven through the mailbox (no
+///   constructor-time command handling)
+///   → MarkComplete(result) → framework appends SagaCompleted(result) atomically
+///   in the same batch → auto-stop (async, Task.Run + Task.Yield)
+///   Or OnMessageAsync/ResumeAsync throws an unhandled business exception →
+///   framework appends SagaFailed(reason) → auto-stop → AskAsync caller receives
+///   SagaExecutionException(Id, Reason)
 ///
-/// 崩溃恢复:
-///   GetAsync 重建 → ReplayEvents(框架恢复终态标志)→ 无终态事件则 OnReadyAsync 自动
-///   ResumeAsync()(Version > 0 时;这就是“后台恢复”的机制本体,ResumeInterruptedSagasAsync
-///   只是它的批量化 + 状态分类入口)——框架 flush 包装消费 resume 期间的 pending(推进到
-///   完成时 SagaCompleted 同批落盘)→ 到达终态则 auto-stop。
+/// Crash recovery:
+///   GetAsync rebuild → ReplayEvents (framework restores terminal-state flags) →
+///   if no terminal event, OnReadyAsync automatically calls ResumeAsync()
+///   (when Version > 0; this is the mechanism behind "background recovery" —
+///   ResumeInterruptedSagasAsync is just its batched, state-classifying entry
+///   point) — the framework's flush wrapper consumes pending events raised during
+///   resume (SagaCompleted is persisted in the same batch when the saga reaches
+///   completion) → auto-stop once terminal.
 /// </summary>
 public abstract class SagaActor : EventSourcedActor
 {
@@ -27,34 +34,24 @@ public abstract class SagaActor : EventSourcedActor
     private bool _pendingComplete;
     private bool _inCommandContext;
 
-    /// <summary>
-    /// [Obsolete] 构造期命令处理已废弃——命令只走 mailbox。
-    /// 保留旧语义:命令仍在构造期处理(链 EventSourcedActor(ICommand))——
-    /// 与 OnReadyAsync 的恢复判断(Version>0)组合可能误触发 resume,这是废弃 API 的
-    /// 已知行为,仅影响迁移期旧代码(编译警告提示迁移);新代码必须用参数less构造。
-    /// </summary>
-    [Obsolete(
-        "Saga creation commands are handled via the mailbox. Use the parameterless constructor."
-    )]
-    protected SagaActor(ICommand creationCommand)
-        : base(creationCommand) { }
-
-    /// <summary>唯一构造路径。命令经 mailbox 驱动。</summary>
+    /// <summary>The only construction path. Commands are driven through the mailbox.</summary>
     protected SagaActor() { }
 
-    /// <summary>replay 后由框架从事件流恢复。</summary>
+    /// <summary>Restored by the framework from the event stream on replay.</summary>
     protected internal bool IsCompleted => _completed;
 
-    /// <summary>replay 后由框架从事件流恢复。</summary>
+    /// <summary>Restored by the framework from the event stream on replay.</summary>
     protected internal bool IsFailed => _failed;
 
-    /// <summary>replay 后由框架从 SagaFailed(reason) 恢复;恢复 API 分类用。</summary>
+    /// <summary>Restored by the framework from SagaFailed(reason) on replay; used for recovery-API classification.</summary>
     protected internal string? FailedReason => _failedReason;
 
     /// <summary>
-    /// 标记完成。仅记录 pending——框架 flush 包装在本次 flush 中追加 SagaCompleted(result)。
-    /// 只能在 OnMessageAsync 或 ResumeAsync 内调用;其他位置(Mutate/replay/hook)抛异常。
-    /// 同一消息内重复调用幂等忽略。
+    /// Mark the saga as complete. Only records a pending completion — the framework's
+    /// flush wrapper appends SagaCompleted(result) in the current flush.
+    /// May only be called from OnMessageAsync or ResumeAsync; calling it anywhere
+    /// else (Mutate/replay/hook) throws. Repeated calls within the same message
+    /// are ignored idempotently.
     /// </summary>
     protected void MarkComplete(object? result = null)
     {
@@ -67,8 +64,10 @@ public abstract class SagaActor : EventSourcedActor
     }
 
     /// <summary>
-    /// 恢复后的重评估 hook:可推进、可 AskAsync 查询外部聚合再决策、可 no-op(继续等事件)。
-    /// 每个步骤必须幂等(_step &lt; N 守卫或外部查询)——框架保证事件不重复落盘、单飞、串行。
+    /// Re-evaluation hook after recovery: may advance the saga, query external
+    /// aggregates via AskAsync before deciding, or no-op (keep waiting for events).
+    /// Every step must be idempotent (_step &lt; N guard or external query) — the
+    /// framework guarantees events are never persisted twice, single-flight, serial.
     /// </summary>
     protected abstract ValueTask ResumeAsync();
 
@@ -89,9 +88,10 @@ public abstract class SagaActor : EventSourcedActor
     }
 
     /// <summary>
-    /// 框架 flush 包装:消费 pending(追加 SagaCompleted 到同一批),然后走基类持久化。
-    /// pending 生命周期 = 单次 flush 尝试,无论成败清除。
-    /// ProcessAsync 与 OnReadyAsync 两个入口共用。
+    /// Framework flush wrapper: consumes pending (appends SagaCompleted to the same
+    /// batch), then defers to the base-class persistence.
+    /// Pending lifetime = one flush attempt; cleared on success or failure.
+    /// Shared by the ProcessAsync and OnReadyAsync entry points.
     /// </summary>
     protected override async ValueTask FlushEventsAsync()
     {
@@ -107,7 +107,8 @@ public abstract class SagaActor : EventSourcedActor
     {
         await base.OnReadyAsync().ConfigureAwait(false);
 
-        // 恢复:无终态事件且 Version > 0(SagaActor 构造无命令 → 构造期无事件 → Version>0 ⟺ 重放)
+        // Recovery: no terminal event and Version > 0 (the SagaActor constructor takes
+        // no command, so no construction-time events → Version > 0 ⟺ replay)
         if (!_completed && !_failed && Version > 0)
         {
             _inCommandContext = true;
@@ -117,8 +118,9 @@ public abstract class SagaActor : EventSourcedActor
             }
             catch (Exception ex)
             {
-                // 恢复路径业务失败 = 终态:记 SagaFailed,不抛(SagaFailed 落盘失败时此处抛出,
-                // 由 GetAsync 的 init 失败清理路径处理)
+                // Business failure on the recovery path = terminal: record SagaFailed,
+                // do not throw (if persisting SagaFailed itself fails, it throws here
+                // and is handled by GetAsync's init-failure cleanup path)
                 await FailAsync(ex).ConfigureAwait(false);
             }
             finally
@@ -133,8 +135,10 @@ public abstract class SagaActor : EventSourcedActor
     }
 
     /// <summary>
-    /// 终态守卫 + 失败处理。终态后到达的命令拒绝处理(Ask fault / Send 静默丢弃,
-    /// 子类不被调用)——防止终态后事件污染事件流(auto-stop 是异步的,存在窗口期)。
+    /// Terminal-state guard + failure handling. Commands arriving after the saga is
+    /// terminal are refused (Ask faults / Send silently drops, subclasses are not
+    /// called) — prevents terminal-state events from polluting the event stream
+    /// (auto-stop is asynchronous, so a window exists).
     /// </summary>
     protected sealed override async ValueTask ProcessAsync(Envelope envelope)
     {
@@ -153,8 +157,9 @@ public abstract class SagaActor : EventSourcedActor
         }
         catch (Exception ex)
         {
-            // 业务失败 → 终态。SagaFailed 落盘失败(store down)时此处抛出原始异常,
-            // RunAsync 会 fault TCS(原始异常)——符合"基础设施失败非终态"语义。
+            // Business failure → terminal. If persisting SagaFailed fails (store down),
+            // the original exception is thrown here and RunAsync faults the TCS with it —
+            // consistent with the "infrastructure failure is not terminal" semantics.
             await FailAsync(ex).ConfigureAwait(false);
             var failure = new SagaExecutionException(Id, MakeReason(ex));
             if (envelope.Tcs is not null)
@@ -175,16 +180,18 @@ public abstract class SagaActor : EventSourcedActor
     {
         var reason = MakeReason(ex);
 
-        // 丢弃未提交业务事件与 pending(现有原子性语义:失败时事件未落盘)。
-        // Version 必须同步回滚——CommitEvents 只清列表,保留 Version 会让后续
-        // SagaFailed 的 flush 算出错误的 expectedVersion(ConcurrencyException)。
+        // Discard uncommitted business events and pending (existing atomicity
+        // semantics: on failure the events were never persisted).
+        // Version must be rolled back in sync — CommitEvents only clears the list;
+        // keeping Version would make the subsequent SagaFailed flush compute a
+        // wrong expectedVersion (ConcurrencyException).
         Version -= (ulong)((IEventSourcedActor)this).GetUncommittedEvents().Count;
         ((IEventSourcedActor)this).CommitEvents();
         _pendingComplete = false;
         _pendingResult = null;
 
         RaiseEvent(new SagaFailed(reason));
-        await FlushEventsAsync().ConfigureAwait(false); // 可能抛(store down)→ 传播原始异常
+        await FlushEventsAsync().ConfigureAwait(false); // May throw (store down) → propagate the original exception
     }
 
     private static string MakeReason(Exception ex)
@@ -196,8 +203,9 @@ public abstract class SagaActor : EventSourcedActor
     }
 
     /// <summary>
-    /// 异步调度停止。Task.Run + Task.Yield 保证当前 ProcessAsync/OnReadyAsync
-    /// 完全返回后再 StopAsync(否则 await _loopTask 自死锁)。
+    /// Schedule a stop asynchronously. Task.Run + Task.Yield guarantees StopAsync is
+    /// called only after the current ProcessAsync/OnReadyAsync has fully returned
+    /// (otherwise awaiting _loopTask would deadlock itself).
     /// </summary>
     private void ScheduleStop()
     {

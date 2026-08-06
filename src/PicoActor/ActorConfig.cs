@@ -12,11 +12,4 @@ public sealed class EventStoreConfig
 {
     /// <summary>Event store type. Supported: "InMemory".</summary>
     public string Type { get; set; } = "InMemory";
-
-    /// <summary>Connection string for external stores. Unused by InMemory.</summary>
-    [Obsolete(
-        "External event stores are not supported (only InMemory is implemented); "
-            + "this property is never read."
-    )]
-    public string? ConnectionString { get; set; }
 }

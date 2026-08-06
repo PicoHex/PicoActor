@@ -38,7 +38,7 @@ public sealed class ExecuteSagaApiTests
         await Assert.That(execution.Result).IsEqualTo("hello");
         await Assert.That(execution.Id).IsNotEqualTo(Guid.Empty);
 
-        // 完成即死(auto-stop 是异步的,等它完成)
+        // Complete-then-die (auto-stop is async; wait for it)
         await Task.Delay(300);
         var gone = await system.GetAsync<TestSaga>(execution.Id);
         await Assert.That(gone).IsNull();
@@ -58,7 +58,7 @@ public sealed class ExecuteSagaApiTests
         await Assert.That(ex!.SagaId).IsNotEqualTo(Guid.Empty);
         await Assert.That(ex.Reason).Contains("step failed");
 
-        // 失败 = 终态:事件流含框架 SagaFailed,GetAsync 不复活
+        // Failure = terminal: the stream contains the framework SagaFailed; GetAsync does not resurrect
         await Task.Delay(300);
         var gone = await system.GetAsync<FailSaga>(ex.SagaId);
         await Assert.That(gone).IsNull();

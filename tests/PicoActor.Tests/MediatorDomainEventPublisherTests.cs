@@ -2,12 +2,12 @@ using PicoActor.Abs;
 using PicoLog.Abs;
 using PicoMediator.Abs;
 
-// TUnit0055:ODE 诊断测试故意重定向 Console.Error(验证无 logger 时的 stderr 诊断),finally 已还原。
+// TUnit0055: the ODE diagnostic tests deliberately redirect Console.Error (to verify the no-logger stderr diagnostic); finally restores it.
 #pragma warning disable TUnit0055
 
 namespace PicoActor.Tests;
 
-/// <summary>记录发布内容并可注入失败的假 IPublisher。</summary>
+/// <summary>Fake IPublisher that records published events and can inject failures.</summary>
 internal sealed class RecordingMediatorPublisher : IPublisher
 {
     public List<object> Published = [];
@@ -27,7 +27,7 @@ internal sealed class RecordingMediatorPublisher : IPublisher
         where TEvent : IEvent => throw new NotImplementedException();
 }
 
-/// <summary>Publish 抛 ObjectDisposedException——captive dependency 场景(Mediator 绑定已释放 scope)。</summary>
+/// <summary>Publish throws ObjectDisposedException — the captive-dependency scenario (Mediator bound to a disposed scope).</summary>
 internal sealed class ThrowingDisposedPublisher : IPublisher
 {
     public ValueTask Publish<TEvent>(TEvent @event, CancellationToken ct = default)
@@ -37,7 +37,7 @@ internal sealed class ThrowingDisposedPublisher : IPublisher
         where TEvent : IEvent => throw new NotImplementedException();
 }
 
-/// <summary>记录日志消息的假 ILogger。</summary>
+/// <summary>Fake ILogger that records log messages.</summary>
 internal sealed class RecordingLogSink : ILogger
 {
     public List<string> Messages = [];
@@ -160,15 +160,15 @@ public sealed class MediatorDomainEventPublisherTests
     [Test]
     public async Task PublishAsync_OneEventFailure_DoesNotStopOthers()
     {
-        var publisher = new RecordingMediatorPublisher { FailOnCall = 2 }; // 第 2 个事件失败
+        var publisher = new RecordingMediatorPublisher { FailOnCall = 2 }; // the 2nd event fails
         var sut = new MediatorDomainEventPublisher(publisher);
 
         var events =
             (IReadOnlyList<IDomainEvent>)
                 new IDomainEvent[] { new PubEventA(1), new PubEventB("x"), new PubEventA(2) };
-        await sut.PublishAsync(ActorId, 7, events); // 不抛——逐事件隔离
+        await sut.PublishAsync(ActorId, 7, events); // does not throw — per-event isolation
 
-        await Assert.That(publisher.Published.Count).IsEqualTo(2); // 第 1、3 个到达
+        await Assert.That(publisher.Published.Count).IsEqualTo(2); // events 1 and 3 arrive
         await Assert.That(publisher.Published[0]).IsTypeOf<PubEventA>();
         await Assert.That(publisher.Published[1]).IsTypeOf<PubEventA>();
     }
@@ -193,7 +193,7 @@ public sealed class MediatorDomainEventPublisherTests
 
         await sut.PublishAsync(ActorId, 7, new IDomainEvent[] { new PubEventA(1) });
 
-        // 专门的诊断信息:提示 captive dependency(Mediator 绑定已释放的 scope)
+        // Dedicated diagnostic: hints at the captive dependency (Mediator bound to a disposed scope)
         await Assert.That(log.Messages.Count).IsEqualTo(1);
         await Assert.That(log.Messages[0]).Contains("root scope");
         await Assert.That(log.Messages[0]).Contains("PubEventA");

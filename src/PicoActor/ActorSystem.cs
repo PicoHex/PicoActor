@@ -148,9 +148,11 @@ public sealed class ActorSystem : IActorSystem
         ((EventSourcedActor)actor).EventStore = _eventStore;
         ((EventSourcedActor)actor).Publisher = _publisher;
 
-        // 全路径资源清理:重建后任一失败点(重放/init)都标记 discarded + StopAsync + rethrow。
-        // actor 已构造(_loopTask 已启动、gate 未释放)——不清理则泄漏;不带 discarded 标记时
-        // StopAsync 释放 gate 会让部分重放状态误执行 OnReadyAsync(含 saga resume)。
+        // Full-path resource cleanup: any failure point after the rebuild (replay/init)
+        // marks the actor discarded + StopAsync + rethrow.
+        // The actor is already constructed (_loopTask started, gate not released) —
+        // without cleanup it leaks; without the discarded marker, StopAsync releasing
+        // the gate would let partially replayed state run OnReadyAsync (including saga resume).
         try
         {
             es.ReplayEvents(events);
@@ -162,7 +164,7 @@ public sealed class ActorSystem : IActorSystem
             throw;
         }
 
-        // 重建前已存在的终态事件(Completed/Failed)→ 不复活
+        // Terminal events that already existed before the rebuild (Completed/Failed) → do not resurrect
         if (actor is SagaActor { IsCompleted: true } or SagaActor { IsFailed: true })
         {
             await actor.StopAsync().ConfigureAwait(false);
@@ -191,7 +193,7 @@ public sealed class ActorSystem : IActorSystem
         }
         catch
         {
-            // init 失败(如 resume 的 SagaFailed 落盘失败)→ 对称清理
+            // Init failure (e.g. persisting SagaFailed during resume fails) → symmetric cleanup
             _registry.TryRemove(id, out _);
             try
             {
@@ -336,8 +338,9 @@ public sealed class ActorSystem : IActorSystem
                 if (first is null || !match(first))
                     continue;
 
-                // 活跃命中 → 直接分类不重建;重建前已终态 → GetAsync 返回 null 跳过;
-                // resume 新终态 → 从返回实例读取
+                // Active hit → classify directly without rebuilding; already terminal
+                // before rebuild → GetAsync returns null, skip; new terminal state
+                // from resume → read from the returned instance
                 var saga = await GetAsync<TSaga>(id).ConfigureAwait(false);
                 if (saga is null)
                     continue;
@@ -368,7 +371,7 @@ public sealed class ActorSystem : IActorSystem
         var saga = await CreateAsync<TSaga>(command).ConfigureAwait(false);
         var result = await AskAsync<TResult>(saga.Id, command).ConfigureAwait(false);
         return new SagaExecution<TResult>(saga.Id, result);
-        // SagaExecutionException 由 SagaActor.ProcessAsync fault TCS 后经 AskAsync 透传。
-        // Saga auto-stops via SagaActor.ProcessAsync → ScheduleStop.
+        // SagaExecutionException propagates through AskAsync after SagaActor.ProcessAsync
+        // faults the TCS. Saga auto-stops via SagaActor.ProcessAsync → ScheduleStop.
     }
 }

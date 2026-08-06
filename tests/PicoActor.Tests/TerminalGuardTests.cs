@@ -2,7 +2,7 @@ using PicoActor.Abs;
 
 namespace PicoActor.Tests;
 
-/// <summary>OnMessageAsync 被调用计数——终态守卫后子类不应被调用。</summary>
+/// <summary>Counts OnMessageAsync invocations — subclasses must not be called after the terminal guard.</summary>
 internal sealed class GuardProbeSaga : SagaActor
 {
     public static int MessageCount;
@@ -43,8 +43,8 @@ public sealed class TerminalGuardTests
         var saga = await system.CreateAsync<GuardProbeSaga>(new StartSaga("x"));
         await system.AskAsync<string>(saga.Id, new StartSaga("x"));
 
-        // auto-stop 窗口期内再 AskAsync:要么 KeyNotFoundException(已移除),要么 fault(终态守卫),
-        // 绝不挂起、绝不再次处理
+        // AskAsync during the auto-stop window: either KeyNotFoundException (already
+        // removed) or a fault (terminal guard) — never hangs, never processes again
         await Task.Delay(50);
         Exception? caught = null;
         try
@@ -58,7 +58,7 @@ public sealed class TerminalGuardTests
         await Assert.That(caught).IsNotNull();
         await Assert.That(GuardProbeSaga.MessageCount).IsEqualTo(1);
 
-        // 事件流无终态后事件
+        // The stream has no post-terminal events
         var events = await store.LoadAsync(saga.Id);
         await Assert.That(events.Count).IsEqualTo(2); // Step1Started + SagaCompleted
     }

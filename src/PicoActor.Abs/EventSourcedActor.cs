@@ -56,9 +56,11 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     protected abstract void Mutate(IDomainEvent @event);
 
     /// <summary>
-    /// 框架事件处理钩子:返回 true 时事件由框架内部处理,不投递给子类 Mutate。
-    /// 基类默认 false(所有事件走 Mutate);SagaActor 覆写以处理 SagaCompleted/SagaFailed。
-    /// 在 FlushEventsAsync(持久化后)与 ReplayEvents(恢复)两条路径中同样生效。
+    /// Framework event handling hook: when it returns true, the event is handled
+    /// internally by the framework and is NOT delivered to the subclass Mutate.
+    /// Base default is false (all events go to Mutate); SagaActor overrides it to
+    /// handle SagaCompleted/SagaFailed. Effective on both paths:
+    /// FlushEventsAsync (after persistence) and ReplayEvents (recovery).
     /// </summary>
     protected virtual bool TryHandleFrameworkEvent(IDomainEvent @event) => false;
 

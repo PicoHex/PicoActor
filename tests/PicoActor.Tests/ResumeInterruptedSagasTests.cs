@@ -2,7 +2,7 @@ using PicoActor.Abs;
 
 namespace PicoActor.Tests;
 
-/// <summary>LoadAsync 对指定 id 抛异常的 store——模拟恢复期间 store 抖动(fail-fast 验证)。</summary>
+/// <summary>Store whose LoadAsync throws for a given id — simulates store flakiness during recovery (fail-fast verification).</summary>
 internal sealed class ThrowingLoadStore : IEventStore, IEventStoreEnumerator
 {
     private readonly IEventStore _inner;
@@ -45,7 +45,7 @@ public sealed class ResumeInterruptedSagasTests
     {
         var store = new InMemoryEventStore();
 
-        // 中断:只持久化步骤 1
+        // Interrupted: only step 1 was persisted
         var sagaId = Guid.CreateVersion7();
         await store.AppendAsync(sagaId, 0, [new SagaStep1Started("recover")]);
 
@@ -58,7 +58,7 @@ public sealed class ResumeInterruptedSagasTests
         await Assert.That(results[0].Id).IsEqualTo(sagaId);
         await Assert.That(results[0].Status).IsEqualTo(SagaResumeStatus.Completed);
 
-        // 事件流现在含框架完成事件
+        // The stream now contains the framework completion event
         var events = await store.LoadAsync(sagaId);
         await Assert.That(events.Count).IsEqualTo(3);
         await Assert.That(events[2]).IsTypeOf<SagaCompleted>();
@@ -80,7 +80,7 @@ public sealed class ResumeInterruptedSagasTests
     {
         var store = new InMemoryEventStore();
 
-        // 已完成 saga(含框架完成事件)——不应复活、不计入结果
+        // Completed saga (includes the framework completion event) — must not be resurrected or counted
         var doneId = Guid.CreateVersion7();
         await store.AppendAsync(doneId, 0, [new SagaStep1Started("done"), new SagaCompleted("x")]);
 
@@ -96,7 +96,8 @@ public sealed class ResumeInterruptedSagasTests
     {
         var store = new InMemoryEventStore();
 
-        // 步骤 2 已持久化但无终态事件 → resume 时 _step=2 → 业务步骤全守卫跳过,MarkComplete → 完成
+        // Step 2 persisted but no terminal event → on resume _step=2 → all business steps
+        // skipped by guards, MarkComplete → completed
         var sagaId = Guid.CreateVersion7();
         await store.AppendAsync(sagaId, 0, [new SagaStep1Started("x"), new SagaStep2Done()]);
 
@@ -117,7 +118,8 @@ public sealed class ResumeInterruptedSagasTests
     {
         var store = new InMemoryEventStore();
 
-        // 需要 resume 后仍等待外部命令的 saga:用 RunningSaga(步骤完成后不 MarkComplete,等 WaitCmd)
+        // A saga that keeps waiting for external commands after resume: use RunningSaga
+        // (no MarkComplete after its steps; waits for WaitCmd)
         var sagaId = Guid.CreateVersion7();
         await store.AppendAsync(sagaId, 0, [new RunningStep1Started("w")]);
 
@@ -132,7 +134,7 @@ public sealed class ResumeInterruptedSagasTests
         await Assert.That(results[0].Id).IsEqualTo(sagaId);
         await Assert.That(results[0].Status).IsEqualTo(SagaResumeStatus.Running);
 
-        // 恢复后仍存活:发推进命令可完成(等 auto-stop 后再验证)
+        // Still alive after recovery: a push command can complete it (verify after auto-stop)
         system.Send(sagaId, new RunningCompleteCmd());
         await Task.Delay(300);
         var gone = await system.GetAsync<RunningSaga>(sagaId);
@@ -142,8 +144,8 @@ public sealed class ResumeInterruptedSagasTests
     [Test]
     public async Task Resume_BatchFailure_FailsFast()
     {
-        // 两个中断 saga:第一个可恢复,第二个 LoadAsync 抛异常
-        // → fail-fast:整个调用抛异常(而非部分恢复后静默继续)
+        // Two interrupted sagas: the first is recoverable, the second throws in LoadAsync
+        // → fail-fast: the whole call throws (instead of silently continuing after partial recovery)
         var inner = new InMemoryEventStore();
         var id1 = Guid.CreateVersion7();
         var id2 = Guid.CreateVersion7();
@@ -164,8 +166,8 @@ public sealed class ResumeInterruptedSagasTests
     [Test]
     public async Task Resume_OnItemError_IsolatesBadFiles()
     {
-        // per-item 错误策略:坏文件只跳过自身(onItemError 收到 id),
-        // 同类型其余 saga 继续恢复——不中断整个批量调用。
+        // Per-item error strategy: a bad stream only skips itself (onItemError receives the id),
+        // remaining sagas of the same type keep recovering — the batch call is not interrupted.
         var inner = new InMemoryEventStore();
         var good = Guid.CreateVersion7();
         var bad = Guid.CreateVersion7();
@@ -182,7 +184,7 @@ public sealed class ResumeInterruptedSagasTests
             onItemError: (ex, id) => errors.Add(id)
         );
 
-        // 坏文件被隔离(不传播),好 saga 仍被恢复
+        // The bad stream is isolated (not propagated); the good saga is still recovered
         await Assert.That(errors).Contains(bad);
         await Assert.That(results.Select(r => r.Id)).Contains(good);
         await Assert.That(results.Select(r => r.Id)).DoesNotContain(bad);
@@ -191,7 +193,7 @@ public sealed class ResumeInterruptedSagasTests
     [Test]
     public async Task Resume_WithoutOnItemError_Propagates()
     {
-        // 不传 onItemError 时,坏文件异常向外传播(兼容旧行为)
+        // Without onItemError, the bad stream's exception propagates outward (legacy-compatible behavior)
         var inner = new InMemoryEventStore();
         var bad = Guid.CreateVersion7();
         await inner.AppendAsync(bad, 0, [new SagaStep1Started("bad")]);
@@ -210,8 +212,9 @@ public sealed class ResumeInterruptedSagasTests
     [Test]
     public async Task Resume_BusinessFailure_ClassifiesFailed_WithReason()
     {
-        // 中断 saga 的 ResumeAsync 抛业务异常 → 框架追加 SagaFailed(reason) → 归 Failed(reason),
-        // GetAsync 不复活(失败 = 终态)
+        // The interrupted saga's ResumeAsync throws a business exception → the framework
+        // appends SagaFailed(reason) → classified Failed(reason), GetAsync does not
+        // resurrect (failure = terminal)
         var store = new InMemoryEventStore();
         var sagaId = Guid.CreateVersion7();
         await store.AppendAsync(sagaId, 0, [new ResumeBoomStep1()]);
@@ -228,20 +231,20 @@ public sealed class ResumeInterruptedSagasTests
         await Assert.That(results[0].Status).IsEqualTo(SagaResumeStatus.Failed);
         await Assert.That(results[0].Reason).Contains("resume boom");
 
-        // 事件流含框架 SagaFailed(reason)
+        // The stream contains the framework SagaFailed(reason)
         var events = await store.LoadAsync(sagaId);
         await Assert.That(events.Count).IsEqualTo(2);
         await Assert.That(events[0]).IsTypeOf<ResumeBoomStep1>();
         await Assert.That(events[1]).IsTypeOf<SagaFailed>();
 
-        // 失败 = 终态:auto-stop 后 GetAsync 不复活
+        // Failure = terminal: after auto-stop, GetAsync does not resurrect
         await Task.Delay(300);
         var gone = await system.GetAsync<ResumeBoomSaga>(sagaId);
         await Assert.That(gone).IsNull();
     }
 }
 
-/// <summary>resume 后仍等待外部命令的 saga(Running 分类验证)。</summary>
+/// <summary>Saga that keeps waiting for external commands after resume (Running classification verification).</summary>
 internal sealed record RunningStartCmd(string Name) : ICommand;
 
 internal sealed record RunningStep1Started(string Name) : IDomainEvent;
@@ -281,7 +284,7 @@ internal sealed class RunningSaga : SagaActor
 
     protected override async ValueTask ResumeAsync()
     {
-        // 恢复后无终态:不推进,继续等待 RunningCompleteCmd
+        // No terminal state after recovery: do not advance; keep waiting for RunningCompleteCmd
         await Task.CompletedTask;
     }
 
@@ -300,7 +303,7 @@ internal sealed class RunningSaga : SagaActor
     }
 }
 
-/// <summary>resume 时抛业务异常的 saga——恢复 API Failed 分类验证。</summary>
+/// <summary>Saga whose ResumeAsync throws a business exception — recovery API Failed classification verification.</summary>
 internal sealed record ResumeBoomStep1 : IDomainEvent;
 
 internal sealed class ResumeBoomSaga : SagaActor

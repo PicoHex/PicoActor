@@ -44,7 +44,7 @@ public sealed class PicoActorDiExtensionsTests
         var actor = await system.CreateAsync<DiProbeActor>(new DiProbeCmd());
         await system.AskAsync<object?>(actor.Id, new DiProbeCmd());
 
-        // 事件已流出到 publisher:构造期 flush + mailbox 命令各一批
+        // Events flowed to the publisher: one batch from the construction-time flush, one from the mailbox command
         await Assert.That(publisher.Published.Count).IsEqualTo(2);
         await Assert.That(publisher.Published[0]).IsTypeOf<DiProbeEvent>();
         await Assert.That(publisher.Published[1]).IsTypeOf<DiProbeEvent>();

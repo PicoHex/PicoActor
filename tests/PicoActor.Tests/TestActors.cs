@@ -147,8 +147,10 @@ internal sealed class TestSaga : SagaActor
             }
             if (_step < 2)
                 RaiseEvent(new SagaStep2Done());
-            // 无条件调用是刻意的:让“全部步骤已完成但无终态事件”的中断 saga 在 resume 时收敛为完成;
-            // 完成后的重复命令由终态守卫拒绝(不同批落盘,不会重复追加完成事件)
+            // Unconditional call is intentional: an interrupted saga whose steps are all
+            // done but has no terminal event converges to completion on resume; repeated
+            // commands after completion are refused by the terminal guard (persisted in
+            // separate batches, so no duplicate completion event is appended)
             MarkComplete(_name);
             return _name;
         }

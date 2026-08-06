@@ -4,6 +4,7 @@ namespace PicoActor.Abs;
 
 /// <summary>
 /// Marker interface. All domain events produced by an ES actor must implement this.
-/// 事件即通知:IDomainEvent 继承 PicoMediator.Abs.IEvent,可经 PicoMediator 发布与订阅。
+/// Events are notifications: IDomainEvent inherits PicoMediator.Abs.IEvent, so it can be
+/// published and subscribed to via PicoMediator.
 /// </summary>
 public interface IDomainEvent : IEvent { }

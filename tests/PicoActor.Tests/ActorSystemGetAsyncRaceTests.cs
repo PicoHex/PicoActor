@@ -12,7 +12,7 @@ public sealed class ActorSystemGetAsyncRaceTests
 {
     internal sealed record RaceCreated : IDomainEvent;
 
-    /// <summary>OnReadyAsync 执行计数——单飞验证:只有胜出副本执行恢复路径。</summary>
+    /// <summary>Counts OnReadyAsync executions — single-flight verification: only the winning copy runs the recovery path.</summary>
     internal sealed class CountingReadyActor : EventSourcedActor
     {
         public static int ReadyCount;
@@ -81,9 +81,10 @@ public sealed class ActorSystemGetAsyncRaceTests
     }
 
     /// <summary>
-    /// 两个并发 GetAsync 重建同一 id:单飞语义——一个胜出重建,loser 标记 discarded
-    /// 跳过 OnReadyAsync(不执行恢复/重放路径逻辑)。两个调用都成功返回同一实例,
-    /// OnReadyAsync 只执行一次。
+    /// Two concurrent GetAsync calls rebuild the same id: single-flight semantics —
+    /// one wins the rebuild, the loser is marked discarded and skips OnReadyAsync
+    /// (no recovery/replay path logic runs). Both calls return the same instance
+    /// successfully, and OnReadyAsync runs exactly once.
     /// </summary>
     [Test]
     [Timeout(15000)]
@@ -107,20 +108,21 @@ public sealed class ActorSystemGetAsyncRaceTests
         var taskA = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
         var taskB = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
 
-        // 先进入 LoadAsync(n==1) 的调用者等 bothEntered,后进入的(n==2)set bothEntered 并等
-        // releaseLoser——因此先完成 LoadAsync 的必然胜出 TryAdd(不依赖 Task.Run 调度顺序)。
+        // The first caller into LoadAsync (n==1) waits on bothEntered; the second
+        // (n==2) sets bothEntered and waits on releaseLoser — so the caller that
+        // finishes LoadAsync first always wins TryAdd (independent of Task.Run scheduling).
         var firstCompleted = await Task.WhenAny(taskA, taskB);
         var winner = await firstCompleted;
         var loserTask = ReferenceEquals(firstCompleted, taskA) ? taskB : taskA;
 
-        // 释放 loser → 它重建后 TryAdd 失败 → 标记 discarded → 清理 → 返回胜出实例
+        // Release the loser → its rebuild fails TryAdd → marked discarded → cleaned up → returns the winner
         releaseLoser.TrySetResult(true);
         var loserResult = await loserTask;
 
         await Assert.That(winner).IsNotNull();
         await Assert.That(loserResult).IsNotNull();
 
-        // 单飞:只有胜出副本执行 OnReadyAsync(恢复/重放路径),loser 被 discarded 跳过
+        // Single-flight: only the winning copy runs OnReadyAsync (recovery/replay path); the loser is skipped as discarded
         await Task.Delay(200);
         await Assert.That(CountingReadyActor.ReadyCount).IsEqualTo(1);
     }

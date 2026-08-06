@@ -63,8 +63,9 @@ public sealed class ActorSystemFindAggregateIdsTests
     [Test]
     public async Task FindAggregateIds_PeeksFirstEvent_WithoutFullLoad()
     {
-        // 恢复热路径不得全文件读取:store 的 LoadAsync 被显式禁用(抛异常),
-        // 只允许 PeekFirstAsync —— FindAggregateIds 必须只读首事件。
+        // The recovery hot path must not full-read files: the store's LoadAsync is
+        // explicitly disabled (throws); only PeekFirstAsync is allowed —
+        // FindAggregateIds must read only the first event.
         var store = new PeekOnlyStore();
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
         RegisterCounter(system);
@@ -76,7 +77,7 @@ public sealed class ActorSystemFindAggregateIdsTests
         await Assert.That(found[0]).IsEqualTo(a.Id);
     }
 
-    /// <summary>只允许首事件窥探的 store —— 全文件读取被显式禁用。</summary>
+    /// <summary>Store that only allows peeking the first event — full reads are explicitly disabled.</summary>
     private sealed class PeekOnlyStore : IEventStore, IEventStoreEnumerator
     {
         private readonly InMemoryEventStore _inner = new();

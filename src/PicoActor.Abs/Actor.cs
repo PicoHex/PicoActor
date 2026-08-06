@@ -103,8 +103,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// <summary>
     /// Outbound channel writer. External subscribers (e.g., SSE Server) set this
     /// to receive progress/diagnostic events from the actor.
-    /// Symmetric to the Mailbox: Mailbox receives commands (入站),
-    /// OutputChannel broadcasts events (出站).
+    /// Symmetric to the Mailbox: Mailbox receives commands (inbound),
+    /// OutputChannel broadcasts events (outbound).
     /// Weak guarantee — TryWrite silently drops if no subscriber or channel full.
     /// Actor state is never affected by output events.
     /// </summary>
@@ -136,14 +136,15 @@ public abstract class Actor : IActor, IAsyncDisposable
     internal Task InitCompletedTask => _initCompleted.Task;
 
     /// <summary>
-    /// 标记为丢弃副本(并发重建的失败方)。RunAsync 跳过 OnReadyAsync——
-    /// 丢弃副本不得执行业务逻辑(含 saga resume)或写事件流,只做资源清理。
+    /// Marks this actor as a discarded duplicate (the loser of a concurrent rebuild).
+    /// RunAsync skips OnReadyAsync — a discarded copy must not run business logic
+    /// (including saga resume) or write to the event stream; it only cleans up resources.
     /// </summary>
     internal void MarkDiscarded() => Interlocked.Exchange(ref _discarded, 1);
 
     internal bool IsDiscarded => _discarded != 0;
 
-    /// <summary>Called by IActorSystem to deliver an envelope. False = 投递失败(正在停止)。</summary>
+    /// <summary>Called by IActorSystem to deliver an envelope. False = delivery failed (stopping).</summary>
     internal bool Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
 
     private async Task RunAsync(CancellationToken ct)

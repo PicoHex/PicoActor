@@ -6,7 +6,7 @@ internal sealed record FrameworkProbeEvent : IDomainEvent;
 
 internal sealed record ProbeCreated : IDomainEvent;
 
-/// <summary>把 ProbeCreated 当作框架事件拦截的测试 actor。</summary>
+/// <summary>Test actor that intercepts ProbeCreated as a framework event.</summary>
 internal sealed class FrameworkFilterActor : EventSourcedActor
 {
     public static int MutateCount;
@@ -45,9 +45,11 @@ public sealed class EventSourcedActorFrameworkEventTests
         actor.Id = Guid.CreateVersion7();
         actor.SignalReady();
 
-        // 直接驱动一次 flush:RaiseEvent 后调 FlushEventsAsync(protected,经 public 路径不可达——用内部测试钩子)
-        // 通过 IEventSourcedActor.GetUncommittedEvents + 手动构造不可行(FlushEventsAsync 是 protected)——
-        // 改用 ReplayEvents 验证过滤(public 接口),flush 路径由 Task 3 的集成测试覆盖。
+        // Drive one flush directly: calling FlushEventsAsync (protected) after RaiseEvent
+        // is unreachable through the public path — use the internal test hook instead.
+        // Driving it via IEventSourcedActor.GetUncommittedEvents + manual construction is
+        // not possible (FlushEventsAsync is protected) — so filtering is verified through
+        // ReplayEvents (public interface); the flush path is covered by the Task 3 integration tests.
         ((IEventSourcedActor)actor).ReplayEvents(new IDomainEvent[] { new ProbeCreated() });
 
         await Assert.That(FrameworkFilterActor.MutateCount).IsEqualTo(0);

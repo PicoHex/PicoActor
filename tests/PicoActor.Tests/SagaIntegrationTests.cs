@@ -3,29 +3,26 @@ using PicoActor.Abs;
 namespace PicoActor.Tests;
 
 // ═══════════════════════════════════════════════════════════
-// 端到端集成测试:spec 第 3 节应用架构
-//   聚合 actor ← 命令;事件 → Publisher → MiniMediator(fanout)
-//   → eventhandler 翻译 → 命令 → saga mailbox → 完成 → 事件流出
-// 覆盖:ExecuteSaga 启动、事件回环推进、恢复时主动查询聚合状态(spec 5.6)
+// End-to-end integration tests: spec section 3 application architecture
+//   aggregate actor ← commands; events → Publisher → MiniMediator (fanout)
+//   → event-handler translation → commands → saga mailbox → completion → event outflow
+// Covers: ExecuteSaga startup, event-loopback advancement, active aggregate-state
+// query during recovery (spec 5.6)
 // ═══════════════════════════════════════════════════════════
 
-/// <summary>测试内 PicoMediator 替代——IDomainEventPublisher fanout 分发。</summary>
+/// <summary>In-test PicoMediator stand-in — IDomainEventPublisher fanout dispatch.</summary>
 internal sealed class MiniMediator : IDomainEventPublisher
 {
     public Action<Guid, IReadOnlyList<IDomainEvent>>? OnEvents;
 
-    public ValueTask PublishAsync(
-        Guid actorId,
-        ulong version,
-        IReadOnlyList<IDomainEvent> events
-    )
+    public ValueTask PublishAsync(Guid actorId, ulong version, IReadOnlyList<IDomainEvent> events)
     {
         OnEvents?.Invoke(actorId, events);
         return default;
     }
 }
 
-// ── 聚合 ──
+// ── aggregate ──
 
 internal sealed record CreateOrder(Guid OrderId) : ICommand;
 
@@ -70,7 +67,7 @@ internal sealed class OrderActor : EventSourcedActor
     }
 }
 
-// ── saga(process manager 模式:等待事件回环推进)──
+// ── saga (process-manager pattern: waits for event loopback to advance) ──
 
 internal sealed record StartPayment(Guid OrderId) : ICommand;
 
@@ -97,7 +94,7 @@ internal sealed class PaymentSaga : SagaActor
                     RaiseEvent(new PaymentStep1Started(c.OrderId));
                     _orderId = c.OrderId;
                 }
-                return "started"; // async 方法:直接返回值,不包 ValueTask(否则装箱成 object)
+                return "started"; // async method: return the value directly, do not wrap in ValueTask (it would box into object)
             case PaymentReceived:
                 if (_step < 2)
                 {
@@ -111,10 +108,11 @@ internal sealed class PaymentSaga : SagaActor
 
     protected override async ValueTask ResumeAsync()
     {
-        // spec 5.6 恢复语义推论:外部聚合状态需主动查询(事件不会重放给恢复的 saga)
+        // Spec 5.6 recovery-semantics corollary: external aggregate state must be queried
+        // actively (events are not replayed to a recovering saga)
         var order = await System!.GetAsync<OrderActor>(_orderId);
         if (order is null)
-            return; // 聚合不存在——继续等待外部事件
+            return; // aggregate does not exist — keep waiting for external events
         var paid = await System.AskAsync<bool>(_orderId, new GetPaymentStatus());
         if (paid && _step < 2)
         {
@@ -154,7 +152,7 @@ public sealed class SagaIntegrationTests
         var order = await system.CreateAsync<OrderActor>(new CreateOrder(Guid.NewGuid()));
         var sagaId = Guid.Empty;
 
-        // eventhandler 翻译层(普通类):OrderPaid → PaymentReceived 命令 → saga mailbox
+        // Event-handler translation layer (plain class): OrderPaid → PaymentReceived command → saga mailbox
         mediator.OnEvents = (actorId, events) =>
         {
             foreach (var e in events)
@@ -168,9 +166,10 @@ public sealed class SagaIntegrationTests
         sagaId = execution.Id;
         await Assert.That(execution.Result).IsEqualTo("started");
 
-        // 模拟外部支付网关:驱动聚合 → OrderPaid 事件流出 → 翻译 → saga 推进 → 完成
+        // Simulate the external payment gateway: drive the aggregate → OrderPaid flows
+        // out → translated → saga advances → completes
         await system.AskAsync<object?>(order.Id, new MarkPaid(order.Id));
-        await Task.Delay(300); // auto-stop 异步
+        await Task.Delay(300); // auto-stop is async
 
         var gone = await system.GetAsync<PaymentSaga>(sagaId);
         await Assert.That(gone).IsNull();
@@ -190,9 +189,11 @@ public sealed class SagaIntegrationTests
         var sagaId = Guid.CreateVersion7();
         var orderId = Guid.CreateVersion7();
 
-        // 中断场景:步骤 1 已持久化(StartPayment 已处理),PaymentReceived 未到达前"崩溃"
+        // Interrupted scenario: step 1 was persisted (StartPayment handled);
+        // "crashed" before PaymentReceived arrived
         await store.AppendAsync(sagaId, 0, [new PaymentStep1Started(orderId)]);
-        // 聚合独立事件流:订单已支付(外部世界的事实,saga 不知道)
+        // The aggregate's independent stream: the order was paid (a fact of the
+        // outside world, unknown to the saga)
         await store.AppendAsync(orderId, 0, [new OrderCreated(orderId), new OrderPaid(orderId)]);
 
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
@@ -207,7 +208,8 @@ public sealed class SagaIntegrationTests
         await Assert.That(results[0].Id).IsEqualTo(sagaId);
         await Assert.That(results[0].Status).IsEqualTo(SagaResumeStatus.Completed);
 
-        // resume 主动查询聚合状态 → 已支付 → 直接完成,事件流含框架完成事件
+        // Resume actively queries aggregate state → already paid → completes directly;
+        // the stream contains the framework completion event
         var events = await store.LoadAsync(sagaId);
         await Assert.That(events.Count).IsEqualTo(3);
         await Assert.That(events[1]).IsTypeOf<PaymentStep2Done>();

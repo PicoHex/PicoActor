@@ -71,11 +71,13 @@ public static class PicoActorDiExtensions
                 )
                     logger = loggerFactory.CreateLogger(nameof(ActorSystem));
 
-                // 事件流出:若容器已注册 IMediator(如 AddPicoMediator),自动接线
-                // MediatorDomainEventPublisher。工厂内延迟解析与 Scoped 生命周期兼容——
-                // 无需 Build 前的 publisher 实例。
-                // PicoDI 2026.8.1(E1)起 Singleton 工厂使用容器内部根 scope——任意 scope
-                // 首次解析均安全;ODE 诊断保留为防御(用户自建 publisher 场景)。
+                // Event outflow: if the container has IMediator registered (e.g. via
+                // AddPicoMediator), auto-wire MediatorDomainEventPublisher. Lazy
+                // resolution inside the factory is compatible with scoped lifetimes —
+                // no publisher instance is needed before Build.
+                // Since PicoDI 2026.8.1 (E1), singleton factories run against the
+                // container-internal root scope, so first resolution from any scope is
+                // safe; the ODE diagnostic remains as defense (user-built publisher scenario).
                 IDomainEventPublisher? domainEventPublisher = null;
                 if (
                     scope.TryGetService(typeof(IMediator), out var mediatorObj)
@@ -99,16 +101,16 @@ public static class PicoActorDiExtensions
     }
 
     /// <summary>
-    /// 注册 PicoActor 服务并接线 PicoMediator 事件流出。
-    /// ActorSystem 的 DomainEventPublisher = MediatorDomainEventPublisher(publisher)。
-    /// IEventStore 默认 InMemory;若容器已注册 IEventStore 则优先使用。
+    /// Registers PicoActor services and wires PicoMediator event outflow.
+    /// ActorSystem's DomainEventPublisher = MediatorDomainEventPublisher(publisher).
+    /// IEventStore defaults to InMemory; a container-registered IEventStore takes precedence.
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container, IPublisher publisher)
     {
         ArgumentNullException.ThrowIfNull(container);
         ArgumentNullException.ThrowIfNull(publisher);
 
-        // 复用主路径(EventStore 默认 InMemory + ActorSystem 注册),再覆盖 publisher 接线
+        // Reuse the main path (InMemory EventStore default + ActorSystem registration), then override the publisher wiring
         AddPicoActor(container, eventStore: null);
 
         container.Register(
@@ -117,7 +119,7 @@ public static class PicoActorDiExtensions
             {
                 var store = (IEventStore)scope.GetService(typeof(IEventStore));
 
-                // 可选:解析 PicoLog 日志
+                // Optional: resolve PicoLog logger
                 ILogger? logger = null;
                 if (
                     scope.TryGetService(typeof(ILoggerFactory), out var factoryObj)
