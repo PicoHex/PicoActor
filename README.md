@@ -457,6 +457,10 @@ Notes:
 - **Auto-wiring is safe from any resolving scope**: since PicoDI 2026.8.1 (E1)
   singleton factories run against the container-internal root scope, the
   auto-wired IMediator lives until container disposal.
+- **Never `AskAsync` the publishing aggregate from its own publish path** — the
+  source mailbox is busy flushing the event, so the request would self-deadlock.
+  Query read-side projections (separate actors) instead; `Send` to the source
+  aggregate is safe (fire-and-forget).
 
 ---
 

@@ -309,6 +309,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 - 恢复静默:replay 不重复发布。
 - 框架事件(`SagaCompleted`/`SagaFailed`)与其他事件一样可类型化订阅(Abs 目标 net10.0)。
 - **自动接线任意 scope 安全**:PicoDI 2026.8.1(E1)起 Singleton 工厂使用容器内部根 scope——自动接线的 IMediator 存活至容器释放。
+- **禁止在发布路径内对发布源聚合 `AskAsync`**——源 mailbox 正忙于 flush 事件,请求会自我死锁。读模型查询应指向独立的投影 actor;对源聚合 `Send` 安全(fire-and-forget)。
 
 ---
 
