@@ -13,6 +13,8 @@
     <!-- 2026.8.1 bridge 生成代码需要(PicoMediator 主包的 MediatorAutoSubscriptionRegistry + PicoDI.Abs) -->
     <PackageReference Include="PicoMediator" />
     <PackageReference Include="PicoDI.Abs" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all" />
     <ProjectReference Include="..\..\src\PicoActor.Abs\PicoActor.Abs.csproj" />
+    <ProjectReference Include="..\..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />
   </ItemGroup>
 </Project>
