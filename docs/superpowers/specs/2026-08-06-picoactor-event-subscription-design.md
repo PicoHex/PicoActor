@@ -49,6 +49,27 @@
 - 框架事件 `SagaCompleted/SagaFailed` 走同一发布路径 → 自动以信封交付(`IDomainEventSubscriber<SagaCompleted>` 可订阅)
 - replay 永不发布(恢复静默)——现状不变,订阅者不重放
 
+**用法示例**(订阅者 = 无状态翻译层,零注入依赖):
+
+```csharp
+// 1. 定义事件(既有,IDomainEvent : IEvent)
+public sealed record OrderPaid(Guid OrderId, decimal Amount) : IDomainEvent;
+
+// 2. 定义订阅者 —— PicoActor.Gen 自动注册,组合根零配置
+public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
+{
+    public ValueTask Handle(DomainEventEnvelope<OrderPaid> env, ICommandSender sender, CancellationToken ct)
+    {
+        sender.Send(env.Event.OrderId, new ShipOrder(env.Event.OrderId));
+        return default;
+    }
+}
+
+// 3. 组合根(不变):
+//    container.AddPicoMediator();   // 应用所有 configurator(含 pico-actor:: 生成的订阅注册)
+//    container.AddPicoActor();      // 自动检测 IMediator → 信封发布接线 + ICommandSender 注册
+```
+
 ## 4. 组件详设
 
 ### 4.1 PicoActor.Abs · 新文件 `IDomainEventSubscriber.cs`
