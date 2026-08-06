@@ -406,7 +406,7 @@ public sealed partial class MediatorIntegrationTests
 
         var target = await system.CreateAsync<MedIntegrationTargetActor>(new TargetCmd("init"));
         TriggerSendHandler.TargetActorId = target.Id;
-        MedIntegrationTargetActor.ReceivedPayloads.Clear(); // discard creation entries (base ctor dispatches OnMessageAsync, derived ctor adds again)
+        MedIntegrationTargetActor.ReceivedPayloads.Clear(); // parameterless factory ignores the creation command — no construction-time entries; Clear is a defensive no-op that keeps the count assertion valid if the factory ever changes
         system.Register<MedIntegrationSaga>(
             _ => new MedIntegrationSaga(),
             () => new MedIntegrationSaga()
