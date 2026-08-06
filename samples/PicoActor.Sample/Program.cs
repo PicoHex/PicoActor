@@ -9,6 +9,9 @@
 //   - OutputChannel subscription
 //   - StopAsync + GetAsync (event-sourced rebuild from persistence)
 //   - Idempotent StopAsync
+//   - Saga + event outflow: envelope context (ActorId/Version), multi-subscriber
+//     (two IDomainEventSubscriber<OrderPaid> handlers), ICommandSender ports
+//     (Send / AskAsync; ExecuteSaga from the main flow, also callable from handlers)
 // ═══════════════════════════════════════════════════════════════
 
 Console.WriteLine("=== PicoActor Sample: Event-Sourced Counter ===\n");
@@ -117,6 +120,10 @@ static async Task SagaAndEventOutflowDemoAsync()
     SampleContext.System = system;
     system.Register<OrderActor>(_ => new OrderActor(), () => new OrderActor());
     system.Register<PaymentSaga>(_ => new PaymentSaga(), () => new PaymentSaga());
+    system.Register<PaymentLedger>(_ => new PaymentLedger(), () => new PaymentLedger());
+
+    var ledger = await system.CreateAsync<PaymentLedger>(new RecordPayment(Guid.Empty));
+    SampleContext.LedgerId = ledger.Id;
 
     var order = await system.CreateAsync<OrderActor>(new CreateOrder(Guid.NewGuid()));
 
@@ -126,13 +133,15 @@ static async Task SagaAndEventOutflowDemoAsync()
     SampleContext.PaymentSagaId = execution.Id;
 
     // 3. External payment gateway marks the order paid → OrderPaid flows out as an envelope
-    //    → OrderPaidSub translates it into PaymentReceived → saga mailbox
+    //    → OrderPaidSub translates it into PaymentReceived → saga mailbox + RecordPayment → ledger
+    //    → OrderPaidAuditSub (second subscriber, same event) queries the ledger via AskAsync
     await system.AskAsync<object?>(order.Id, new MarkPaid(order.Id));
     await Task.Delay(300);
 
     // 4. Saga completed via event loopback; terminal event flowed out; auto-stopped
     var gone = await system.GetAsync<PaymentSaga>(execution.Id);
     Console.WriteLine($"[Loopback]   saga auto-stopped: {gone is null}");
+    Console.WriteLine($"[Outflow]    OrderPaid envelopes received (multi-subscriber): {OrderPaidAuditSub.Received.Count}");
     Console.WriteLine($"[Outflow]    SagaCompleted events received: {SagaCompletedSub.Received.Count}");
     Console.WriteLine($"[Outflow]    SagaCompleted result: {SagaCompletedSub.Received.LastOrDefault()?.Result}");
 
@@ -242,6 +251,8 @@ public sealed record MarkPaid(Guid OrderId) : ICommand;
 public sealed record GetPaymentStatus : ICommand;
 public sealed record StartPayment(Guid OrderId) : ICommand;
 public sealed record PaymentReceived(Guid OrderId) : ICommand;
+public sealed record RecordPayment(Guid OrderId) : ICommand;
+public sealed record GetLedgerCount : ICommand;
 
 // ── Domain Events ──────────────────────────────────────────────
 public sealed record OrderCreated(Guid OrderId) : IDomainEvent;
@@ -254,6 +265,7 @@ public static class SampleContext
 {
     public static IActorSystem? System;
     public static Guid? PaymentSagaId;
+    public static Guid? LedgerId;
 }
 
 /// <summary>Order aggregate — command-driven, produces business events.</summary>
@@ -355,8 +367,32 @@ public sealed class PaymentSaga : SagaActor
     }
 }
 
+/// <summary>Write-side projection (plain in-memory actor). Receives RecordPayment via Send;
+/// GetLedgerCount answers read-model queries. Lives OUTSIDE the publish path, so
+/// AskAsync from a subscriber is safe (no self-deadlock — see OrderPaidAuditSub).</summary>
+public sealed class PaymentLedger : Actor
+{
+    private int _count;
+
+    public PaymentLedger() { }
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        switch (command)
+        {
+            case RecordPayment:
+                _count++;
+                return default;
+            case GetLedgerCount:
+                return new ValueTask<object?>(_count);
+        }
+        return default;
+    }
+}
+
 /// <summary>Domain-event subscriber — event-to-command translation is a business-layer concern.
-/// PicoActor.Gen auto-registers it; the envelope carries the source aggregate context.</summary>
+/// PicoActor.Gen auto-registers it; the envelope carries the source aggregate context
+/// (ActorId/Version) plus the narrow ICommandSender port.</summary>
 public sealed class OrderPaidSub : IDomainEventSubscriber<OrderPaid>
 {
     public static int Handled;
@@ -368,9 +404,36 @@ public sealed class OrderPaidSub : IDomainEventSubscriber<OrderPaid>
     )
     {
         Handled++;
+        Console.WriteLine(
+            $"  [OrderPaidSub]     envelope: ActorId={envelope.ActorId}, Version={envelope.Version}"
+        );
         if (SampleContext.PaymentSagaId is { } sagaId)
             sender.Send(sagaId, new PaymentReceived(envelope.Event.OrderId)); // translation → saga mailbox
+        if (SampleContext.LedgerId is { } ledgerId)
+            sender.Send(ledgerId, new RecordPayment(envelope.Event.OrderId)); // write-side projection
         return default;
+    }
+}
+
+/// <summary>Second subscriber for the SAME event — every envelope reaches all subscribers
+/// (multi-subscriber contract). Uses the AskAsync port to query a read-side projection.
+/// NEVER AskAsync the publishing aggregate from its own publish path: the source
+/// mailbox is busy flushing the event, so the request would self-deadlock.</summary>
+public sealed class OrderPaidAuditSub : IDomainEventSubscriber<OrderPaid>
+{
+    public static readonly List<DomainEventEnvelope<OrderPaid>> Received = [];
+
+    public async ValueTask Handle(
+        DomainEventEnvelope<OrderPaid> envelope,
+        ICommandSender sender,
+        CancellationToken ct = default
+    )
+    {
+        Received.Add(envelope);
+        var count = await sender.AskAsync<int>(SampleContext.LedgerId!.Value, new GetLedgerCount());
+        Console.WriteLine(
+            $"  [OrderPaidAuditSub] ActorId={envelope.ActorId} v{envelope.Version} → AskAsync(GetLedgerCount)={count}"
+        );
     }
 }
 
