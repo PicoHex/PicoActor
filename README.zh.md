@@ -32,6 +32,8 @@ AOT 兼容的内存 Actor 框架，支持事件溯源（Event Sourcing）。轻�
 标识以及单线程消费循环。命令通过 `Send`（发后不理）或 `AskAsync`
 （请求-回复）投递。
 
+PicoActor 是**消息驱动**的：一切交互都是消息。命令（`ICommand`）是定向消息，经邮箱投递（1:1，可带响应）；领域事件（`IDomainEvent`）是广播消息，经 PicoMediator 发布（1:N，无响应）。事件也是消息——跨聚合协作只有一种模式：事件 → 订阅者 → 翻译命令 → 邮箱。除此之外没有其他与 actor 交互的方式。
+
 事件溯源 Actor 遵循 **先持久化再变更（Persist-then-Mutate）**：
 `OnMessageAsync → RaiseEvent → 持久化到 IEventStore → Mutate 状态`。
 状态仅在持久化成功后变更——内存状态始终与事件流保持一致。

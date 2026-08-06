@@ -34,6 +34,14 @@ Each actor owns a **mailbox** (in-memory `Channel<Envelope>`), a **UUID v7**
 identity, and a single-threaded consumption loop. Commands are delivered
 via `Send` (fire-and-forget) or `AskAsync` (request-reply).
 
+PicoActor is **message-driven**: every interaction is a message. Commands
+(`ICommand`) are directed messages delivered through the mailbox (1:1,
+optional response); domain events (`IDomainEvent`) are broadcast messages
+published through PicoMediator (1:N, no response). Events are messages too —
+the cross-aggregate collaboration pattern is a single loop:
+event → subscriber → translated command → mailbox. There is no other way to
+interact with an actor.
+
 Event-Sourced actors follow **Persist-then-Mutate**:
 `OnMessageAsync → RaiseEvent → Persist to IEventStore → Mutate state`.
 State is only mutated after successful persistence — the in-memory state
