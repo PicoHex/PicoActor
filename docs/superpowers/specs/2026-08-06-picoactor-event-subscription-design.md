@@ -91,6 +91,13 @@ public sealed record DomainEventEnvelope<TEvent>(Guid ActorId, ulong Version, TE
 public sealed record DomainEventEnvelope(Guid ActorId, ulong Version, IDomainEvent Event) : IEvent;
 ```
 
+**为什么传输信封是非泛型**(四步论证):
+
+1. 泛型是编译期特性——`DomainEventEnvelope<T>` 的 `T` 必须在编译时实例化;运行时"知道类型"只能靠反射(`MakeGenericMethod`),AOT 禁止
+2. 发布点必然在运行时库(persist+mutate 之后触发,replay 永不发布),而运行时库不引用 app 事件类型;事件以 `IDomainEvent` 身份入列 `List<IDomainEvent>`(异构批量,一条命令可产 N 种事件),具体类型在集合边界被 C# 擦除
+3. 生成代码(SG)的类型知识在 app 程序集,运行时库代码不能调用 app 代码——发布循环里没有 app 侧生成代码的执行点,类型知识物理不可达
+4. 因此跨库边界的传输对象必须是自描述袋子(actorId + version + `IDomainEvent`);具体类型在订阅侧由生成 bridge 的 `is TEvent` 静态窄化恢复,构造泛型信封交付——与 PicoMediator `Publish(IEvent)` + 生成 dispatcher 的形状同构
+
 ### 4.2 PicoActor.Abs · 新文件 `ICommandSender.cs`
 
 ```csharp
