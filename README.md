@@ -55,7 +55,7 @@ is always consistent with the event stream.
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans all require reflection | ✅ Full NativeAOT support |
 | Event Sourcing | ❌ Proto.Actor, Orleans lack built-in ES | ✅ Persist-then-Mutate, automatic rollback |
-| Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 2 packages, zero dependency beyond Channels |
+| Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 4 packages — PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs; no other runtime dependencies |
 | DI Integration | ❌ Tied to Microsoft.Extensions.DI | ✅ Native PicoDI, zero-reflection resolution |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor only | ❌ net10.0-only (PicoMediator runtime requires net10.0+) |
 | Learning Curve | ❌ Steep — supervision trees, clustering, remoting | ✅ Minimal — actors + events + mailbox |
@@ -106,15 +106,18 @@ interfaces and base classes.
 | Type | Role |
 |------|------|
 | `IActor` | Base interface — provides `Id` (UUID v7) |
-| `IActorSystem` | Runtime contract — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
+| `IActorSystem` | Runtime contract — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Marker interface for commands |
 | `IDomainEvent` | Marker interface for domain events |
 | `IEventSourcedActor` | Optional interface — Version, ReplayEvents, CommitEvents |
-| `IEventStore` | Persistence contract — AppendAsync (optimistic concurrency), LoadAsync |
+| `IEventStore` | Persistence contract — AppendAsync (optimistic concurrency), LoadAsync, PeekFirstAsync |
 | `ICancelable` | Optional — CancelCurrentTurn for long-running operations |
 | `Actor` | Abstract base — mailbox, consumption loop, SignalReady, StopAsync |
 | `EventSourcedActor` | ES base — RaiseEvent, Mutate, Persist-then-Mutate pipeline |
 | `SagaActor` | Finite-life ES coordinator — framework terminal events (SagaCompleted/SagaFailed), auto-stop, explicit batch recovery via ResumeInterruptedSagasAsync |
+| `IDomainEventSubscriber<TEvent>` | Subscriber contract — typed envelope + `ICommandSender`; auto-registered by PicoActor.Gen (declare-and-subscribe) |
+| `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | Context envelope — `ActorId`, `Version`, `Event` (transport / typed delivery) |
+| `ICommandSender` | Narrow command port for handlers — Send, AskAsync, ExecuteSaga |
 | `Envelope` | Internal — wraps ICommand with optional TaskCompletionSource |
 | `ActorOutputEvent` | Outbound notification — Type, Data, optional ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | Thrown by IEventStore on version mismatch |
@@ -129,6 +132,7 @@ Targets `net10.0`, AOT-compatible.
 | `InMemoryEventStore` | Lock-free in-memory store — ConcurrentDictionary-backed |
 | `ActorConfig` | Configuration POCO — bind from PicoCfg |
 | `ActorSystemOptions` | Options — required EventStore, optional Logger, optional DomainEventPublisher; consumed by the `ActorSystem` constructor |
+| `MediatorDomainEventPublisher` | Default `IDomainEventPublisher` — publishes `DomainEventEnvelope` per event with per-event isolation |
 | `PicoActorDiExtensions` | `AddPicoActor()` extension method for PicoDI |
 
 ### Actor (Non-ES)
@@ -388,6 +392,9 @@ public sealed class PostgresEventStore : IEventStore
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     { /* SELECT ordered by version */ }
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    { /* SELECT first event (recovery enumeration) */ }
 }
 ```
 
@@ -496,8 +503,8 @@ Notes:
 
 | Package | Target | Description |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Core abstractions: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `InMemoryEventStore`, PicoDI integration |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Core abstractions: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor`, `SagaActor` — plus subscription types (`IDomainEventSubscriber<TEvent>`, `DomainEventEnvelope`, `ICommandSender`) and the embedded `PicoActor.Gen` analyzer (declare-and-subscribe) |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `InMemoryEventStore`, `MediatorDomainEventPublisher` (envelope event outflow), PicoDI integration (`AddPicoActor` auto-wires IMediator + ICommandSender) |
 
 ---
 
@@ -513,7 +520,7 @@ Notes:
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Distributed / Clustering | ❌ | ✅ | ✅ | ✅ |
 | Single-threaded per actor | ✅ | ✅ | ✅ | ❌ |
-| Packages | 2 | 8+ | 3+ | 10+ |
+| Packages | 4 | 8+ | 3+ | 10+ |
 
 ---
 

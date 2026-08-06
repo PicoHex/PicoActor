@@ -48,7 +48,7 @@ Event Sourcing Actor는 **Persist-then-Mutate**(영속화 후 변경)를 따릅�
 |---------|:----------------:|:--------------:|
 | AOT / 트리밍 | ❌ Akka.NET, Proto.Actor, Orleans는 리플렉션 필요 | ✅ 완전 NativeAOT 지원 |
 | Event Sourcing | ❌ Proto.Actor, Orleans는 ES 미내장 | ✅ Persist-then-Mutate, 자동 롤백 |
-| 의존성 크기 | ❌ Akka.NET(8+ 패키지), Orleans(10+ 패키지) | ✅ 패키지 2개, Channels 외 제로 의존성 |
+| 의존성 크기 | ❌ Akka.NET(8+ 패키지), Orleans(10+ 패키지) | ✅ 패키지 4개 — PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs; 다른 런타임 의존성 없음 |
 | DI 통합 | ❌ Microsoft.Extensions.DI에 종속 | ✅ 네이티브 PicoDI, 제로 리플렉션 |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 일부만 지원 | ❌ net10.0 전용(PicoMediator 런타임은 net10.0+ 필요) |
 | 학습 곡선 | ❌ 가파름——감독 트리, 클러스터링, 리모팅 | ✅ 최소——Actor + Event + Mailbox |
@@ -98,14 +98,18 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 타입 | 역할 |
 |------|------|
 | `IActor` | 기본 인터페이스——`Id`(UUID v7) 제공 |
-| `IActorSystem` | 런타임 계약——Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
+| `IActorSystem` | 런타임 계약——Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | 명령용 마커 인터페이스 |
 | `IDomainEvent` | 도메인 이벤트용 마커 인터페이스 |
 | `IEventSourcedActor` | 선택적——Version, ReplayEvents, CommitEvents |
-| `IEventStore` | 영속화 계약——AppendAsync(낙관적 동시성), LoadAsync |
+| `IEventStore` | 영속화 계약——AppendAsync(낙관적 동시성), LoadAsync, PeekFirstAsync |
 | `ICancelable` | 선택적——장기 실행 작업용 CancelCurrentTurn |
 | `Actor` | 추상 기본 클래스——메일박스, 소비 루프, SignalReady, StopAsync |
 | `EventSourcedActor` | ES 기본——RaiseEvent, Mutate, Persist-then-Mutate 파이프라인 |
+| `SagaActor` | 유한 수명 ES 코디네이터 — 프레임워크 터미널 이벤트(SagaCompleted/SagaFailed), 자동 중지, ResumeInterruptedSagasAsync를 통한 명시적 일괄 복구 |
+| `IDomainEventSubscriber<TEvent>` | 구독자 계약 — 타입화된 엔벨로프 + `ICommandSender`; PicoActor.Gen이 자동 등록(declare-and-subscribe) |
+| `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | 컨텍스트 엔벨로프 — `ActorId`, `Version`, `Event`(전송 / 타입화된 전달) |
+| `ICommandSender` | 핸들러용 좁은 명령 포트 — Send, AskAsync, ExecuteSaga |
 | `Envelope` | 내부——ICommand를 선택적 TaskCompletionSource로 래핑 |
 | `ActorOutputEvent` | 발신 알림——Type, Data, 선택적 ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | 버전 불일치 시 IEventStore가 발생 |
@@ -120,6 +124,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `InMemoryEventStore` | 락-프리 인메모리 저장소——ConcurrentDictionary 기반 |
 | `ActorConfig` | 설정 POCO——PicoCfg에서 바인딩 가능 |
 | `ActorSystemOptions` | 옵션 — 필수 EventStore, 선택 Logger, 선택 DomainEventPublisher;`ActorSystem` 생성자에서 사용 |
+| `MediatorDomainEventPublisher` | 기본 `IDomainEventPublisher` — 이벤트별로 `DomainEventEnvelope` 게시, 이벤트별 격리 |
 | `PicoActorDiExtensions` | PicoDI용 `AddPicoActor()` 확장 메서드 |
 
 ### Actor (비-ES)
@@ -266,21 +271,32 @@ public sealed class PostgresEventStore : IEventStore
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     { /* 버전순 SELECT */ }
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    { /* 첫 번째 이벤트 조회(복구 열거) */ }
 }
 ```
 
 ### 이벤트 유출(PicoMediator)
 
-`IDomainEvent : IEvent`——도메인 이벤트는 PicoMediator 1급 알림입니다. persist+mutate 이후 프레임워크가 `IDomainEventPublisher` 훅으로 발행하며;replay(복구)는 재발행하지 않습니다.
+`IDomainEvent : IEvent`——도메인 이벤트는 PicoMediator 1급 알림입니다. persist+mutate 이후 프레임워크가 **컨텍스트 엔벨로프** 형태로 `IDomainEventPublisher` 훅을 통해 발행하며;replay(복구)는 재발행하지 않습니다.
 
-`MediatorDomainEventPublisher`는 즉시 사용 가능한 어댑터:이벤트별 `Publish<IDomainEvent>`(컴파일 타임 제네릭, AOT 안전), 이벤트별 격리——구독자 하나의 실패가 이후 이벤트를 막지 않습니다.
+`MediatorDomainEventPublisher`는 즉시 사용 가능한 어댑터:각 이벤트를 `DomainEventEnvelope(actorId, version, event)`로 감싼 후 이벤트별 `Publish<DomainEventEnvelope>`(컴파일 타임 제네릭, AOT 안전), 이벤트별 격리——구독자 하나의 실패가 이후 이벤트를 막지 않습니다.
+
+### 도메인 이벤트 구독(declare-and-subscribe)
+
+이벤트 핸들러는 `IDomainEventSubscriber<TEvent>`를 구현하는 일반 클래스입니다——PicoActor.Gen(PicoActor.Abs에 내장)이 스캔하여 자동 등록, 수동 배선 제로. 핸들러는 소스 애그리거트 컨텍스트(`ActorId`, `Version`)를 담은 타입화된 엔벨로프와 좁은 포트 `ICommandSender`를 받습니다:
 
 ```csharp
-// 구독자:선언 즉시 구독——Gen 스캔으로 자동 등록, 수동 등록 제로. 이벤트→명령 변환은 비즈니스 계층의 책임.
-public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
-    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* 명령으로 변환 */ return default; }
+    public ValueTask Handle(DomainEventEnvelope<OrderPaid> envelope, ICommandSender sender, CancellationToken ct)
+    {
+        sender.Send(envelope.Event.OrderId, new ShipOrder(envelope.Event.OrderId));
+        return default;
+    }
 }
+```
 
 // 배선:AddPicoMediator가 IMediator를 등록;AddPicoActor()가 ActorSystem 팩토리 내에서
 // 자동 감지하여 이벤트 유출을 배선(지연 해석, Scoped 수명 주기와 호환).
@@ -294,12 +310,19 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 사용자 지정 publisher 명시적 배선:AddPicoActor(IPublisher)(인스턴스는 Build() 전에 필요).
 ```
 
+> **로컬 개발(ProjectReference):** analyzer는 ProjectReference 체인을 통해 전파되지 않습니다——프로젝트 소비자는 `PicoActor.Gen`을 직접 참조해야 합니다(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, `tests/PicoActor.Tests` 미러). NuGet 소비자는 `PicoActor.Abs` 패키지의 `buildTransitive` props를 통해 생성기를 자동으로 받습니다——추가 참조 불필요.
+
+이벤트는 persist+mutate 이후 엔벨로프 형태로 PicoMediator를 통해 유출됩니다;replay는 절대 발행하지 않습니다. 핸들러 실패는 actor에 영향을 주지 않습니다(핸들러별 격리). 이벤트→명령→이벤트 변환 루프는 의도된 사용법입니다——핸들러를 멱등하고 유계로 유지하세요.
+
+> **파괴적 변경:** 직접 `ISubscriber<TEvent>`(PicoMediator) 구독자는 더 이상 PicoActor 도메인 이벤트를 받지 못합니다. `IDomainEventSubscriber<TEvent>`로 마이그레이션하세요;엔벨로프의 `ActorId`/`Version`이 수동으로 내장된 애그리거트 id를 대체합니다. 사용자 지정 publisher(`AddPicoActor(IPublisher)`)는 이제 원시 이벤트 대신 `DomainEventEnvelope` 인스턴스를 받습니다——`Publish<TEvent>` 구현을 그에 맞게 조정하세요(관찰되는 페이로드 형태만 변경;actor 파이프라인은 영향 없음).
+
 참고:
 - **이벤트→명령 변환은 구독자(비즈니스 계층)의 책임**——PicoActor는 발행만;명령은 mailbox로만 actor에 진입합니다.
 - 발행은 **persist+mutate 이후**——발행 실패는 actor 상태에 영향을 주지 않습니다(이벤트는 이미 영속화됨).
 - 복구는 조용함:replay는 재발행하지 않습니다.
-- **형식화 구독(base-type bridge)**:어댑터는 `Publish<IDomainEvent>`;생성된 bridge가 구체 형식 구독자로 라우팅합니다.베이스 형식 선언 구독자(`ISubscriber<IDomainEvent>`)도 베이스 형식 발행을 받지만 구체 형식 발행은 받지 못합니다.프레임워크 이벤트(`SagaCompleted`/`SagaFailed`)는 다른 이벤트와 마찬가지로 형식화 구독 가능(Abs는 net10.0 대상).
+- 프레임워크 이벤트(`SagaCompleted`/`SagaFailed`)는 다른 이벤트와 마찬가지로 형식화 구독 가능(Abs는 net10.0 대상).
 - **자동 배선은 임의 scope에서 안전**:PicoDI 2026.8.1(E1)부터 Singleton 팩토리는 컨테이너 내부 루트 scope를 사용——자동 배선된 IMediator는 컨테이너 해제까지 생존합니다.
+- **발행 중인 애그리거트에 자신의 발행 경로에서 `AskAsync`를 호출하지 마세요**——소스 mailbox가 이벤트 flush로 바쁘므로 요청이 자기 교착(self-deadlock)됩니다. 읽기 측 투영(별도 actor)을 조회하세요;소스 애그리거트로의 `Send`는 안전합니다(발사 후 망각).
 
 ---
 
@@ -327,8 +350,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | 패키지 | 타겟 | 설명 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 런타임: `ActorSystem`, `InMemoryEventStore`, PicoDI 통합 |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor`, `SagaActor` — 추가로 구독 타입(`IDomainEventSubscriber<TEvent>`, `DomainEventEnvelope`, `ICommandSender`)과 내장 `PicoActor.Gen` 분석기(declare-and-subscribe) |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 런타임: `ActorSystem`, `InMemoryEventStore`, `MediatorDomainEventPublisher`(엔벨로프 이벤트 유출), PicoDI 통합(`AddPicoActor`가 IMediator + ICommandSender 자동 연결) |
 
 ---
 
@@ -344,7 +367,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 분산 / 클러스터링 | ❌ | ✅ | ✅ | ✅ |
 | Actor당 단일 스레드 | ✅ | ✅ | ✅ | ❌ |
-| 패키지 수 | 2 | 8+ | 3+ | 10+ |
+| 패키지 수 | 4 | 8+ | 3+ | 10+ |
 
 ---
 

@@ -49,7 +49,7 @@ ist immer konsistent mit dem Event-Stream.
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans benötigen Reflection | ✅ Vollständige NativeAOT-Unterstützung |
 | Event Sourcing | ❌ Proto.Actor, Orleans ohne integriertes ES | ✅ Persist-then-Mutate, automatischer Rollback |
-| Abhängigkeitsgröße | ❌ Akka.NET (8+ Pakete), Orleans (10+ Pakete) | ✅ 2 Pakete, null Abhängigkeiten außer Channels |
+| Abhängigkeitsgröße | ❌ Akka.NET (8+ Pakete), Orleans (10+ Pakete) | ✅ 4 Pakete — PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs; keine weiteren Laufzeitabhängigkeiten |
 | DI-Integration | ❌ An Microsoft.Extensions.DI gebunden | ✅ Natives PicoDI, auflösung ohne Reflection |
 | netstandard2.0 | ⚠️ Teilweise Unterstützung in Akka.NET / Proto.Actor | ❌ Nur net10.0 (PicoMediator-Laufzeit erfordert net10.0+) |
 | Lernkurve | ❌ Steil — Supervision-Bäume, Clustering, Remoting | ✅ Minimal — Actor + Event + Mailbox |
@@ -99,14 +99,18 @@ Ziel `net10.0` (PicoMediator-Laufzeit und generierter Bridge-Code erfordern net1
 | Typ | Rolle |
 |------|------|
 | `IActor` | Basisschnittstelle — stellt `Id` (UUID v7) bereit |
-| `IActorSystem` | Laufzeitvertrag — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
+| `IActorSystem` | Laufzeitvertrag — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Markierungsschnittstelle für Befehle |
 | `IDomainEvent` | Markierungsschnittstelle für Domänenereignisse |
 | `IEventSourcedActor` | Optional — Version, ReplayEvents, CommitEvents |
-| `IEventStore` | Persistenzvertrag — AppendAsync (optimistische Nebenläufigkeit), LoadAsync |
+| `IEventStore` | Persistenzvertrag — AppendAsync (optimistische Nebenläufigkeit), LoadAsync, PeekFirstAsync |
 | `ICancelable` | Optional — CancelCurrentTurn für langlaufende Operationen |
 | `Actor` | Abstrakte Basisklasse — Mailbox, Konsumschleife, SignalReady, StopAsync |
 | `EventSourcedActor` | ES-Basis — RaiseEvent, Mutate, Persist-then-Mutate-Pipeline |
+| `SagaActor` | ES-Koordinator mit begrenzter Lebensdauer — Framework-Terminalereignisse (SagaCompleted/SagaFailed), Auto-Stopp, explizite Batch-Wiederherstellung über ResumeInterruptedSagasAsync |
+| `IDomainEventSubscriber<TEvent>` | Abonnentenvertrag — typisierter Envelope + `ICommandSender`; automatisch registriert durch PicoActor.Gen (declare-and-subscribe) |
+| `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | Kontext-Envelope — `ActorId`, `Version`, `Event` (Transport / typisierte Zustellung) |
+| `ICommandSender` | Schmaler Befehlsport für Handler — Send, AskAsync, ExecuteSaga |
 | `Envelope` | Intern — umschließt ICommand mit optionalem TaskCompletionSource |
 | `ActorOutputEvent` | Ausgehende Benachrichtigung — Type, Data, optional ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | Von IEventStore bei Versionsdivergenz ausgelöst |
@@ -121,6 +125,7 @@ Ziel `net10.0`, AOT-kompatibel.
 | `InMemoryEventStore` | Lock-freier In-Memory-Speicher — ConcurrentDictionary-basiert |
 | `ActorConfig` | Konfigurations-POCO — aus PicoCfg bindbar |
 | `ActorSystemOptions` | Optionen — EventStore erforderlich, Logger optional, DomainEventPublisher optional; vom `ActorSystem`-Konstruktor verwendet |
+| `MediatorDomainEventPublisher` | Standard-`IDomainEventPublisher` — veröffentlicht `DomainEventEnvelope` pro Ereignis mit Isolierung pro Ereignis |
 | `PicoActorDiExtensions` | `AddPicoActor()`-Erweiterungsmethode für PicoDI |
 
 ### Actor (Nicht-ES)
@@ -268,22 +273,32 @@ public sealed class PostgresEventStore : IEventStore
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     { /* SELECT nach Version sortiert */ }
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    { /* SELECT des ersten Ereignisses (Wiederherstellungs-Enumeration) */ }
 }
 ```
 
 ### Event-Ausgang (PicoMediator)
 
-`IDomainEvent : IEvent` — Domain-Events sind First-Class-Benachrichtigungen für PicoMediator. Nach persist+mutate veröffentlicht das Framework sie über den `IDomainEventPublisher`-Hook; Replay (Wiederherstellung) veröffentlicht nicht erneut.
+`IDomainEvent : IEvent` — Domain-Events sind First-Class-Benachrichtigungen für PicoMediator. Nach persist+mutate veröffentlicht das Framework sie als **Kontext-Envelopes** über den `IDomainEventPublisher`-Hook; Replay (Wiederherstellung) veröffentlicht nicht erneut.
 
-`MediatorDomainEventPublisher` ist der Out-of-the-Box-Adapter: veröffentlicht jedes Event einzeln per `Publish<IDomainEvent>` (Compile-Time-Generic, AOT-sicher) mit Isolation pro Event — ein fehlgeschlagener Subscriber blockiert keine weiteren Events.
+`MediatorDomainEventPublisher` ist der Out-of-the-Box-Adapter: verpackt jedes Event in einen `DomainEventEnvelope(actorId, version, event)` und veröffentlicht ihn per `Publish<DomainEventEnvelope>` (Compile-Time-Generic, AOT-sicher) mit Isolation pro Event — ein fehlgeschlagener Subscriber blockiert keine weiteren Events.
+
+### Abonnieren von Domain-Events (declare-and-subscribe)
+
+Event-Handler sind einfache Klassen, die `IDomainEventSubscriber<TEvent>` implementieren — PicoActor.Gen (in PicoActor.Abs eingebettet) scannt und auto-registriert sie; null manuelle Verdrahtung. Der Handler erhält einen typisierten Envelope mit dem Kontext des Quell-Aggregats (`ActorId`, `Version`) plus einen schmalen `ICommandSender`-Port:
 
 ```csharp
-// Subscriber: declare-and-subscribe — automatisch per Gen-Scan registriert, null manuelle Verdrahtung.
-// Die Event→Command-Übersetzung ist Aufgabe der Geschäftsebene.
-public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
-    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* in Command übersetzen */ return default; }
+    public ValueTask Handle(DomainEventEnvelope<OrderPaid> envelope, ICommandSender sender, CancellationToken ct)
+    {
+        sender.Send(envelope.Event.OrderId, new ShipOrder(envelope.Event.OrderId));
+        return default;
+    }
 }
+```
 
 // Verdrahtung: AddPicoMediator registriert IMediator; AddPicoActor() erkennt ihn in der
 // ActorSystem-Factory und verdrahtet den Event-Ausgang (lazy — Scoped-kompatibel).
@@ -298,12 +313,19 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (die Instanz muss vor Build() verfügbar sein).
 ```
 
+> **Lokale Entwicklung (ProjectReference):** Analyzer propagieren nicht durch `ProjectReference`-Ketten — Projektkonsumenten müssen eine direkte Referenz auf `PicoActor.Gen` hinzufügen (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, Spiegel von `tests/PicoActor.Tests`). NuGet-Konsumenten erhalten den Generator automatisch über die `buildTransitive`-Props von `PicoActor.Abs` — keine zusätzliche Referenz nötig.
+
+Events fließen nach persist+mutate als Envelopes durch PicoMediator; Replay veröffentlicht nie. Handler-Fehler wirken sich nie auf den Actor aus (Isolation pro Handler). Übersetzungsschleifen (Event → Command → Event) sind beabsichtigt; halten Sie Handler idempotent und begrenzt.
+
+> **Breaking Change:** direkte `ISubscriber<TEvent>`-Subscriber (PicoMediator) erhalten keine PicoActor-Domain-Events mehr. Migrieren Sie zu `IDomainEventSubscriber<TEvent>`; `ActorId`/`Version` des Envelopes ersetzen jede manuell eingebettete Aggregat-ID. Eigene Publisher (`AddPicoActor(IPublisher)`) erhalten jetzt `DomainEventEnvelope`-Instanzen statt roher Events — passen Sie `Publish<TEvent>`-Implementierungen entsprechend an (nur die beobachtete Payload-Form änderte sich; die Actor-Pipeline ist nicht betroffen).
+
 Hinweise:
 - **Event→Command-Übersetzung ist Aufgabe des Subscribers (Geschäftsebene)** — PicoActor veröffentlicht nur; Commands gelangen ausschließlich über die Mailbox in Actor.
 - Veröffentlichung erfolgt **nach persist+mutate** — ein fehlgeschlagener Publish beeinträchtigt den Actor-Zustand nicht (Events sind bereits dauerhaft).
 - Wiederherstellung ist still: Replay veröffentlicht nicht erneut.
-- **Typisierte Subskription (Base-Type-Bridge)**: Der Adapter publiziert `Publish<IDomainEvent>`; generierte Bridges routen zu konkreten typisierten Subscribern. Basistyp-deklarierte Subscriber (`ISubscriber<IDomainEvent>`) empfangen ebenfalls Basistyp-Publishes, aber keine konkreten. Framework-Events (`SagaCompleted`/`SagaFailed`) sind wie alle anderen Events typisiert abonnierbar (Abs zielt auf net10.0).
+- Framework-Events (`SagaCompleted`/`SagaFailed`) sind wie alle anderen Events typisiert abonnierbar (Abs zielt auf net10.0).
 - **Auto-Verdrahtung aus jedem Scope sicher**: Seit PicoDI 2026.8.1 (E1) laufen Singleton-Factories gegen den container-internen Root-Scope — der auto-verdrahtete IMediator lebt bis zur Container-Freigabe.
+- **Verwenden Sie `AskAsync` niemals auf dem veröffentlichenden Aggregat aus dessen eigenem Veröffentlichungspfad** — die Quell-Mailbox ist mit dem Flush des Events beschäftigt; die Anfrage würde sich selbst blockieren. Fragen Sie Lese-Projektionen ab (separate Actors); `Send` an das Quell-Aggregat ist sicher (Fire-and-Forget).
 
 ---
 
@@ -331,8 +353,8 @@ Hinweise:
 
 | Paket | Ziel | Beschreibung |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Kernabstraktionen: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor` |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Laufzeit: `ActorSystem`, `InMemoryEventStore`, PicoDI-Integration |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Kernabstraktionen: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor`, `SagaActor` — plus Abonnementstypen (`IDomainEventSubscriber<TEvent>`, `DomainEventEnvelope`, `ICommandSender`) und den eingebetteten `PicoActor.Gen`-Analyzer (declare-and-subscribe) |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Laufzeit: `ActorSystem`, `InMemoryEventStore`, `MediatorDomainEventPublisher` (Envelope-Ereignisausgang), PicoDI-Integration (`AddPicoActor` verdrahtet IMediator + ICommandSender automatisch) |
 
 ---
 
@@ -348,7 +370,7 @@ Hinweise:
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Verteilt / Clustering | ❌ | ✅ | ✅ | ✅ |
 | Single-threaded pro Actor | ✅ | ✅ | ✅ | ❌ |
-| Pakete | 2 | 8+ | 3+ | 10+ |
+| Pakete | 4 | 8+ | 3+ | 10+ |
 
 ---
 

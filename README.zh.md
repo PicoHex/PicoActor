@@ -46,7 +46,7 @@ PicoActor 是**消息驱动**的：一切交互都是消息。命令（`ICommand
 |---------|:----------------:|:--------------:|
 | AOT / 裁剪 | ❌ Akka.NET、Proto.Actor、Orleans 均依赖反射 | ✅ 完整 NativeAOT 支持 |
 | 事件溯源 | ❌ Proto.Actor、Orleans 无内置 ES | ✅ Persist-then-Mutate，自动回滚 |
-| 依赖体积 | ❌ Akka.NET（8+ 包）、Orleans（10+ 包） | ✅ 2 个包，除 Channels 外零依赖 |
+| 依赖体积 | ❌ Akka.NET（8+ 包）、Orleans（10+ 包） | ✅ 4 个包——PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs；无其他运行时依赖 |
 | DI 集成 | ❌ 绑定 Microsoft.Extensions.DI | ✅ 原生 PicoDI，零反射解析 |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 仅部分支持 | ❌ 仅 net10.0(PicoMediator 运行时要求 net10.0+) |
 | 学习曲线 | ❌ 陡峭——监督树、集群、远程 | ✅ 极简——Actor + Event + Mailbox |
@@ -96,14 +96,18 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 类型 | 角色 |
 |------|------|
 | `IActor` | 基础接口——提供 `Id`（UUID v7） |
-| `IActorSystem` | 运行时契约——Register、CreateAsync、FindAggregateIds、GetAsync、Send、AskAsync、StopAsync、ExecuteSaga、ResumeInterruptedSagasAsync |
+| `IActorSystem` | 运行时契约——Register、CreateAsync、FindAggregateIds、GetAsync、Send、AskAsync、StopAsync、StopAllAsync、ExecuteSaga、ResumeInterruptedSagasAsync |
 | `ICommand` | 命令标记接口 |
 | `IDomainEvent` | 领域事件标记接口 |
 | `IEventSourcedActor` | 可选接口——Version、ReplayEvents、CommitEvents |
-| `IEventStore` | 持久化契约——AppendAsync（乐观并发）、LoadAsync |
+| `IEventStore` | 持久化契约——AppendAsync（乐观并发）、LoadAsync、PeekFirstAsync |
 | `ICancelable` | 可选——CancelCurrentTurn 用于长时间运行操作 |
 | `Actor` | 抽象基类——邮箱、消费循环、SignalReady、StopAsync |
 | `EventSourcedActor` | ES 基类——RaiseEvent、Mutate、Persist-then-Mutate 管线 |
+| `SagaActor` | 有限生命周期 ES 协调器——框架终态事件（SagaCompleted/SagaFailed）、自动停止、经 ResumeInterruptedSagasAsync 显式批量恢复 |
+| `IDomainEventSubscriber<TEvent>` | 订阅者契约——类型化信封 + `ICommandSender`；由 PicoActor.Gen 自动注册（declare-and-subscribe） |
+| `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | 上下文信封——`ActorId`、`Version`、`Event`（传输 / 类型化交付） |
+| `ICommandSender` | 处理器的窄命令端口——Send、AskAsync、ExecuteSaga |
 | `Envelope` | 内部——包装 ICommand 与可选 TaskCompletionSource |
 | `ActorOutputEvent` | 出站通知——Type、Data、可选 ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | 版本不匹配时由 IEventStore 抛出 |
@@ -118,6 +122,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `InMemoryEventStore` | 无锁内存存储——基于 ConcurrentDictionary |
 | `ActorConfig` | 配置 POCO——可从 PicoCfg 绑定 |
 | `ActorSystemOptions` | 选项——必填 EventStore、可选 Logger、可选 DomainEventPublisher;由 `ActorSystem` 构造函数消费 |
+| `MediatorDomainEventPublisher` | 默认 `IDomainEventPublisher`——逐事件发布 `DomainEventEnvelope`，逐事件隔离 |
 | `PicoActorDiExtensions` | PicoDI 的 `AddPicoActor()` 扩展方法 |
 
 ### Actor（非 ES）
@@ -264,6 +269,9 @@ public sealed class PostgresEventStore : IEventStore
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     { /* 按版本排序的 SELECT */ }
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    { /* 查询首个事件（恢复枚举） */ }
 }
 ```
 
@@ -339,8 +347,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | 包 | 目标框架 | 描述 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 运行时：`ActorSystem`、`InMemoryEventStore`、PicoDI 集成 |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor`、`SagaActor`——另含订阅类型（`IDomainEventSubscriber<TEvent>`、`DomainEventEnvelope`、`ICommandSender`）与内嵌 `PicoActor.Gen` 分析器（declare-and-subscribe） |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 运行时：`ActorSystem`、`InMemoryEventStore`、`MediatorDomainEventPublisher`（信封事件流出）、PicoDI 集成（`AddPicoActor` 自动接线 IMediator + ICommandSender） |
 
 ---
 
@@ -351,12 +359,12 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | 纯内存 | ✅ | ✅ | ✅ | ❌ |
 | AOT / 裁剪 | ✅ | ❌ | ❌ | ❌ |
 | 事件溯源 | ✅ | ✅ | ❌ | ❌ |
-| netstandard2.0 抽象层 | ✅ | ✅ | ✅ | ❌ |
+| netstandard2.0 抽象层 | ❌ | ✅ | ✅ | ❌ |
 | PicoDI 集成 | ✅ | ❌ | ❌ | ❌ |
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 分布式 / 集群 | ❌ | ✅ | ✅ | ✅ |
 | 单线程每 Actor | ✅ | ✅ | ✅ | ❌ |
-| 包数量 | 2 | 8+ | 3+ | 10+ |
+| 包数量 | 4 | 8+ | 3+ | 10+ |
 
 ---
 

@@ -48,7 +48,7 @@ Event Sourcing Actor は**Persist-then-Mutate**（永続化してから変更）
 |---------|:----------------:|:--------------:|
 | AOT / トリミング | ❌ Akka.NET、Proto.Actor、Orleans はリフレクション必須 | ✅ 完全 NativeAOT 対応 |
 | Event Sourcing | ❌ Proto.Actor、Orleans は ES 非内蔵 | ✅ Persist-then-Mutate、自動ロールバック |
-| 依存サイズ | ❌ Akka.NET（8+ パッケージ）、Orleans（10+ パッケージ） | ✅ 2 パッケージ、Channels 以外ゼロ依存 |
+| 依存サイズ | ❌ Akka.NET（8+ パッケージ）、Orleans（10+ パッケージ） | ✅ 4 パッケージ——PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs;他のランタイム依存なし |
 | DI 統合 | ❌ Microsoft.Extensions.DI に依存 | ✅ ネイティブ PicoDI、ゼロリフレクション |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor は一部のみ | ❌ net10.0 のみ(PicoMediator ランタイムは net10.0+ 必須) |
 | 学習曲線 | ❌ 急峻——監視ツリー、クラスタリング、リモート | ✅ 最小限——Actor + Event + Mailbox |
@@ -98,14 +98,18 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 型 | 役割 |
 |------|------|
 | `IActor` | 基本インターフェース——`Id`（UUID v7）を提供 |
-| `IActorSystem` | ランタイム契約——Register、CreateAsync、FindAggregateIds、GetAsync、Send、AskAsync、StopAsync、ExecuteSaga、ResumeInterruptedSagasAsync |
+| `IActorSystem` | ランタイム契約——Register、CreateAsync、FindAggregateIds、GetAsync、Send、AskAsync、StopAsync、StopAllAsync、ExecuteSaga、ResumeInterruptedSagasAsync |
 | `ICommand` | コマンド用マーカーインターフェース |
 | `IDomainEvent` | ドメインイベント用マーカーインターフェース |
 | `IEventSourcedActor` | オプショナル——Version、ReplayEvents、CommitEvents |
-| `IEventStore` | 永続化契約——AppendAsync（楽観的並行性）、LoadAsync |
+| `IEventStore` | 永続化契約——AppendAsync（楽観的並行性）、LoadAsync、PeekFirstAsync |
 | `ICancelable` | オプショナル——長時間実行操作用 CancelCurrentTurn |
 | `Actor` | 抽象基底クラス——メールボックス、消費ループ、SignalReady、StopAsync |
 | `EventSourcedActor` | ES 基底——RaiseEvent、Mutate、Persist-then-Mutate パイプライン |
+| `SagaActor` | 有限寿命 ES コーディネータ——フレームワーク終端イベント（SagaCompleted/SagaFailed）、自動停止、ResumeInterruptedSagasAsync による明示的バッチ復旧 |
+| `IDomainEventSubscriber<TEvent>` | サブスクライバー契約——型付きエンベロープ + `ICommandSender`;PicoActor.Gen が自動登録（declare-and-subscribe） |
+| `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | コンテキストエンベロープ——`ActorId`、`Version`、`Event`（転送 / 型付き配信） |
+| `ICommandSender` | ハンドラー用ナローポート——Send、AskAsync、ExecuteSaga |
 | `Envelope` | 内部——ICommand とオプショナル TaskCompletionSource をラップ |
 | `ActorOutputEvent` | 送信通知——Type、Data、オプショナル ToolCallId/ToolName/TurnId |
 | `ConcurrencyException` | バージョン不一致時に IEventStore がスロー |
@@ -120,6 +124,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `InMemoryEventStore` | ロックフリーインメモリストア——ConcurrentDictionary ベース |
 | `ActorConfig` | 設定 POCO——PicoCfg からバインディング可能 |
 | `ActorSystemOptions` | オプション——必須 EventStore、任意 Logger、任意 DomainEventPublisher;`ActorSystem` コンストラクタで使用 |
+| `MediatorDomainEventPublisher` | デフォルトの `IDomainEventPublisher`——イベントごとに `DomainEventEnvelope` を発行、イベント単位の分離 |
 | `PicoActorDiExtensions` | PicoDI 用 `AddPicoActor()` 拡張メソッド |
 
 ### Actor（非 ES）
@@ -266,21 +271,32 @@ public sealed class PostgresEventStore : IEventStore
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     { /* バージョン順 SELECT */ }
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    { /* 最初のイベント取得（復旧列挙） */ }
 }
 ```
 
 ### イベント流出(PicoMediator)
 
-`IDomainEvent : IEvent`——ドメインイベントは PicoMediator の一級市民通知。persist+mutate の後、フレームワークは `IDomainEventPublisher` フック経由で公開します;replay(リカバリ)は再公開しません。
+`IDomainEvent : IEvent`——ドメインイベントは PicoMediator の一級市民通知。persist+mutate の後、フレームワークは**コンテキストエンベロープ**として `IDomainEventPublisher` フック経由で公開します;replay(リカバリ)は再公開しません。
 
-`MediatorDomainEventPublisher` はすぐ使えるアダプタ:イベントごとに `Publish<IDomainEvent>`(コンパイル時ジェネリック、AOT 安全)、イベントごとに分離——1 つのサブスクライバ失敗が後続イベントを妨げません。
+`MediatorDomainEventPublisher` はすぐ使えるアダプタ:各イベントを `DomainEventEnvelope(actorId, version, event)` にラップしてイベントごとに `Publish<DomainEventEnvelope>`(コンパイル時ジェネリック、AOT 安全)、イベントごとに分離——1 つのサブスクライバ失敗が後続イベントを妨げません。
+
+### ドメインイベントの購読(declare-and-subscribe)
+
+イベントハンドラーは `IDomainEventSubscriber<TEvent>` を実装するプレーンなクラスです——PicoActor.Gen(PicoActor.Abs に内蔵)がスキャンして自動登録、手動配線ゼロ。ハンドラーはソース集約コンテキスト(`ActorId`、`Version`)を運ぶ型付きエンベロープと、狭いポート `ICommandSender` を受け取ります:
 
 ```csharp
-// サブスクライバ:宣言即登録——Gen スキャンで自動登録、手動登録ゼロ。イベント→コマンド変換は業務層の責務。
-public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
-    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* コマンドに変換 */ return default; }
+    public ValueTask Handle(DomainEventEnvelope<OrderPaid> envelope, ICommandSender sender, CancellationToken ct)
+    {
+        sender.Send(envelope.Event.OrderId, new ShipOrder(envelope.Event.OrderId));
+        return default;
+    }
 }
+```
 
 // 配線:AddPicoMediator が IMediator を登録;AddPicoActor() が ActorSystem ファクトリ内で
 // 自動検出してイベント流出を配線(遅延解決、Scoped ライフサイクルと互換)。
@@ -294,12 +310,19 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // カスタム publisher の明示的配線:AddPicoActor(IPublisher)(インスタンスは Build() 前に必要)。
 ```
 
+> **ローカル開発(ProjectReference):** analyzer は ProjectReference チェーンを伝播しません——プロジェクト消費者は `PicoActor.Gen` への直接参照が必要です(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`、`tests/PicoActor.Tests` をミラー)。NuGet 消費者は `PicoActor.Abs` パッケージの `buildTransitive` props 経由で生成器を自動取得——追加参照不要。
+
+イベントは persist+mutate の後にエンベロープとして PicoMediator を経由して流出します;replay は決して公開しません。ハンドラー失敗はアクターに影響しません(ハンドラー単位の分離)。イベント→コマンド→イベントの翻訳ループは意図された使い方です——ハンドラーを冪等かつ有界に保ってください。
+
+> **破壊的変更:** 直接の `ISubscriber<TEvent>`(PicoMediator)サブスクライバは PicoActor ドメインイベントを受信しなくなります。`IDomainEventSubscriber<TEvent>` に移行してください;エンベロープの `ActorId`/`Version` が手動で埋め込んだ集約 id を置き換えます。カスタム publisher(`AddPicoActor(IPublisher)`)は現在、生イベントの代わりに `DomainEventEnvelope` インスタンスを受信します——`Publish<TEvent>` 実装をそれに合わせて適応してください(観測されるペイロード形状のみ変化;アクターパイプラインは影響なし)。
+
 注意:
 - **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
 - 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
 - リカバリは静粛:replay は再公開しません。
-- **型付きサブスクリプション(base-type bridge)**:アダプタは `Publish<IDomainEvent>`;生成された bridge が具象型サブスクライバへルーティングします。ベース型宣言のサブスクライバ(`ISubscriber<IDomainEvent>`)もベース型パブリッシュを受信しますが、具象型パブリッシュは受信しません。フレームワークイベント(`SagaCompleted`/`SagaFailed`)は他のイベントと同様に型付きサブスクリプション可能(Abs は net10.0 ターゲット)。
+- フレームワークイベント(`SagaCompleted`/`SagaFailed`)は他のイベントと同様に型付きサブスクリプション可能(Abs は net10.0 ターゲット)。
 - **自動配線は任意の scope から安全**:PicoDI 2026.8.1(E1)以降、Singleton ファクトリはコンテナ内部ルート scope を使用——自動配線された IMediator はコンテナ破棄まで生存します。
+- **公開中の集約に対して自身の公開パスから `AskAsync` を呼ばないでください**——ソース mailbox はイベントの flush で忙しく、リクエストが自己デッドロックします。読み取り側プロジェクション(別の actor)を照会してください;ソース集約への `Send` は安全です(発火後忘却)。
 
 ---
 
@@ -327,8 +350,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 | パッケージ | ターゲット | 説明 |
 |---------|--------|-------------|
-| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | コア抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor` |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | ランタイム：`ActorSystem`、`InMemoryEventStore`、PicoDI 統合 |
+| [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | コア抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor`、`SagaActor`——さらにサブスクリプション型（`IDomainEventSubscriber<TEvent>`、`DomainEventEnvelope`、`ICommandSender`）と内蔵 `PicoActor.Gen` アナライザー（declare-and-subscribe） |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | ランタイム：`ActorSystem`、`InMemoryEventStore`、`MediatorDomainEventPublisher`（エンベロープイベント流出）、PicoDI 統合（`AddPicoActor` が IMediator + ICommandSender を自動配線） |
 
 ---
 
@@ -344,7 +367,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 分散 / クラスタリング | ❌ | ✅ | ✅ | ✅ |
 | シングルスレッド/Actor | ✅ | ✅ | ✅ | ❌ |
-| パッケージ数 | 2 | 8+ | 3+ | 10+ |
+| パッケージ数 | 4 | 8+ | 3+ | 10+ |
 
 ---
 
