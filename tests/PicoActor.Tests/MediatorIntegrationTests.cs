@@ -71,6 +71,38 @@ internal sealed class TriggerSendHandler : IDomainEventSubscriber<MedIntegration
     }
 }
 
+/// <summary>Second subscriber for the same event — every envelope must reach all subscribers.</summary>
+internal sealed class TriggerAuditHandler : IDomainEventSubscriber<MedIntegrationTrigger>
+{
+    public static readonly List<Guid> Received = [];
+
+    public ValueTask Handle(
+        DomainEventEnvelope<MedIntegrationTrigger> envelope,
+        ICommandSender sender,
+        CancellationToken ct = default
+    )
+    {
+        Received.Add(envelope.ActorId);
+        return default;
+    }
+}
+
+/// <summary>Failing subscriber — must not block sibling subscribers or later events.</summary>
+internal sealed class ThrowingTriggerHandler : IDomainEventSubscriber<MedIntegrationTrigger>
+{
+    public static int Calls;
+
+    public ValueTask Handle(
+        DomainEventEnvelope<MedIntegrationTrigger> envelope,
+        ICommandSender sender,
+        CancellationToken ct = default
+    )
+    {
+        Calls++;
+        throw new InvalidOperationException("audit sink down");
+    }
+}
+
 /// <summary>Event→command translation: ExecuteSaga.</summary>
 internal sealed class TriggerSagaHandler : IDomainEventSubscriber<MedIntegrationTrigger>
 {
@@ -455,6 +487,90 @@ public sealed partial class MediatorIntegrationTests
         await Assert.That(SagaCompletedSub.Received.Count).IsEqualTo(1);
         await Assert.That(SagaCompletedSub.Received[0].Event.Result).IsEqualTo("from-trigger");
         await Assert.That(MedIntegrationStartedSub.Received.Count).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task MultipleSubscribers_SameEvent_AllReceive()
+    {
+        TriggerSendHandler.Sent.Clear();
+        TriggerAuditHandler.Received.Clear();
+
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoMediator();
+        container.AddPicoActor();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
+        system.Register<MedIntegrationTriggerActor>(
+            cmd => new MedIntegrationTriggerActor((TriggerCmd)cmd),
+            () => new MedIntegrationTriggerActor()
+        );
+        system.Register<MedIntegrationTargetActor>(
+            _ => new MedIntegrationTargetActor(),
+            () => new MedIntegrationTargetActor()
+        );
+        system.Register<MedIntegrationSaga>(
+            _ => new MedIntegrationSaga(),
+            () => new MedIntegrationSaga()
+        ); // keep the sibling TriggerSagaHandler working
+
+        var target = await system.CreateAsync<MedIntegrationTargetActor>(new TargetCmd("init"));
+        TriggerSendHandler.TargetActorId = target.Id;
+        MedIntegrationTargetActor.ReceivedPayloads.Clear(); // parameterless factory ignores the creation command — no construction-time entries; Clear is a defensive no-op that keeps the count assertion valid if the factory ever changes
+
+        var trigger = await system.CreateAsync<MedIntegrationTriggerActor>(new TriggerCmd());
+        await system.AskAsync<object?>(trigger.Id, new TriggerCmd()); // second trigger
+        await Task.Delay(300);
+
+        // spec §7.3 multi-subscriber contract: every envelope reaches ALL subscribers
+        await Assert.That(TriggerSendHandler.Sent.Count).IsEqualTo(2);
+        await Assert.That(TriggerSendHandler.Sent[0]).IsEqualTo(trigger.Id);
+        await Assert.That(TriggerAuditHandler.Received.Count).IsEqualTo(2);
+        await Assert.That(TriggerAuditHandler.Received[0]).IsEqualTo(trigger.Id);
+    }
+
+    [Test]
+    public async Task FailingHandler_DoesNotBlockSiblingOrNextEvent()
+    {
+        TriggerSendHandler.Sent.Clear();
+        TriggerAuditHandler.Received.Clear();
+        ThrowingTriggerHandler.Calls = 0;
+
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoMediator();
+        container.AddPicoActor();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
+        system.Register<MedIntegrationTriggerActor>(
+            cmd => new MedIntegrationTriggerActor((TriggerCmd)cmd),
+            () => new MedIntegrationTriggerActor()
+        );
+        system.Register<MedIntegrationTargetActor>(
+            _ => new MedIntegrationTargetActor(),
+            () => new MedIntegrationTargetActor()
+        );
+        system.Register<MedIntegrationSaga>(
+            _ => new MedIntegrationSaga(),
+            () => new MedIntegrationSaga()
+        ); // keep the sibling TriggerSagaHandler working
+
+        var target = await system.CreateAsync<MedIntegrationTargetActor>(new TargetCmd("init"));
+        TriggerSendHandler.TargetActorId = target.Id;
+        MedIntegrationTargetActor.ReceivedPayloads.Clear(); // parameterless factory ignores the creation command — no construction-time entries; Clear is a defensive no-op that keeps the count assertion valid if the factory ever changes
+
+        // creation command is processed in the constructor → MedIntegrationTrigger fires twice
+        var trigger = await system.CreateAsync<MedIntegrationTriggerActor>(new TriggerCmd());
+        await system.AskAsync<object?>(trigger.Id, new TriggerCmd()); // second trigger
+        await Task.Delay(300);
+
+        // the throwing subscriber ran for every event…
+        await Assert.That(ThrowingTriggerHandler.Calls).IsEqualTo(2);
+        // …but siblings still received every envelope, and the actor pipeline never faulted
+        await Assert.That(TriggerSendHandler.Sent.Count).IsEqualTo(2);
+        await Assert.That(TriggerAuditHandler.Received.Count).IsEqualTo(2);
     }
 
     [Test]
