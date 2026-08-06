@@ -166,7 +166,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             sb.AppendLine(
                 "            global::System.Collections.Generic.List<global::System.Exception>? exceptions = null;"
             );
-            sb.AppendLine("            foreach (var raw in rawHandlers)");
+            sb.AppendLine("            foreach (var raw in rawHandlers!)");
             sb.AppendLine("            {");
             sb.AppendLine("                try");
             sb.AppendLine("                {");
