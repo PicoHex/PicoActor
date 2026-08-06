@@ -34,6 +34,8 @@ NativeAOT 및 트리밍 환경에서 실행 가능.
 단일 스레드 소비 루프를 가집니다. 명령은 `Send`(fire-and-forget) 또는
 `AskAsync`(요청-응답)로 전달됩니다.
 
+PicoActor는 **메시지 기반**입니다: 모든 상호작용은 메시지입니다. 명령(`ICommand`)은 mailbox를 통해 전달되는 지시형 메시지(1:1, 응답 선택적)이며, 도메인 이벤트(`IDomainEvent`)는 PicoMediator를 통해 게시되는 브로드캐스트 메시지(1:N, 응답 없음)입니다. 이벤트도 메시지입니다 — 애그리거트 간 협업 패턴은 단 하나의 루프입니다: 이벤트 → 구독자 → 번역된 명령 → mailbox. 액터와 상호작용하는 다른 방법은 없습니다.
+
 Event Sourcing Actor는 **Persist-then-Mutate**(영속화 후 변경)를 따릅니다:
 `OnMessageAsync → RaiseEvent → IEventStore에 영속화 → Mutate 상태`.
 상태는 영속화 성공 후에만 변경됩니다——인메모리 상태는 항상 이벤트 스트림과 일치합니다.

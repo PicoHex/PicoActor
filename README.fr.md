@@ -34,6 +34,8 @@ Chaque Acteur possède une **boîte aux lettres** (`Channel<Envelope>` en mémoi
 une identité **UUID v7** et une boucle de consommation mono-thread. Les commandes
 sont délivrées via `Send` (fire-and-forget) ou `AskAsync` (requête-réponse).
 
+PicoActor est **piloté par les messages** : chaque interaction est un message. Les commandes (`ICommand`) sont des messages ciblés délivrés via la boîte aux lettres (1:1, réponse optionnelle) ; les événements de domaine (`IDomainEvent`) sont des messages diffusés publiés via PicoMediator (1:N, sans réponse). Les événements sont aussi des messages — le schéma de collaboration entre agrégats est une boucle unique : événement → abonné → commande traduite → boîte aux lettres. Il n'existe aucun autre moyen d'interagir avec un acteur.
+
 Les Acteurs Event Sourcing suivent **Persist-then-Mutate** (Persister-puis-Muter) :
 `OnMessageAsync → RaiseEvent → Persister dans IEventStore → Mutate état`.
 L'état n'est modifié qu'après une persistance réussie — l'état en mémoire est

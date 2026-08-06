@@ -34,6 +34,8 @@ Cada Ator possui uma **mailbox** (`Channel<Envelope>` em memória), uma
 identidade **UUID v7** e um loop de consumo single-threaded. Comandos são
 entregues via `Send` (dispara-e-esquece) ou `AskAsync` (requisição-resposta).
 
+O PicoActor é **orientado a mensagens**: toda interação é uma mensagem. Comandos (`ICommand`) são mensagens direcionadas entregues via mailbox (1:1, resposta opcional); eventos de domínio (`IDomainEvent`) são mensagens de difusão publicadas via PicoMediator (1:N, sem resposta). Eventos também são mensagens — o padrão de colaboração entre agregados é um único ciclo: evento → assinante → comando traduzido → mailbox. Não há outra forma de interagir com um ator.
+
 Atores com Event Sourcing seguem **Persistir-depois-Mutar**:
 `OnMessageAsync → RaiseEvent → Persistir no IEventStore → Mutar estado`.
 O estado só é alterado após persistência bem-sucedida — o estado em memória

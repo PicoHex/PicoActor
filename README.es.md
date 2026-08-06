@@ -34,6 +34,8 @@ Cada Actor posee un **buzón** (`Channel<Envelope>` en memoria), una identidad
 **UUID v7** y un bucle de consumo monohilo. Los comandos se entregan mediante
 `Send` (dispara-y-olvida) o `AskAsync` (solicitud-respuesta).
 
+PicoActor es **orientado a mensajes**: cada interacción es un mensaje. Los comandos (`ICommand`) son mensajes dirigidos entregados a través del buzón (1:1, respuesta opcional); los eventos de dominio (`IDomainEvent`) son mensajes de difusión publicados a través de PicoMediator (1:N, sin respuesta). Los eventos también son mensajes — el patrón de colaboración entre agregados es un único bucle: evento → suscriptor → comando traducido → buzón. No existe otra forma de interactuar con un actor.
+
 Los Actores con Event Sourcing siguen **Persistir-luego-Mutar**:
 `OnMessageAsync → RaiseEvent → Persistir en IEventStore → Mutar estado`.
 El estado solo cambia tras una persistencia exitosa — el estado en memoria

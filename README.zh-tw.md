@@ -32,6 +32,8 @@ AOT 相容的記憶體 Actor 框架，支援事件溯源（Event Sourcing）。�
 識別碼以及單執行緒消費迴圈。命令透過 `Send`（發後不理）或 `AskAsync`
 （請求-回覆）投遞。
 
+PicoActor 是**訊息驅動**的：一切互動都是訊息。命令（`ICommand`）是定向訊息，經信箱投遞（1:1，可帶回應）；領域事件（`IDomainEvent`）是廣播訊息，經 PicoMediator 發佈（1:N，無回應）。事件也是訊息——跨聚合協作只有一種模式：事件 → 訂閱者 → 翻譯命令 → 信箱。除此之外沒有其他與 actor 互動的方式。
+
 事件溯源 Actor 遵循**先持久化再變更（Persist-then-Mutate）**：
 `OnMessageAsync → RaiseEvent → 持久化到 IEventStore → Mutate 狀態`。
 狀態僅在持久化成功後變更——記憶體狀態始終與事件流保持一致。

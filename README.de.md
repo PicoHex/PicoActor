@@ -34,6 +34,8 @@ Jeder Actor besitzt eine **Mailbox** (In-Memory `Channel<Envelope>`), eine
 **UUID v7**-Identität und eine single-threaded Konsumschleife. Befehle werden
 über `Send` (Fire-and-Forget) oder `AskAsync` (Request-Reply) zugestellt.
 
+PicoActor ist **nachrichtengesteuert**: Jede Interaktion ist eine Nachricht. Befehle (`ICommand`) sind gezielte Nachrichten, die über die Mailbox zugestellt werden (1:1, Antwort optional); Domain-Ereignisse (`IDomainEvent`) sind Broadcast-Nachrichten, die über PicoMediator veröffentlicht werden (1:N, keine Antwort). Ereignisse sind ebenfalls Nachrichten — das Muster für die Zusammenarbeit zwischen Aggregaten ist eine einzige Schleife: Ereignis → Abonnent → übersetzter Befehl → Mailbox. Es gibt keine andere Möglichkeit, mit einem Actor zu interagieren.
+
 Event-Sourcing-Actors folgen **Persist-then-Mutate** (Erst persistieren, dann mutieren):
 `OnMessageAsync → RaiseEvent → In IEventStore persistieren → Zustand mutieren`.
 Der Zustand wird nur nach erfolgreicher Persistenz geändert — der In-Memory-Zustand
