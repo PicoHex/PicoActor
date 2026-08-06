@@ -316,28 +316,47 @@ public sealed class ActorSystem : IActorSystem
     /// <inheritdoc/>
     public async ValueTask<IReadOnlyList<SagaResumeResult>> ResumeInterruptedSagasAsync<TSaga>(
         string firstEventType,
-        Func<IDomainEvent, bool>? firstEventMatch = null
+        Func<IDomainEvent, bool>? firstEventMatch = null,
+        Action<Exception, Guid>? onItemError = null
     )
         where TSaga : SagaActor
     {
-        var ids = await FindAggregateIds(firstEventType, firstEventMatch ?? (_ => true))
-            .ConfigureAwait(false);
+        if (_eventStore is not IEventStoreEnumerator enumerator)
+            return Array.Empty<SagaResumeResult>();
 
-        var results = new List<SagaResumeResult>(ids.Count);
-        foreach (var id in ids)
+        var match = firstEventMatch ?? (_ => true);
+        var results = new List<SagaResumeResult>();
+        foreach (var id in enumerator.ListAggregateIds(firstEventType))
         {
-            // 活跃命中 → 直接分类不重建;重建前已终态 → GetAsync 返回 null 跳过;
-            // resume 新终态 → 从返回实例读取
-            var saga = await GetAsync<TSaga>(id).ConfigureAwait(false);
-            if (saga is null)
-                continue;
+            try
+            {
+                // First-event match first (peek only — no full-file read), so a
+                // non-matching stream is skipped without a rebuild.
+                var first = await _eventStore.PeekFirstAsync(id).ConfigureAwait(false);
+                if (first is null || !match(first))
+                    continue;
 
-            if (saga.IsCompleted)
-                results.Add(new SagaResumeResult(id, SagaResumeStatus.Completed));
-            else if (saga.IsFailed)
-                results.Add(new SagaResumeResult(id, SagaResumeStatus.Failed, saga.FailedReason));
-            else
-                results.Add(new SagaResumeResult(id, SagaResumeStatus.Running));
+                // 活跃命中 → 直接分类不重建;重建前已终态 → GetAsync 返回 null 跳过;
+                // resume 新终态 → 从返回实例读取
+                var saga = await GetAsync<TSaga>(id).ConfigureAwait(false);
+                if (saga is null)
+                    continue;
+
+                if (saga.IsCompleted)
+                    results.Add(new SagaResumeResult(id, SagaResumeStatus.Completed));
+                else if (saga.IsFailed)
+                    results.Add(
+                        new SagaResumeResult(id, SagaResumeStatus.Failed, saga.FailedReason)
+                    );
+                else
+                    results.Add(new SagaResumeResult(id, SagaResumeStatus.Running));
+            }
+            catch (Exception ex)
+            {
+                if (onItemError is null)
+                    throw;
+                onItemError(ex, id);
+            }
         }
         return results;
     }

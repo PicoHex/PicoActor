@@ -63,11 +63,14 @@ public interface IActorSystem
     /// 显式恢复所有中断的 saga:按首事件类型名枚举(Type.Name 精确匹配、大小写敏感),
     /// 逐个 GetAsync 单飞恢复。重建前已终态(Completed/Failed)的 saga 被过滤(不复活);
     /// resume 路径新产生的终态按状态归类。无匹配返回空列表。
-    /// 批量失败语义:任一 saga 恢复遇基础设施异常时 fail-fast 中止并向上传播,调用者可整体重试。
+    /// 批量失败语义:不传 <paramref name="onItemError"/> 时,任一 saga 恢复遇异常
+    /// fail-fast 中止并向上传播(调用者可整体重试);传入后按项隔离——异常项记入回调
+    /// (异常, sagaId),同类型其余 saga 继续恢复。
     /// </summary>
     ValueTask<IReadOnlyList<SagaResumeResult>> ResumeInterruptedSagasAsync<TSaga>(
         string firstEventType,
-        Func<IDomainEvent, bool>? firstEventMatch = null
+        Func<IDomainEvent, bool>? firstEventMatch = null,
+        Action<Exception, Guid>? onItemError = null
     )
         where TSaga : SagaActor;
 

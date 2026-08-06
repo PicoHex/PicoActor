@@ -162,6 +162,52 @@ public sealed class ResumeInterruptedSagasTests
     }
 
     [Test]
+    public async Task Resume_OnItemError_IsolatesBadFiles()
+    {
+        // per-item 错误策略:坏文件只跳过自身(onItemError 收到 id),
+        // 同类型其余 saga 继续恢复——不中断整个批量调用。
+        var inner = new InMemoryEventStore();
+        var good = Guid.CreateVersion7();
+        var bad = Guid.CreateVersion7();
+        await inner.AppendAsync(good, 0, [new SagaStep1Started("good")]);
+        await inner.AppendAsync(bad, 0, [new SagaStep1Started("bad")]);
+
+        var store = new ThrowingLoadStore(inner, bad);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
+
+        var errors = new List<Guid>();
+        var results = await system.ResumeInterruptedSagasAsync<TestSaga>(
+            nameof(SagaStep1Started),
+            onItemError: (ex, id) => errors.Add(id)
+        );
+
+        // 坏文件被隔离(不传播),好 saga 仍被恢复
+        await Assert.That(errors).Contains(bad);
+        await Assert.That(results.Select(r => r.Id)).Contains(good);
+        await Assert.That(results.Select(r => r.Id)).DoesNotContain(bad);
+    }
+
+    [Test]
+    public async Task Resume_WithoutOnItemError_Propagates()
+    {
+        // 不传 onItemError 时,坏文件异常向外传播(兼容旧行为)
+        var inner = new InMemoryEventStore();
+        var bad = Guid.CreateVersion7();
+        await inner.AppendAsync(bad, 0, [new SagaStep1Started("bad")]);
+
+        var store = new ThrowingLoadStore(inner, bad);
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        system.Register<TestSaga>(_ => new TestSaga(), () => new TestSaga());
+
+        await Assert
+            .That(async () =>
+                await system.ResumeInterruptedSagasAsync<TestSaga>(nameof(SagaStep1Started))
+            )
+            .Throws<IOException>();
+    }
+
+    [Test]
     public async Task Resume_BusinessFailure_ClassifiesFailed_WithReason()
     {
         // 中断 saga 的 ResumeAsync 抛业务异常 → 框架追加 SagaFailed(reason) → 归 Failed(reason),
