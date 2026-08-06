@@ -10,6 +10,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\PicoActor\PicoActor.csproj" />
+    <!-- 本地开发:analyzer 不随 ProjectReference 传递(镜像 tests/PicoActor.Tests 模式;
+         NuGet 消费者经 PicoActor.Abs 包的 buildTransitive props 自动注入) -->
+    <ProjectReference Include="..\..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />
     <!-- Bridge-generated code needs the PicoMediator runtime (MediatorAutoSubscriptionRegistry) + PicoDI -->
     <PackageReference Include="PicoMediator" />
     <PackageReference Include="PicoMediator.DI" />

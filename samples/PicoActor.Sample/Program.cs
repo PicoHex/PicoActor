@@ -104,7 +104,7 @@ static async Task SagaAndEventOutflowDemoAsync()
 {
     Console.WriteLine("\n=== Saga + Event Outflow (PicoMediator) ===\n");
 
-    // 1. DI wiring: AddPicoMediator (declare-and-subscribe scans OrderPaidSub/SagaCompletedSub)
+    // 1. DI wiring: AddPicoMediator (applies PicoActor.Gen registrations for OrderPaidSub/SagaCompletedSub)
     //    + AddPicoActor (auto-wires the registered IMediator for event outflow)
     var store = new InMemoryEventStore();
     var container = new SvcContainer(autoConfigureFromGenerator: false);
@@ -125,7 +125,7 @@ static async Task SagaAndEventOutflowDemoAsync()
     Console.WriteLine($"[ExecuteSaga] result={execution.Result}, sagaId={execution.Id}");
     SampleContext.PaymentSagaId = execution.Id;
 
-    // 3. External payment gateway marks the order paid → OrderPaid event flows out
+    // 3. External payment gateway marks the order paid → OrderPaid flows out as an envelope
     //    → OrderPaidSub translates it into PaymentReceived → saga mailbox
     await system.AskAsync<object?>(order.Id, new MarkPaid(order.Id));
     await Task.Delay(300);
@@ -355,29 +355,37 @@ public sealed class PaymentSaga : SagaActor
     }
 }
 
-/// <summary>Typed subscriber — event-to-command translation is a business-layer concern.
-/// The bridge routes the base-typed publish (IDomainEvent) to this concrete subscriber.</summary>
-public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+/// <summary>Domain-event subscriber — event-to-command translation is a business-layer concern.
+/// PicoActor.Gen auto-registers it; the envelope carries the source aggregate context.</summary>
+public sealed class OrderPaidSub : IDomainEventSubscriber<OrderPaid>
 {
     public static int Handled;
 
-    public ValueTask Handle(OrderPaid e, CancellationToken ct = default)
+    public ValueTask Handle(
+        DomainEventEnvelope<OrderPaid> envelope,
+        ICommandSender sender,
+        CancellationToken ct = default
+    )
     {
         Handled++;
-        if (SampleContext.System is { } system && SampleContext.PaymentSagaId is { } sagaId)
-            system.Send(sagaId, new PaymentReceived(e.OrderId)); // translation → saga mailbox
+        if (SampleContext.PaymentSagaId is { } sagaId)
+            sender.Send(sagaId, new PaymentReceived(envelope.Event.OrderId)); // translation → saga mailbox
         return default;
     }
 }
 
-/// <summary>Typed subscriber for the framework terminal event.</summary>
-public sealed class SagaCompletedSub : ISubscriber<SagaCompleted>
+/// <summary>Domain-event subscriber for the framework terminal event.</summary>
+public sealed class SagaCompletedSub : IDomainEventSubscriber<SagaCompleted>
 {
     public static readonly List<SagaCompleted> Received = [];
 
-    public ValueTask Handle(SagaCompleted e, CancellationToken ct = default)
+    public ValueTask Handle(
+        DomainEventEnvelope<SagaCompleted> envelope,
+        ICommandSender sender,
+        CancellationToken ct = default
+    )
     {
-        Received.Add(e);
+        Received.Add(envelope.Event);
         return default;
     }
 }
