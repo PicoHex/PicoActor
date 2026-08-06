@@ -426,6 +426,13 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (the publisher instance must be available before Build()).
 ```
 
+> **Local development (ProjectReference):** analyzers do not flow through
+> `ProjectReference` chains — project consumers must add a direct reference to
+> `PicoActor.Gen` (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj"
+> OutputItemType="Analyzer" />`, mirroring `tests/PicoActor.Tests`). NuGet
+> consumers get the generator automatically via `PicoActor.Abs`'s
+> `buildTransitive` props — no extra reference needed.
+
 Events flow out as envelopes through PicoMediator after persist+mutate; replay
 never publishes. Handler failures never affect the actor (per-event isolation).
 Translation loops (event → command → event) are intended; keep handlers
@@ -434,7 +441,10 @@ idempotent and bounded.
 > **Breaking change:** direct `ISubscriber<TEvent>` (PicoMediator)
 > subscribers no longer receive PicoActor domain events. Migrate to
 > `IDomainEventSubscriber<TEvent>`; the envelope's `ActorId`/`Version` replace
-> any manually embedded aggregate id.
+> any manually embedded aggregate id. Custom publishers
+> (`AddPicoActor(IPublisher)`) now receive `DomainEventEnvelope` instances
+> instead of raw events — adapt `Publish<TEvent>` implementations accordingly
+> (only the observed payload shape changed; the actor pipeline is unaffected).
 
 Notes:
 - **Event → command translation is the subscriber's (business-layer) job** —

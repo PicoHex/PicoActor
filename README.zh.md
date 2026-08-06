@@ -297,9 +297,11 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 自定义 publisher 显式接线:AddPicoActor(IPublisher)(实例需在 Build() 前可用)。
 ```
 
+> **本地开发(ProjectReference):** analyzer 不随 ProjectReference 链传递——工程消费者需直接引用 `PicoActor.Gen`(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`,镜像 `tests/PicoActor.Tests`)。NuGet 消费者经 `PicoActor.Abs` 包的 `buildTransitive` props 自动注入生成器,无需额外引用。
+
 事件以信封形式经 PicoMediator 在 persist+mutate 之后流出;replay 不重复发布。处理器失败不影响 actor(逐处理器隔离)。事件→命令→事件的翻译循环是预期用法——保持处理器幂等且有界。
 
-> **破坏性变更:** 直连 `ISubscriber<TEvent>`(PicoMediator)订阅者不再收到 PicoActor 领域事件。迁移到 `IDomainEventSubscriber<TEvent>`;信封的 `ActorId`/`Version` 取代任何手工内嵌的聚合 id。
+> **破坏性变更:** 直连 `ISubscriber<TEvent>`(PicoMediator)订阅者不再收到 PicoActor 领域事件。迁移到 `IDomainEventSubscriber<TEvent>`;信封的 `ActorId`/`Version` 取代任何手工内嵌的聚合 id。自定义 publisher(`AddPicoActor(IPublisher)`)现在收到的是 `DomainEventEnvelope` 实例而非裸事件——相应适配 `Publish<TEvent>` 实现(仅观察到的载荷形状变化;actor 管线不受影响)。
 
 注意:
 - **事件→命令翻译是订阅者(业务层)职责**——PicoActor 只发布;命令只能经 mailbox 进入 actor。
