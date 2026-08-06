@@ -7,7 +7,9 @@ internal sealed record DiscardProbeCmd : ICommand;
 /// <summary>OnReadyAsync 执行计数——验证丢弃副本不执行 OnReadyAsync。</summary>
 internal sealed class DiscardProbeActor : EventSourcedActor
 {
-    public static int ReadyCount;
+    // 实例字段而非 static:TUnit 类内测试并行执行,静态计数会被同类的
+    // AskAsync_ToStoppedActor 测试的 CreateAsync(正常走 OnReadyAsync)干扰。
+    public int ReadyCount;
 
     public DiscardProbeActor() { }
 
@@ -27,15 +29,13 @@ public sealed class ActorSystemDiscardTests
     [Test]
     public async Task DiscardedActor_SkipsOnReadyAsync()
     {
-        DiscardProbeActor.ReadyCount = 0;
-
         var actor = new DiscardProbeActor();
         actor.Id = Guid.CreateVersion7();
         actor.MarkDiscarded();
 
         await actor.StopAsync(); // 释放 gate → RunAsync 醒来 → 跳过 OnReadyAsync → 退出
 
-        await Assert.That(DiscardProbeActor.ReadyCount).IsEqualTo(0);
+        await Assert.That(actor.ReadyCount).IsEqualTo(0);
     }
 
     [Test]
