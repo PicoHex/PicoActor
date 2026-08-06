@@ -1,0 +1,5 @@
+<Project>
+  <ItemGroup>
+    <Analyzer Include="$(MSBuildThisFileDirectory)PicoActor.Gen\analyzers\dotnet\cs\PicoActor.Gen.dll" />
+  </ItemGroup>
+</Project>

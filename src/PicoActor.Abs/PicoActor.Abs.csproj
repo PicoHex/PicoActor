@@ -30,4 +30,28 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference
+      Include="..\PicoActor.Gen\PicoActor.Gen.csproj"
+      OutputItemType="Analyzer"
+      ReferenceOutputAssembly="false"
+      PrivateAssets="all"
+    />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None
+      Include="..\PicoActor.Gen\bin\$(Configuration)\netstandard2.0\PicoActor.Gen.dll"
+      Pack="true"
+      PackagePath="analyzers/dotnet/cs"
+      Visible="false"
+    />
+    <None
+      Include="buildTransitive\PicoActor.Abs.props"
+      Pack="true"
+      PackagePath="buildTransitive\PicoActor.Abs.props"
+      Visible="false"
+    />
+  </ItemGroup>
 </Project>

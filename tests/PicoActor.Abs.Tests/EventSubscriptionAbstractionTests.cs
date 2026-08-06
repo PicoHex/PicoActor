@@ -26,7 +26,7 @@ public sealed class EventSubscriptionAbstractionTests
         var envelope = new DomainEventEnvelope(Guid.CreateVersion7(), 1ul, e);
 
         await Assert.That(envelope).IsAssignableTo<IEvent>();
-        await Assert.That(envelope is IDomainEvent).IsFalse();
+        await Assert.That((object)envelope is IDomainEvent).IsFalse();
         await Assert.That(ReferenceEquals(envelope.Event, e)).IsTrue();
     }
 

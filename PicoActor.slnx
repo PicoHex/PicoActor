@@ -6,6 +6,7 @@
   <Folder Name="/src/">
     <File Path="src\README.md" />
     <Project Path="src/PicoActor.Abs/PicoActor.Abs.csproj" />
+    <Project Path="src/PicoActor.Gen/PicoActor.Gen.csproj" />
     <Project Path="src/PicoActor/PicoActor.csproj" />
   </Folder>
   <Folder Name="/tests/">
