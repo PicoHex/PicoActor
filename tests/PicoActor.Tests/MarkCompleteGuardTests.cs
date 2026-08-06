@@ -108,6 +108,8 @@ internal sealed class FailOnceStore : IEventStore
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId) =>
         _inner.LoadAsync(actorId);
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) => _inner.PeekFirstAsync(actorId);
 }
 
 public sealed class MarkCompleteGuardTests

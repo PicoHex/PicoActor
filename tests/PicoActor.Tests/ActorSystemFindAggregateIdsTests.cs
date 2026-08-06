@@ -60,6 +60,43 @@ public sealed class ActorSystemFindAggregateIdsTests
         await Assert.That(value).IsEqualTo(1);
     }
 
+    [Test]
+    public async Task FindAggregateIds_PeeksFirstEvent_WithoutFullLoad()
+    {
+        // 恢复热路径不得全文件读取:store 的 LoadAsync 被显式禁用(抛异常),
+        // 只允许 PeekFirstAsync —— FindAggregateIds 必须只读首事件。
+        var store = new PeekOnlyStore();
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        RegisterCounter(system);
+        var a = await system.CreateAsync<Counter>(new CreateCounter(1));
+
+        var found = await system.FindAggregateIds(nameof(CounterCreated), _ => true);
+
+        await Assert.That(found.Count).IsEqualTo(1);
+        await Assert.That(found[0]).IsEqualTo(a.Id);
+    }
+
+    /// <summary>只允许首事件窥探的 store —— 全文件读取被显式禁用。</summary>
+    private sealed class PeekOnlyStore : IEventStore, IEventStoreEnumerator
+    {
+        private readonly InMemoryEventStore _inner = new();
+
+        public ValueTask<ulong> AppendAsync(
+            Guid actorId,
+            ulong expectedVersion,
+            IReadOnlyList<IDomainEvent> events
+        ) => _inner.AppendAsync(actorId, expectedVersion, events);
+
+        public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId) =>
+            throw new InvalidOperationException("FindAggregateIds must not full-load a stream");
+
+        public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
+            _inner.PeekFirstAsync(actorId);
+
+        public IReadOnlyList<Guid> ListAggregateIds(string firstEventType) =>
+            _inner.ListAggregateIds(firstEventType);
+    }
+
     /// <summary>Minimal store without IEventStoreEnumerator.</summary>
     private sealed class NonEnumeratingStore : IEventStore
     {
@@ -73,5 +110,8 @@ public sealed class ActorSystemFindAggregateIdsTests
 
         public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId) =>
             _inner.LoadAsync(actorId);
+
+        public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
+            _inner.PeekFirstAsync(actorId);
     }
 }

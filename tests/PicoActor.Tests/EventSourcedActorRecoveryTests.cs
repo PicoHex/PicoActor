@@ -51,6 +51,11 @@ public sealed class EventSourcedActorRecoveryTests
                 return new ValueTask<IReadOnlyList<IDomainEvent>>(stream.AsReadOnly());
             return new ValueTask<IReadOnlyList<IDomainEvent>>(Array.Empty<IDomainEvent>());
         }
+
+        public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
+            _streams.TryGetValue(actorId, out var stream) && stream.Count > 0
+                ? new(stream[0])
+                : ValueTask.FromResult<IDomainEvent?>(null);
     }
 
     /// <summary>

@@ -39,6 +39,9 @@ internal sealed class FailAppendStore : IEventStore
     }
 
     public ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId) => new(_existing);
+
+    public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
+        new(_existing.Count > 0 ? _existing[0] : null);
 }
 
 public sealed class GetAsyncRecoveryTests

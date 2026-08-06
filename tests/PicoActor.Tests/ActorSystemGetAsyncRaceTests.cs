@@ -75,6 +75,9 @@ public sealed class ActorSystemGetAsyncRaceTests
             ulong expectedVersion,
             IReadOnlyList<IDomainEvent> events
         ) => throw new NotImplementedException();
+
+        public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
+            new(_events.Count > 0 ? _events[0] : null);
     }
 
     /// <summary>

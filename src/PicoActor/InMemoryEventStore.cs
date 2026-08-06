@@ -61,6 +61,26 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
     }
 
     /// <inheritdoc/>
+    public async ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    {
+        if (!_streams.TryGetValue(actorId, out var stream) || stream.Count == 0)
+            return null;
+
+        // Snapshot under the gate so a concurrent AddRange cannot be observed
+        // mid-write (symmetric with LoadAsync).
+        var gate = _locks.GetOrAdd(actorId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return stream[0];
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <inheritdoc/>
     public IReadOnlyList<Guid> ListAggregateIds(string firstEventType)
     {
         var result = new List<Guid>();

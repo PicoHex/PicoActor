@@ -27,6 +27,9 @@ public sealed class ActorInitFailureTests
         {
             return new ValueTask<IReadOnlyList<IDomainEvent>>(Array.Empty<IDomainEvent>());
         }
+
+        public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
+            ValueTask.FromResult<IDomainEvent?>(null);
     }
 
     /// <summary>

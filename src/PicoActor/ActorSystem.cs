@@ -306,8 +306,8 @@ public sealed class ActorSystem : IActorSystem
         var result = new List<Guid>();
         foreach (var id in enumerator.ListAggregateIds(firstEventType))
         {
-            var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
-            if (events.Count > 0 && firstEventMatch(events[0]))
+            var first = await _eventStore.PeekFirstAsync(id).ConfigureAwait(false);
+            if (first is not null && firstEventMatch(first))
                 result.Add(id);
         }
         return result;

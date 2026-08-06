@@ -27,6 +27,13 @@ internal sealed class ThrowingLoadStore : IEventStore, IEventStoreEnumerator
         return await _inner.LoadAsync(actorId);
     }
 
+    public async ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
+    {
+        if (actorId == _throwingId)
+            throw new IOException("store down");
+        return await _inner.PeekFirstAsync(actorId);
+    }
+
     public IReadOnlyList<Guid> ListAggregateIds(string firstEventType) =>
         ((IEventStoreEnumerator)_inner).ListAggregateIds(firstEventType);
 }

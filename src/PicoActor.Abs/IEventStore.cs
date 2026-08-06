@@ -25,4 +25,13 @@ public interface IEventStore
     /// Returns empty list if the stream does not exist.
     /// </summary>
     ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId);
+
+    /// <summary>
+    /// Read only the FIRST event of a stream, without parsing the remaining
+    /// lines. Recovery enumeration (<see cref="IActorSystem.FindAggregateIds"/>)
+    /// uses this instead of <see cref="LoadAsync"/> so cost stays O(aggregates),
+    /// not O(total events). Returns null when the stream does not exist or
+    /// yields no deserializable event.
+    /// </summary>
+    ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId);
 }
