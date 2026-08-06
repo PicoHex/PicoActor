@@ -267,15 +267,22 @@ public sealed class PostgresEventStore : IEventStore
 
 ### 事件流出(PicoMediator)
 
-`IDomainEvent : IEvent`——领域事件是 PicoMediator 一等公民通知。persist+mutate 之后,框架经 `IDomainEventPublisher` 钩子发布;replay(恢复)不重复发布。
+`IDomainEvent : IEvent`——领域事件是 PicoMediator 一等公民通知。persist+mutate 之后,框架以**上下文信封**形式经 `IDomainEventPublisher` 钩子发布;replay(恢复)不重复发布。
 
-`MediatorDomainEventPublisher` 是开箱即用适配器:逐事件 `Publish<IDomainEvent>`(编译期泛型,AOT 安全),逐事件隔离——单个订阅者失败不影响后续事件。
+`MediatorDomainEventPublisher` 是开箱即用适配器:将每个事件包装为 `DomainEventEnvelope(actorId, version, event)` 后逐事件 `Publish<DomainEventEnvelope>`(编译期泛型,AOT 安全),逐事件隔离——单个订阅者失败不影响后续事件。
+
+### 订阅领域事件(declare-and-subscribe)
+
+事件处理器是实现 `IDomainEventSubscriber<TEvent>` 的普通类——PicoActor.Gen(内嵌于 PicoActor.Abs)扫描并自动注册,零手动接线。处理器收到携带源聚合上下文(`ActorId`、`Version`)的类型化信封,外加窄端口 `ICommandSender`:
 
 ```csharp
-// 订阅者:声明即订阅——Gen 扫描自动注册,零手动注册。事件→命令的翻译是业务层职责。
-public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
-    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* 翻译成命令 */ return default; }
+    public ValueTask Handle(DomainEventEnvelope<OrderPaid> envelope, ICommandSender sender, CancellationToken ct)
+    {
+        sender.Send(envelope.Event.OrderId, new ShipOrder(envelope.Event.OrderId));
+        return default;
+    }
 }
 
 // 接线:AddPicoMediator 注册 IMediator;AddPicoActor() 在 ActorSystem 工厂内
@@ -290,11 +297,15 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 自定义 publisher 显式接线:AddPicoActor(IPublisher)(实例需在 Build() 前可用)。
 ```
 
+事件以信封形式经 PicoMediator 在 persist+mutate 之后流出;replay 不重复发布。处理器失败不影响 actor(逐处理器隔离)。事件→命令→事件的翻译循环是预期用法——保持处理器幂等且有界。
+
+> **破坏性变更:** 直连 `ISubscriber<TEvent>`(PicoMediator)订阅者不再收到 PicoActor 领域事件。迁移到 `IDomainEventSubscriber<TEvent>`;信封的 `ActorId`/`Version` 取代任何手工内嵌的聚合 id。
+
 注意:
 - **事件→命令翻译是订阅者(业务层)职责**——PicoActor 只发布;命令只能经 mailbox 进入 actor。
 - 发布发生在 **persist+mutate 之后**——发布失败不影响 actor 状态(事件已落盘)。
 - 恢复静默:replay 不重复发布。
-- **类型化订阅(base-type bridge)**:适配器 `Publish<IDomainEvent>`;生成的 bridge 路由到具体类型订阅者。基类型声明的订阅者(`ISubscriber<IDomainEvent>`)也能收到基类型发布,但收不到具体类型发布。框架事件(`SagaCompleted`/`SagaFailed`)与其他事件一样可类型化订阅(Abs 目标 net10.0)。
+- 框架事件(`SagaCompleted`/`SagaFailed`)与其他事件一样可类型化订阅(Abs 目标 net10.0)。
 - **自动接线任意 scope 安全**:PicoDI 2026.8.1(E1)起 Singleton 工厂使用容器内部根 scope——自动接线的 IMediator 存活至容器释放。
 
 ---

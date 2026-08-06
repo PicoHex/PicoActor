@@ -386,21 +386,32 @@ public sealed class PostgresEventStore : IEventStore
 ### Event Outflow (PicoMediator)
 
 `IDomainEvent : IEvent` — domain events are first-class PicoMediator
-notifications. After persist+mutate, the framework publishes them through the
-`IDomainEventPublisher` hook; replay (recovery) never republishes.
+notifications. After persist+mutate, the framework publishes them as context
+envelopes through the `IDomainEventPublisher` hook; replay (recovery) never
+republishes.
 
-`MediatorDomainEventPublisher` is the out-of-the-box adapter: it publishes
-each event via `Publish<IDomainEvent>` (compile-time generic, AOT-safe) with
-per-event isolation — one failing subscriber never blocks later events.
+`MediatorDomainEventPublisher` is the out-of-the-box adapter: it wraps each
+event in a `DomainEventEnvelope(actorId, version, event)` and publishes it via
+`Publish<DomainEventEnvelope>` (compile-time generic, AOT-safe) with per-event
+isolation — one failing subscriber never blocks later events.
+
+### Subscribing to Domain Events (declare-and-subscribe)
+
+Event handlers are plain classes implementing `IDomainEventSubscriber<TEvent>`
+— PicoActor.Gen (embedded in PicoActor.Abs) scans and auto-registers them;
+no manual wiring. The handler receives a typed envelope carrying the source
+aggregate context (`ActorId`, `Version`) plus a narrow `ICommandSender` port:
 
 ```csharp
-// Typed subscriber: declare-and-subscribe — auto-registered by Gen scanning.
-// The base-type publish bridge (2026.8.1+) routes IDomainEvent publishes to
-// concrete typed subscribers. Event→command translation is the business layer's job.
-public sealed class OrderPaidSub : ISubscriber<OrderPaid>
+public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
-    public ValueTask Handle(OrderPaid e, CancellationToken ct) { /* translate to a command */ return default; }
+    public ValueTask Handle(DomainEventEnvelope<OrderPaid> envelope, ICommandSender sender, CancellationToken ct)
+    {
+        sender.Send(envelope.Event.OrderId, new ShipOrder(envelope.Event.OrderId));
+        return default;
+    }
 }
+```
 
 // Wiring: AddPicoMediator registers IMediator; AddPicoActor() auto-detects it in the
 // ActorSystem factory and wires event outflow (lazy — Scoped-compatible).
@@ -415,17 +426,23 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (the publisher instance must be available before Build()).
 ```
 
+Events flow out as envelopes through PicoMediator after persist+mutate; replay
+never publishes. Handler failures never affect the actor (per-event isolation).
+Translation loops (event → command → event) are intended; keep handlers
+idempotent and bounded.
+
+> **Breaking change:** direct `ISubscriber<TEvent>` (PicoMediator)
+> subscribers no longer receive PicoActor domain events. Migrate to
+> `IDomainEventSubscriber<TEvent>`; the envelope's `ActorId`/`Version` replace
+> any manually embedded aggregate id.
+
 Notes:
 - **Event → command translation is the subscriber's (business-layer) job** —
   PicoActor only publishes; commands enter actors exclusively via the mailbox.
 - Publish runs **after persist+mutate** — a failed publish never corrupts
   actor state; events are already durable.
 - Recovery is silent: replay never republishes events.
-- **Typed subscription via base-type bridge**: the adapter publishes
-  `Publish<IDomainEvent>`; generated bridges route to concrete typed
-  subscribers. Base-declared subscribers (`ISubscriber<IDomainEvent>`) also
-  receive base-typed publishes, but do NOT receive concrete-typed publishes.
-  Framework events (`SagaCompleted`/`SagaFailed`) are typed-subscribable
+- Framework events (`SagaCompleted`/`SagaFailed`) are typed-subscribable
   like any other event (Abs targets net10.0).
 - **Auto-wiring is safe from any resolving scope**: since PicoDI 2026.8.1 (E1)
   singleton factories run against the container-internal root scope, the
