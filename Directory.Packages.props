@@ -13,15 +13,12 @@
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.301" />
     <PackageVersion Include="PicoActor" Version="$(Version)" />
     <PackageVersion Include="PicoActor.Abs" Version="$(Version)" />
-    <PackageVersion Include="PicoDI" Version="2026.8.2" />
-    <PackageVersion Include="PicoDI.Abs" Version="2026.8.2" />
-    <PackageVersion Include="PicoLog.Abs" Version="2026.8.2" />
-    <PackageVersion Include="PicoMediator" Version="2026.8.2" />
-    <PackageVersion Include="PicoMediator.Abs" Version="2026.8.2" />
-    <PackageVersion Include="PicoMediator.DI" Version="2026.8.2" />
-    <!-- PicoMediator.Gen:无直接引用(dead entry)——Gen analyzer 内嵌于 PicoMediator.Abs
-         (analyzers/dotnet/cs + buildTransitive props 自动注入消费者);此处仅为版本清单占位 -->
-    <PackageVersion Include="PicoMediator.Gen" Version="2026.8.2" />
+    <PackageVersion Include="PicoDI" Version="2026.8.3" />
+    <PackageVersion Include="PicoDI.Abs" Version="2026.8.3" />
+    <PackageVersion Include="PicoLog.Abs" Version="2026.8.3" />
+    <PackageVersion Include="PicoMediator" Version="2026.8.3" />
+    <PackageVersion Include="PicoMediator.Abs" Version="2026.8.3" />
+    <PackageVersion Include="PicoMediator.DI" Version="2026.8.3" />
     <PackageVersion Include="System.Threading.Channels" Version="10.0.9" />
     <PackageVersion Include="TUnit" Version="1.63.0" />
   </ItemGroup>
