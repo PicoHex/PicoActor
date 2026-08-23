@@ -1,5 +1,6 @@
 # PicoActor CI — validation pipeline
-# Tier 1: simple library pair (PicoActor.Abs + PicoActor)
+# Tier 2: source-generator library (PicoActor.Abs + PicoActor.Gen + PicoActor)
+# Gen is embedded in the Abs package; tests exercise the generated bridge code.
 # Runs on PR and push to main
 
 name: ci
@@ -59,10 +60,10 @@ jobs:
           sudo apt-get install -y clang zlib1g-dev
 
       - name: Restore
-        run: dotnet restore PicoActor.slnx
+        run: dotnet restore PicoActor.slnx -p:UseProjectReferences=true
 
       - name: Build
-        run: dotnet build PicoActor.slnx --no-restore -c Release
+        run: dotnet build PicoActor.slnx --no-restore -c Release -p:UseProjectReferences=true
 
       - name: Test PicoActor.Abs
         run: dotnet test --project tests/PicoActor.Abs.Tests/PicoActor.Abs.Tests.csproj --no-build -c Release
@@ -70,9 +71,12 @@ jobs:
       - name: Test PicoActor
         run: dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-build -c Release
 
+      # Sample csproj owns PublishAot=true + TrimMode=full (checked-in
+      # AOT baseline); Abs/Gen guard against global PublishAot via
+      # TreatAsLocalProperty.
       - name: AOT publish (Counter sample)
         run: >
           dotnet publish samples/PicoActor.Sample/PicoActor.Sample.csproj
           --no-restore -c Release -r ${{ matrix.rid }}
-          -p:PublishAot=true --self-contained
+          --self-contained
           -o publish/${{ matrix.rid }}

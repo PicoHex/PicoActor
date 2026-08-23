@@ -1,4 +1,6 @@
 # PicoActor Release — NuGet publish
+# Tier 2 embedded-generator pack order: Abs embeds Gen (IsPackable=false),
+# then the Impl package consumes Abs from the staged local feed.
 # Triggered by tags shaped like v*
 
 name: release
@@ -8,9 +10,12 @@ on:
     tags: [v*]
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
-  id-token: write
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
@@ -34,27 +39,29 @@ jobs:
         run: echo "PACKAGE_VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
 
       # Pack in dependency order with UseProjectReferences=false.
-      # Each csproj uses conditional ItemGroup to select between
-      # ProjectReference (dev) and PackageReference (pack/release).
+      # Abs's ProjectReference to Gen is unconditional, so Gen builds first
+      # and its DLL is embedded into the Abs package (embedded-generator
+      # pattern); PicoActor then consumes Abs via PackageReference from the
+      # staged local feed.
 
       - name: Pack PicoActor.Abs
         run: >
           dotnet pack src/PicoActor.Abs/PicoActor.Abs.csproj
           -c Release -p:Version=${{ env.PACKAGE_VERSION }}
           -p:UseProjectReferences=false
-          -o packages
+          -o artifacts/nupkg
 
       - name: Pack PicoActor
         run: >
           dotnet pack src/PicoActor/PicoActor.csproj
           -c Release -p:Version=${{ env.PACKAGE_VERSION }}
           -p:UseProjectReferences=false
-          -p:RestoreAdditionalProjectSources=${{ github.workspace }}/packages
-          -o packages
+          -p:RestoreAdditionalProjectSources=${{ github.workspace }}/artifacts/nupkg
+          -o artifacts/nupkg
 
       - name: Publish to NuGet
         shell: bash
-        working-directory: packages
+        working-directory: artifacts/nupkg
         run: |
           for file in *.nupkg; do
             if [[ "$file" != *.snupkg ]] && [[ "$file" != *.symbols.nupkg ]]; then
@@ -69,10 +76,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nupkg
-          path: packages/*.nupkg
+          path: |
+            artifacts/nupkg/*.nupkg
+            artifacts/nupkg/*.snupkg
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: packages/*.nupkg
+          files: artifacts/nupkg/*.nupkg
