@@ -116,8 +116,7 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
             }
             catch
             {
-                Version -= (ulong)_events.Count;
-                ClearEvents();
+                RollbackUncommitted();
                 throw;
             }
         }
@@ -148,6 +147,19 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
             }
         }
 
+        ClearEvents();
+    }
+
+    /// <summary>
+    /// Discard uncommitted events and roll Version back to the last persisted
+    /// version. Used when persistence fails (<see cref="FlushEventsAsync"/>) or a
+    /// business failure makes the current batch non-atomic (<c>SagaActor.FailAsync</c>):
+    /// the next append must compute expectedVersion from the last persisted baseline,
+    /// otherwise the discarded events would leak into the next batch permanently.
+    /// </summary>
+    protected void RollbackUncommitted()
+    {
+        Version -= (ulong)_events.Count;
         ClearEvents();
     }
 

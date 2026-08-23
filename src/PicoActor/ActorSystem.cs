@@ -57,19 +57,9 @@ public sealed class ActorSystem : IActorSystem
         // 1. Call factory with creation command → constructor processes atomically
         var actor = (ActorBase)factory(command);
 
-        // 2. Assign a framework-generated UUID v7 — actor ids are framework-owned
-        actor.Id = id;
-
-        // 2b. Set system reference for spawn operations
-        actor.System = this;
-        WireErrorHandler(actor);
-
-        // 3. Wire event store if this is an ES actor
-        if (actor is EventSourcedActor es)
-        {
-            es.EventStore = _eventStore;
-            es.Publisher = _publisher;
-        }
+        // 2. Wire into the system: framework-generated UUID v7 identity (actor ids
+        //    are framework-owned), system reference, error routing, ES plumbing
+        WireActor(actor, id);
 
         // 4. Register in the system — a conflict means a duplicate-id bug; fail loudly.
         //    Discard: the creation constructor already staged events (RaiseEvent
@@ -86,32 +76,10 @@ public sealed class ActorSystem : IActorSystem
             throw new InvalidOperationException($"Actor {id} already exists.");
         }
 
-        // 5. Release the consumption loop gate
-        actor.SignalReady();
-
-        // 6. Wait for initialization (OnReadyAsync: persist + mutate).
+        // 5. Release the consumption loop gate and wait for initialization
+        //    (OnReadyAsync: persist + mutate).
         //    If persistence fails, remove from registry and propagate exception.
-        try
-        {
-            await actor.InitCompletedTask.ConfigureAwait(false);
-        }
-        catch
-        {
-            _registry.TryRemove(id, out _);
-            _logger?.Error($"Actor {typeof(T).Name} {id} initialization failed, removed");
-            // Stop the failed actor so its loop task terminates and is observed
-            // (RunAsync faults with the init exception) and its CTS is disposed.
-            // Swallow: the original exception must reach the caller.
-            try
-            {
-                await actor.StopAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                // _loopTask already faulted with the init exception
-            }
-            throw;
-        }
+        await CompleteInitializationAsync(actor, id);
 
         _logger?.Info($"Actor {typeof(T).Name} created: {id}");
 
@@ -140,13 +108,9 @@ public sealed class ActorSystem : IActorSystem
             return default;
 
         var actor = (ActorBase)(IActor)rebuildFactory();
-        actor.Id = id;
-        actor.System = this;
-        WireErrorHandler(actor);
+        WireActor(actor, id);
 
         var es = (IEventSourcedActor)actor;
-        ((EventSourcedActor)actor).EventStore = _eventStore;
-        ((EventSourcedActor)actor).Publisher = _publisher;
 
         // Full-path resource cleanup: any failure point after the rebuild (replay/init)
         // marks the actor discarded + StopAsync + rethrow.
@@ -185,6 +149,45 @@ public sealed class ActorSystem : IActorSystem
             return default;
         }
 
+        // Release the consumption loop gate and wait for initialization
+        // (OnReadyAsync: persist + mutate). The helper removes the actor from the
+        // registry and stops it on failure, then rethrows the original exception.
+        await CompleteInitializationAsync(actor, id);
+
+        _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
+
+        return (T)(IActor)actor;
+    }
+
+    /// <summary>
+    /// Wire an actor into the system before it becomes visible: assign the
+    /// framework-generated UUID v7 identity (actor ids are framework-owned),
+    /// attach the system reference for spawn operations, route unhandled errors
+    /// to the logger, and connect the event store/publisher for ES actors.
+    /// Shared by <see cref="CreateAsync{T}"/> and <see cref="GetAsync{T}"/>.
+    /// </summary>
+    private void WireActor(ActorBase actor, Guid id)
+    {
+        actor.Id = id;
+        actor.System = this;
+        WireErrorHandler(actor);
+
+        if (actor is EventSourcedActor es)
+        {
+            es.EventStore = _eventStore;
+            es.Publisher = _publisher;
+        }
+    }
+
+    /// <summary>
+    /// Release the consumption loop gate and wait for initialization
+    /// (OnReadyAsync: persist + mutate). On failure: remove the actor from the
+    /// registry, stop it so its loop task terminates and is observed (RunAsync
+    /// faults with the init exception) and its CTS is disposed, then rethrow the
+    /// original exception. Shared by <see cref="CreateAsync{T}"/> and <see cref="GetAsync{T}"/>.
+    /// </summary>
+    private async ValueTask CompleteInitializationAsync(ActorBase actor, Guid id)
+    {
         actor.SignalReady();
 
         try
@@ -193,8 +196,11 @@ public sealed class ActorSystem : IActorSystem
         }
         catch
         {
-            // Init failure (e.g. persisting SagaFailed during resume fails) → symmetric cleanup
             _registry.TryRemove(id, out _);
+            _logger?.Error($"Actor {actor.GetType().Name} {id} initialization failed, removed");
+            // Stop the failed actor so its loop task terminates and is observed
+            // (RunAsync faults with the init exception) and its CTS is disposed.
+            // Swallow: the original exception must reach the caller.
             try
             {
                 await actor.StopAsync().ConfigureAwait(false);
@@ -205,10 +211,6 @@ public sealed class ActorSystem : IActorSystem
             }
             throw;
         }
-
-        _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
-
-        return (T)(IActor)actor;
     }
 
     /// <summary>

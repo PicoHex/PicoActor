@@ -47,7 +47,41 @@ public sealed class PicoActorDiExtensionsTests
         // Events flowed to the publisher as envelopes: one batch from the construction-time flush, one from the mailbox command
         await Assert.That(publisher.Published.Count).IsEqualTo(2);
         await Assert.That(publisher.Published[0]).IsTypeOf<DomainEventEnvelope>();
-        await Assert.That(((DomainEventEnvelope)publisher.Published[0]).Event).IsTypeOf<DiProbeEvent>();
-        await Assert.That(((DomainEventEnvelope)publisher.Published[1]).Event).IsTypeOf<DiProbeEvent>();
+        await Assert
+            .That(((DomainEventEnvelope)publisher.Published[0]).Event)
+            .IsTypeOf<DiProbeEvent>();
+        await Assert
+            .That(((DomainEventEnvelope)publisher.Published[1]).Event)
+            .IsTypeOf<DiProbeEvent>();
+    }
+}
+
+public sealed class PicoActorDiExtensionsStoreTests
+{
+    [Test]
+    public async Task AddPicoActor_NoArgs_RegistersDefaultInMemoryStore()
+    {
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoActor();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var store = scope.GetService(typeof(IEventStore));
+
+        await Assert.That(store).IsTypeOf<InMemoryEventStore>();
+    }
+
+    [Test]
+    public async Task AddPicoActor_WithCustomStore_UsesProvidedInstance()
+    {
+        var provided = new InMemoryEventStore();
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoActor(provided);
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var resolved = scope.GetService(typeof(IEventStore));
+
+        await Assert.That(ReferenceEquals(resolved, provided)).IsTrue();
     }
 }

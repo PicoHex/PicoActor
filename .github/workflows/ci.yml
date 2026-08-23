@@ -59,6 +59,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang zlib1g-dev
 
+      # Local folder feed (NuGet.config: local -> artifacts/nupkg) must exist
+      # before restore or NuGet fails with NU1301.
+      - name: Prepare local feed
+        shell: bash
+        run: mkdir -p artifacts/nupkg
+
       - name: Restore
         run: dotnet restore PicoActor.slnx -p:UseProjectReferences=true
 

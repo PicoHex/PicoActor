@@ -182,11 +182,10 @@ public abstract class SagaActor : EventSourcedActor
 
         // Discard uncommitted business events and pending (existing atomicity
         // semantics: on failure the events were never persisted).
-        // Version must be rolled back in sync — CommitEvents only clears the list;
-        // keeping Version would make the subsequent SagaFailed flush compute a
-        // wrong expectedVersion (ConcurrencyException).
-        Version -= (ulong)((IEventSourcedActor)this).GetUncommittedEvents().Count;
-        ((IEventSourcedActor)this).CommitEvents();
+        // Version must be rolled back in sync — RollbackUncommitted clears the list
+        // and restores the last persisted baseline, so the subsequent SagaFailed
+        // flush computes the correct expectedVersion (no ConcurrencyException).
+        RollbackUncommitted();
         _pendingComplete = false;
         _pendingResult = null;
 

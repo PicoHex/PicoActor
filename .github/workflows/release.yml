@@ -44,6 +44,12 @@ jobs:
       # pattern); PicoActor then consumes Abs via PackageReference from the
       # staged local feed.
 
+      - name: Prepare local feed
+        shell: bash
+        run: |
+          rm -rf artifacts/nupkg
+          mkdir -p artifacts/nupkg
+
       - name: Pack PicoActor.Abs
         run: >
           dotnet pack src/PicoActor.Abs/PicoActor.Abs.csproj

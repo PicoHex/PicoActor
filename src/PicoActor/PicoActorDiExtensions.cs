@@ -23,7 +23,7 @@ public static class PicoActorDiExtensions
             ),
         };
 
-        return AddPicoActor(container, store);
+        return AddPicoActorCore(container, store, publisher: null);
     }
 
     /// <summary>
@@ -41,13 +41,41 @@ public static class PicoActorDiExtensions
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container)
     {
-        return AddPicoActor(container, eventStore: null);
+        return AddPicoActorCore(container, eventStore: null, publisher: null);
     }
 
     /// <summary>
     /// Registers PicoActor services with a custom event store.
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container, IEventStore? eventStore)
+    {
+        return AddPicoActorCore(container, eventStore, publisher: null);
+    }
+
+    /// <summary>
+    /// Registers PicoActor services and wires PicoMediator event outflow.
+    /// ActorSystem's DomainEventPublisher = MediatorDomainEventPublisher(publisher).
+    /// IEventStore defaults to InMemory; a container-registered IEventStore takes precedence.
+    /// </summary>
+    public static ISvcContainer AddPicoActor(this ISvcContainer container, IPublisher publisher)
+    {
+        ArgumentNullException.ThrowIfNull(container);
+        ArgumentNullException.ThrowIfNull(publisher);
+
+        return AddPicoActorCore(container, eventStore: null, publisher);
+    }
+
+    /// <summary>
+    /// Single registration path shared by all overloads: IEventStore (custom or
+    /// default in-memory), IActorSystem singleton, and the ICommandSender narrow
+    /// port. Event outflow wiring: an explicit <paramref name="publisher"/> wins;
+    /// otherwise the container is probed for <see cref="IMediator"/> (auto-wire).
+    /// </summary>
+    private static ISvcContainer AddPicoActorCore(
+        ISvcContainer container,
+        IEventStore? eventStore,
+        IPublisher? publisher
+    )
     {
         // Register event store (custom or default in-memory)
         container.Register(
@@ -71,19 +99,25 @@ public static class PicoActorDiExtensions
                 )
                     logger = loggerFactory.CreateLogger(nameof(ActorSystem));
 
-                // Event outflow: if the container has IMediator registered (e.g. via
-                // AddPicoMediator), auto-wire MediatorDomainEventPublisher. Lazy
-                // resolution inside the factory is compatible with scoped lifetimes —
-                // no publisher instance is needed before Build.
-                // Since PicoDI 2026.8.1 (E1), singleton factories run against the
-                // container-internal root scope, so first resolution from any scope is
-                // safe; the ODE diagnostic remains as defense (user-built publisher scenario).
-                IDomainEventPublisher? domainEventPublisher = null;
-                if (
+                // Event outflow: explicit publisher wins; otherwise auto-wire
+                // MediatorDomainEventPublisher if the container has IMediator
+                // registered (e.g. via AddPicoMediator). Lazy resolution inside
+                // the factory is compatible with scoped lifetimes — no publisher
+                // instance is needed before Build. Since PicoDI 2026.8.1 (E1),
+                // singleton factories run against the container-internal root
+                // scope, so first resolution from any scope is safe; the ODE
+                // diagnostic in the publisher remains as defense (user-built
+                // publisher scenario).
+                IDomainEventPublisher? domainEventPublisher;
+                if (publisher is not null)
+                    domainEventPublisher = new MediatorDomainEventPublisher(publisher, logger);
+                else if (
                     scope.TryGetService(typeof(IMediator), out var mediatorObj)
                     && mediatorObj is IMediator mediator
                 )
                     domainEventPublisher = new MediatorDomainEventPublisher(mediator, logger);
+                else
+                    domainEventPublisher = null;
 
                 return new ActorSystem(
                     new ActorSystemOptions
@@ -101,52 +135,9 @@ public static class PicoActorDiExtensions
         // Resolves the singleton IActorSystem lazily so any registration order works.
         container.Register(
             typeof(ICommandSender),
-            scope =>
-                new ActorSystemCommandSender(
-                    (IActorSystem)scope.GetService(typeof(IActorSystem))
-                ),
-            SvcLifetime.Singleton
-        );
-
-        return container;
-    }
-
-    /// <summary>
-    /// Registers PicoActor services and wires PicoMediator event outflow.
-    /// ActorSystem's DomainEventPublisher = MediatorDomainEventPublisher(publisher).
-    /// IEventStore defaults to InMemory; a container-registered IEventStore takes precedence.
-    /// </summary>
-    public static ISvcContainer AddPicoActor(this ISvcContainer container, IPublisher publisher)
-    {
-        ArgumentNullException.ThrowIfNull(container);
-        ArgumentNullException.ThrowIfNull(publisher);
-
-        // Reuse the main path (InMemory EventStore default + ActorSystem registration), then override the publisher wiring
-        AddPicoActor(container, eventStore: null);
-
-        container.Register(
-            typeof(IActorSystem),
-            scope =>
-            {
-                var store = (IEventStore)scope.GetService(typeof(IEventStore));
-
-                // Optional: resolve PicoLog logger
-                ILogger? logger = null;
-                if (
-                    scope.TryGetService(typeof(ILoggerFactory), out var factoryObj)
-                    && factoryObj is ILoggerFactory loggerFactory
-                )
-                    logger = loggerFactory.CreateLogger(nameof(ActorSystem));
-
-                return new ActorSystem(
-                    new ActorSystemOptions
-                    {
-                        EventStore = store,
-                        Logger = logger,
-                        DomainEventPublisher = new MediatorDomainEventPublisher(publisher, logger),
-                    }
-                );
-            },
+            scope => new ActorSystemCommandSender(
+                (IActorSystem)scope.GetService(typeof(IActorSystem))
+            ),
             SvcLifetime.Singleton
         );
 
