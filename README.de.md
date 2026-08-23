@@ -99,7 +99,7 @@ Ziel `net10.0` (PicoMediator-Laufzeit und generierter Bridge-Code erfordern net1
 | Typ | Rolle |
 |------|------|
 | `IActor` | Basisschnittstelle — stellt `Id` (UUID v7) bereit |
-| `IActorSystem` | Laufzeitvertrag — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
+| `IActorSystem` | Laufzeitvertrag — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, RequestStop, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Markierungsschnittstelle für Befehle |
 | `IDomainEvent` | Markierungsschnittstelle für Domänenereignisse |
 | `IEventSourcedActor` | Optional — Version, ReplayEvents, CommitEvents |

@@ -99,7 +99,7 @@ Target `net10.0` (o runtime do PicoMediator e o código bridge gerado exigem net
 | Tipo | Papel |
 |------|------|
 | `IActor` | Interface base — fornece `Id` (UUID v7) |
-| `IActorSystem` | Contrato de runtime — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
+| `IActorSystem` | Contrato de runtime — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, RequestStop, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Interface marcadora para comandos |
 | `IDomainEvent` | Interface marcadora para eventos de domínio |
 | `IEventSourcedActor` | Interface opcional — Version, ReplayEvents, CommitEvents |

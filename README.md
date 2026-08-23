@@ -106,7 +106,7 @@ interfaces and base classes.
 | Type | Role |
 |------|------|
 | `IActor` | Base interface — provides `Id` (UUID v7) |
-| `IActorSystem` | Runtime contract — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
+| `IActorSystem` | Runtime contract — Register, CreateAsync, FindAggregateIds, GetAsync, Send, AskAsync, StopAsync, RequestStop, StopAllAsync, ExecuteSaga, ResumeInterruptedSagasAsync |
 | `ICommand` | Marker interface for commands |
 | `IDomainEvent` | Marker interface for domain events |
 | `IEventSourcedActor` | Optional interface — Version, ReplayEvents, CommitEvents |
