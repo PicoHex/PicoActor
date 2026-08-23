@@ -149,6 +149,20 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
+        // The loop owns its CTS: dispose on every exit path (normal stop,
+        // creation failure, discard, init failure).
+        try
+        {
+            await RunCoreAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _cts.Dispose();
+        }
+    }
+
+    private async Task RunCoreAsync(CancellationToken ct)
+    {
         // Gate: wait until ActorSystem calls SignalReady().
         // This guarantees that Id is assigned, the actor is in the registry,
         // and (for ES actors) ReplayEvents has completed before any message is dispatched.
@@ -213,28 +227,30 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// </summary>
     protected virtual ValueTask OnReadyAsync() => default;
 
-    /// <summary>Stop the consumption loop, wait for it to finish, and dispose resources.</summary>
-    internal async ValueTask StopAsync()
+    /// <summary>
+    /// Signal the consumption loop to stop: release the ready gate (in case it
+    /// was never signaled — e.g., discarded after failed creation or duplicate
+    /// GetAsync rebuild), cancel the stop token, and complete the mailbox.
+    /// Synchronous and safe from any thread, including the actor's own message
+    /// turn (the loop exits asynchronously — no self-await). Idempotent.
+    /// </summary>
+    internal void SignalStop()
     {
         if (Interlocked.Exchange(ref _stopped, 1) != 0)
             return;
 
-        // Release the gate in case it was never signaled (e.g., discarded after failed creation
-        // or duplicate GetAsync rebuild). This allows RunAsync to reach the cancellation.
         _ready.TrySetResult(true);
-
         _cts.Cancel();
         _mailbox.Writer.Complete();
-        try
-        {
-            // A faulted loop (e.g. init failure) rethrows here — callers decide
-            // whether to propagate; the CTS must still be disposed.
-            await _loopTask.ConfigureAwait(false);
-        }
-        finally
-        {
-            _cts.Dispose();
-        }
+    }
+
+    /// <summary>Signal the loop to stop, wait for it to finish. The loop's finally disposes the CTS.</summary>
+    internal async ValueTask StopAsync()
+    {
+        SignalStop();
+        // A faulted loop (e.g. init failure) rethrows here — callers decide
+        // whether to propagate.
+        await _loopTask.ConfigureAwait(false);
     }
 
     /// <summary>IAsyncDisposable — delegates to StopAsync.</summary>

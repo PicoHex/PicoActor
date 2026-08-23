@@ -11,7 +11,8 @@ namespace PicoActor.Abs;
 ///   CreateAsync/ExecuteSaga → commands driven through the mailbox (no
 ///   constructor-time command handling)
 ///   → MarkComplete(result) → framework appends SagaCompleted(result) atomically
-///   in the same batch → auto-stop (async, Task.Run + Task.Yield)
+///   in the same batch → auto-stop (synchronous registry removal via
+///   IActorSystem.RequestStop; the loop exits asynchronously)
 ///   Or OnMessageAsync/ResumeAsync throws an unhandled business exception →
 ///   framework appends SagaFailed(reason) → auto-stop → AskAsync caller receives
 ///   SagaExecutionException(Id, Reason)
@@ -138,7 +139,8 @@ public abstract class SagaActor : EventSourcedActor
     /// Terminal-state guard + failure handling. Commands arriving after the saga is
     /// terminal are refused (Ask faults / Send silently drops, subclasses are not
     /// called) — prevents terminal-state events from polluting the event stream
-    /// (auto-stop is asynchronous, so a window exists).
+    /// (messages already queued in the mailbox when the terminal message runs
+    /// still arrive after it; the registry removal itself is synchronous).
     /// </summary>
     protected sealed override async ValueTask ProcessAsync(Envelope envelope)
     {
@@ -202,29 +204,16 @@ public abstract class SagaActor : EventSourcedActor
     }
 
     /// <summary>
-    /// Schedule a stop asynchronously. Task.Run + Task.Yield guarantees StopAsync is
-    /// called only after the current ProcessAsync/OnReadyAsync has fully returned
-    /// (otherwise awaiting _loopTask would deadlock itself).
+    /// Terminal-state cleanup: remove the saga from the registry and signal its
+    /// loop to stop. <see cref="IActorSystem.RequestStop"/> is synchronous and
+    /// loop-safe (no self-await), so it can be called directly from the message
+    /// turn — the loop exits asynchronously after the current message returns.
     /// </summary>
     private void ScheduleStop()
     {
         if (System is null)
             return;
 
-        var sys = System;
-        var id = Id;
-
-        _ = Task.Run(async () =>
-        {
-            await Task.Yield();
-            try
-            {
-                await sys.StopAsync(id).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Best-effort cleanup — saga terminal events are already persisted.
-            }
-        });
+        System.RequestStop(Id);
     }
 }

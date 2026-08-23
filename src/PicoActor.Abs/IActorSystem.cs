@@ -44,6 +44,15 @@ public interface IActorSystem
     ValueTask StopAsync(Guid id);
 
     /// <summary>
+    /// Remove the actor from the registry and signal its loop to stop, without
+    /// waiting for the loop to finish. Safe to call from within the actor's own
+    /// message turn (no self-await — the loop exits asynchronously). Idempotent:
+    /// no-op if the actor is already removed. Use <see cref="StopAsync"/> when the
+    /// caller must wait for full termination.
+    /// </summary>
+    void RequestStop(Guid id);
+
+    /// <summary>
     /// Gracefully stop every registered actor (host disposal — actor loops/CTSs
     /// must not leak until process exit). Idempotent per actor.
     /// </summary>

@@ -287,6 +287,16 @@ public sealed class ActorSystem : IActorSystem
         _logger?.Info($"Actor {id} stopped");
     }
 
+    /// <inheritdoc/>
+    public void RequestStop(Guid id)
+    {
+        if (!_registry.TryRemove(id, out var actor))
+            return; // Idempotent: already stopped or never existed
+
+        _logger?.Info($"Stopping actor {id} (requested)");
+        actor.SignalStop();
+    }
+
     /// <summary>
     /// Gracefully stop every registered actor (code review #10 — host disposal
     /// must not leak actor loops/CTSs until process exit).
