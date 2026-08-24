@@ -101,7 +101,6 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `IDomainEvent` | 領域事件標記介面 |
 | `IEventSourcedActor` | 可選介面——Version、ReplayEvents、CommitEvents |
 | `IEventStore` | 持久化契約——AppendAsync（樂觀併發）、LoadAsync、PeekFirstAsync |
-| `ICancelable` | 可選——CancelCurrentTurn 用於長時間執行操作 |
 | `Actor` | 抽象基底類別——信箱、消費迴圈、SignalReady、StopAsync |
 | `EventSourcedActor` | ES 基底類別——RaiseEvent、Mutate、Persist-then-Mutate 管線 |
 | `SagaActor` | 有限生命週期 ES 協調器——框架終態事件（SagaCompleted/SagaFailed）、自動停止、經 ResumeInterruptedSagasAsync 顯式批次恢復 |
@@ -109,7 +108,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | 上下文信封——`ActorId`、`Version`、`Event`（傳輸 / 型別化交付） |
 | `ICommandSender` | 處理器的窄命令埠——Send、AskAsync、ExecuteSaga |
 | `Envelope` | 內部——包裝 ICommand 與可選 TaskCompletionSource |
-| `ActorOutputEvent` | 出站通知——Type、Data、可選 ToolCallId/ToolName/TurnId |
+| `ActorOutputEvent` | 出站通知——Type、Data、可選 TurnId |
 | `ConcurrencyException` | 版本不符時由 IEventStore 擲出 |
 
 ### PicoActor — 執行時
@@ -118,8 +117,8 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 | 類型 | 角色 |
 |------|------|
-| `ActorSystem` | 預設 `IActorSystem`——ConcurrentDictionary 註冊表、工廠註冊、訊息路由、CancelTurn |
-| `InMemoryEventStore` | 無鎖記憶體儲存——基於 ConcurrentDictionary |
+| `ActorSystem` | 預設 `IActorSystem`——ConcurrentDictionary 註冊表、工廠註冊、訊息路由 |
+| `InMemoryEventStore` | 記憶體儲存——每串流加鎖，樂觀並行（基於 ConcurrentDictionary） |
 | `ActorConfig` | 設定 POCO——可從 PicoCfg 綁定 |
 | `ActorSystemOptions` | 選項——必填 EventStore、選用 Logger、選用 DomainEventPublisher;由 `ActorSystem` 建構函式使用 |
 | `MediatorDomainEventPublisher` | 預設 `IDomainEventPublisher`——逐事件發佈 `DomainEventEnvelope`,逐事件隔離 |
@@ -200,25 +199,6 @@ Actor 可向外部訂閱者廣播 `ActorOutputEvent` 訊息：
 counter.OutputWriter = channel.Writer;
 // 在 OnMessageAsync 中：
 WriteOutput("Incremented", data: "Delta=5");
-```
-
-### CancelTurn
-
-取消長時間執行操作而不停止 Actor：
-
-```csharp
-public sealed class MyActor : Actor, ICancelable
-{
-    private CancellationTokenSource? _currentTurnCts;
-    public void CancelCurrentTurn() => _currentTurnCts?.Cancel();
-
-    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
-    {
-        _currentTurnCts = CancellationTokenSource.CreateLinkedTokenSource(StopToken);
-        // ... 使用 _currentTurnCts.Token 的長時間工作
-    }
-}
-system.CancelTurn(actor.Id);
 ```
 
 ### Spawn

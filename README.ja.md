@@ -103,7 +103,6 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `IDomainEvent` | ドメインイベント用マーカーインターフェース |
 | `IEventSourcedActor` | オプショナル——Version、ReplayEvents、CommitEvents |
 | `IEventStore` | 永続化契約——AppendAsync（楽観的並行性）、LoadAsync、PeekFirstAsync |
-| `ICancelable` | オプショナル——長時間実行操作用 CancelCurrentTurn |
 | `Actor` | 抽象基底クラス——メールボックス、消費ループ、SignalReady、StopAsync |
 | `EventSourcedActor` | ES 基底——RaiseEvent、Mutate、Persist-then-Mutate パイプライン |
 | `SagaActor` | 有限寿命 ES コーディネータ——フレームワーク終端イベント（SagaCompleted/SagaFailed）、自動停止、ResumeInterruptedSagasAsync による明示的バッチ復旧 |
@@ -111,7 +110,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | コンテキストエンベロープ——`ActorId`、`Version`、`Event`（転送 / 型付き配信） |
 | `ICommandSender` | ハンドラー用ナローポート——Send、AskAsync、ExecuteSaga |
 | `Envelope` | 内部——ICommand とオプショナル TaskCompletionSource をラップ |
-| `ActorOutputEvent` | 送信通知——Type、Data、オプショナル ToolCallId/ToolName/TurnId |
+| `ActorOutputEvent` | 送信通知——Type、Data、オプショナル TurnId |
 | `ConcurrencyException` | バージョン不一致時に IEventStore がスロー |
 
 ### PicoActor — ランタイム
@@ -120,8 +119,8 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 | 型 | 役割 |
 |------|------|
-| `ActorSystem` | デフォルト `IActorSystem`——ConcurrentDictionary レジストリ、ファクトリ登録、メッセージルーティング、CancelTurn |
-| `InMemoryEventStore` | ロックフリーインメモリストア——ConcurrentDictionary ベース |
+| `ActorSystem` | デフォルト `IActorSystem`——ConcurrentDictionary レジストリ、ファクトリ登録、メッセージルーティング |
+| `InMemoryEventStore` | インメモリストア——ストリーム単位のロック、楽観的同時実行制御（ConcurrentDictionary ベース） |
 | `ActorConfig` | 設定 POCO——PicoCfg からバインディング可能 |
 | `ActorSystemOptions` | オプション——必須 EventStore、任意 Logger、任意 DomainEventPublisher;`ActorSystem` コンストラクタで使用 |
 | `MediatorDomainEventPublisher` | デフォルトの `IDomainEventPublisher`——イベントごとに `DomainEventEnvelope` を発行、イベント単位の分離 |
@@ -202,25 +201,6 @@ Actor は `ActorOutputEvent` メッセージを外部サブスクライバにブ
 counter.OutputWriter = channel.Writer;
 // OnMessageAsync 内：
 WriteOutput("Incremented", data: "Delta=5");
-```
-
-### CancelTurn
-
-Actor を停止せずに長時間実行操作をキャンセルします：
-
-```csharp
-public sealed class MyActor : Actor, ICancelable
-{
-    private CancellationTokenSource? _currentTurnCts;
-    public void CancelCurrentTurn() => _currentTurnCts?.Cancel();
-
-    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
-    {
-        _currentTurnCts = CancellationTokenSource.CreateLinkedTokenSource(StopToken);
-        // ... _currentTurnCts.Token を使用した長時間処理
-    }
-}
-system.CancelTurn(actor.Id);
 ```
 
 ### Spawn

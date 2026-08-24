@@ -111,7 +111,6 @@ interfaces and base classes.
 | `IDomainEvent` | Marker interface for domain events |
 | `IEventSourcedActor` | Optional interface — Version, ReplayEvents, CommitEvents |
 | `IEventStore` | Persistence contract — AppendAsync (optimistic concurrency), LoadAsync, PeekFirstAsync |
-| `ICancelable` | Optional — CancelCurrentTurn for long-running operations |
 | `Actor` | Abstract base — mailbox, consumption loop, SignalReady, StopAsync |
 | `EventSourcedActor` | ES base — RaiseEvent, Mutate, Persist-then-Mutate pipeline |
 | `SagaActor` | Finite-life ES coordinator — framework terminal events (SagaCompleted/SagaFailed), auto-stop, explicit batch recovery via ResumeInterruptedSagasAsync |
@@ -119,7 +118,7 @@ interfaces and base classes.
 | `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | Context envelope — `ActorId`, `Version`, `Event` (transport / typed delivery) |
 | `ICommandSender` | Narrow command port for handlers — Send, AskAsync, ExecuteSaga |
 | `Envelope` | Internal — wraps ICommand with optional TaskCompletionSource |
-| `ActorOutputEvent` | Outbound notification — Type, Data, optional ToolCallId/ToolName/TurnId |
+| `ActorOutputEvent` | Outbound notification — Type, Data, optional TurnId |
 | `ConcurrencyException` | Thrown by IEventStore on version mismatch |
 
 ### PicoActor — Runtime
@@ -128,8 +127,8 @@ Targets `net10.0`, AOT-compatible.
 
 | Type | Role |
 |------|------|
-| `ActorSystem` | Default `IActorSystem` — ConcurrentDictionary registry, factory registration, message routing, CancelTurn |
-| `InMemoryEventStore` | Lock-free in-memory store — ConcurrentDictionary-backed |
+| `ActorSystem` | Default `IActorSystem` — ConcurrentDictionary registry, factory registration, message routing |
+| `InMemoryEventStore` | In-memory store — per-stream lock, optimistic concurrency (ConcurrentDictionary-backed) |
 | `ActorConfig` | Configuration POCO — bind from PicoCfg |
 | `ActorSystemOptions` | Options — required EventStore, optional Logger, optional DomainEventPublisher; consumed by the `ActorSystem` constructor |
 | `MediatorDomainEventPublisher` | Default `IDomainEventPublisher` — publishes `DomainEventEnvelope` per event with per-event isolation |
@@ -323,25 +322,6 @@ Actors broadcast `ActorOutputEvent` messages to external subscribers:
 counter.OutputWriter = channel.Writer;
 // Inside OnMessageAsync:
 WriteOutput("Incremented", data: "Delta=5");
-```
-
-### CancelTurn
-
-Cancel long-running operations without stopping the actor:
-
-```csharp
-public sealed class MyActor : Actor, ICancelable
-{
-    private CancellationTokenSource? _currentTurnCts;
-    public void CancelCurrentTurn() => _currentTurnCts?.Cancel();
-
-    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
-    {
-        _currentTurnCts = CancellationTokenSource.CreateLinkedTokenSource(StopToken);
-        // ... long-running work with _currentTurnCts.Token
-    }
-}
-system.CancelTurn(actor.Id);
 ```
 
 ### Spawn

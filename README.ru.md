@@ -104,7 +104,6 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `IDomainEvent` | Маркерный интерфейс для доменных событий |
 | `IEventSourcedActor` | Опциональный — Version, ReplayEvents, CommitEvents |
 | `IEventStore` | Контракт хранения — AppendAsync (оптимистичная конкурентность), LoadAsync, PeekFirstAsync |
-| `ICancelable` | Опциональный — CancelCurrentTurn для длительных операций |
 | `Actor` | Абстрактный базовый класс — почтовый ящик, цикл обработки, SignalReady, StopAsync |
 | `EventSourcedActor` | ES-база — RaiseEvent, Mutate, конвейер Persist-then-Mutate |
 | `SagaActor` | ES-координатор с конечным жизненным циклом — терминальные события фреймворка (SagaCompleted/SagaFailed), авто-остановка, явное пакетное восстановление через ResumeInterruptedSagasAsync |
@@ -112,7 +111,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | Конверт контекста — `ActorId`, `Version`, `Event` (транспорт / типизированная доставка) |
 | `ICommandSender` | Узкий порт команд для обработчиков — Send, AskAsync, ExecuteSaga |
 | `Envelope` | Внутренний — оборачивает ICommand с опциональным TaskCompletionSource |
-| `ActorOutputEvent` | Исходящее уведомление — Type, Data, опциональные ToolCallId/ToolName/TurnId |
+| `ActorOutputEvent` | Исходящее уведомление — Type, Data, опциональные TurnId |
 | `ConcurrencyException` | Выбрасывается IEventStore при несовпадении версий |
 
 ### PicoActor — Среда выполнения
@@ -121,8 +120,8 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 | Тип | Роль |
 |------|------|
-| `ActorSystem` | Стандартный `IActorSystem` — реестр ConcurrentDictionary, регистрация фабрик, маршрутизация, CancelTurn |
-| `InMemoryEventStore` | Безблокировочное in-memory хранилище — на основе ConcurrentDictionary |
+| `ActorSystem` | Стандартный `IActorSystem` — реестр ConcurrentDictionary, регистрация фабрик, маршрутизация |
+| `InMemoryEventStore` | In-memory хранилище с блокировкой на поток — оптимистичная конкурентность, на основе ConcurrentDictionary |
 | `ActorConfig` | POCO конфигурации — связывается из PicoCfg |
 | `ActorSystemOptions` | Параметры — обязательный EventStore, необязательный Logger, необязательный DomainEventPublisher; используется конструктором `ActorSystem` |
 | `MediatorDomainEventPublisher` | `IDomainEventPublisher` по умолчанию — публикует `DomainEventEnvelope` для каждого события с изоляцией по событиям |
@@ -204,25 +203,6 @@ OnMessageAsync → RaiseEvent (только запись, без изменен�
 counter.OutputWriter = channel.Writer;
 // Внутри OnMessageAsync:
 WriteOutput("Incremented", data: "Delta=5");
-```
-
-### CancelTurn
-
-Отмена длительных операций без остановки актора:
-
-```csharp
-public sealed class MyActor : Actor, ICancelable
-{
-    private CancellationTokenSource? _currentTurnCts;
-    public void CancelCurrentTurn() => _currentTurnCts?.Cancel();
-
-    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
-    {
-        _currentTurnCts = CancellationTokenSource.CreateLinkedTokenSource(StopToken);
-        // ... длительная работа с _currentTurnCts.Token
-    }
-}
-system.CancelTurn(actor.Id);
 ```
 
 ### Spawn

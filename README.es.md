@@ -104,7 +104,6 @@ Target `net10.0` (el runtime de PicoMediator y el código bridge generado requie
 | `IDomainEvent` | Interfaz marcadora para eventos de dominio |
 | `IEventSourcedActor` | Interfaz opcional — Version, ReplayEvents, CommitEvents |
 | `IEventStore` | Contrato de persistencia — AppendAsync (concurrencia optimista), LoadAsync, PeekFirstAsync |
-| `ICancelable` | Opcional — CancelCurrentTurn para operaciones de larga duración |
 | `Actor` | Clase base abstracta — buzón, bucle de consumo, SignalReady, StopAsync |
 | `EventSourcedActor` | Base ES — RaiseEvent, Mutate, pipeline Persistir-luego-Mutar |
 | `SagaActor` | Coordinador ES de vida finita — eventos terminales del framework (SagaCompleted/SagaFailed), auto-stop, recuperación por lotes explícita vía ResumeInterruptedSagasAsync |
@@ -112,7 +111,7 @@ Target `net10.0` (el runtime de PicoMediator y el código bridge generado requie
 | `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | Envelope de contexto — `ActorId`, `Version`, `Event` (transporte / entrega tipada) |
 | `ICommandSender` | Puerto estrecho para handlers — Send, AskAsync, ExecuteSaga |
 | `Envelope` | Interno — envuelve ICommand con TaskCompletionSource opcional |
-| `ActorOutputEvent` | Notificación saliente — Type, Data, ToolCallId/ToolName/TurnId opcionales |
+| `ActorOutputEvent` | Notificación saliente — Type, Data, TurnId opcionales |
 | `ConcurrencyException` | Lanzada por IEventStore en desajuste de versión |
 
 ### PicoActor — Runtime
@@ -121,8 +120,8 @@ Target `net10.0`, compatible con AOT.
 
 | Tipo | Rol |
 |------|------|
-| `ActorSystem` | `IActorSystem` por defecto — registro ConcurrentDictionary, fábricas, enrutamiento, CancelTurn |
-| `InMemoryEventStore` | Almacén en memoria sin bloqueos — basado en ConcurrentDictionary |
+| `ActorSystem` | `IActorSystem` por defecto — registro ConcurrentDictionary, fábricas, enrutamiento |
+| `InMemoryEventStore` | Almacén en memoria con bloqueo por flujo — concurrencia optimista, basado en ConcurrentDictionary |
 | `ActorConfig` | POCO de configuración — vinculable desde PicoCfg |
 | `ActorSystemOptions` | Opciones — EventStore obligatorio, Logger opcional, DomainEventPublisher opcional; consumido por el constructor de `ActorSystem` |
 | `MediatorDomainEventPublisher` | `IDomainEventPublisher` predeterminado — publica `DomainEventEnvelope` por evento con aislamiento por evento |
@@ -204,25 +203,6 @@ Los Actores transmiten mensajes `ActorOutputEvent` a suscriptores externos:
 counter.OutputWriter = channel.Writer;
 // Dentro de OnMessageAsync:
 WriteOutput("Incremented", data: "Delta=5");
-```
-
-### CancelTurn
-
-Cancela operaciones de larga duración sin detener el Actor:
-
-```csharp
-public sealed class MyActor : Actor, ICancelable
-{
-    private CancellationTokenSource? _currentTurnCts;
-    public void CancelCurrentTurn() => _currentTurnCts?.Cancel();
-
-    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
-    {
-        _currentTurnCts = CancellationTokenSource.CreateLinkedTokenSource(StopToken);
-        // ... trabajo largo con _currentTurnCts.Token
-    }
-}
-system.CancelTurn(actor.Id);
 ```
 
 ### Spawn

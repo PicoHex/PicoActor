@@ -103,7 +103,6 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `IDomainEvent` | 도메인 이벤트용 마커 인터페이스 |
 | `IEventSourcedActor` | 선택적——Version, ReplayEvents, CommitEvents |
 | `IEventStore` | 영속화 계약——AppendAsync(낙관적 동시성), LoadAsync, PeekFirstAsync |
-| `ICancelable` | 선택적——장기 실행 작업용 CancelCurrentTurn |
 | `Actor` | 추상 기본 클래스——메일박스, 소비 루프, SignalReady, StopAsync |
 | `EventSourcedActor` | ES 기본——RaiseEvent, Mutate, Persist-then-Mutate 파이프라인 |
 | `SagaActor` | 유한 수명 ES 코디네이터 — 프레임워크 터미널 이벤트(SagaCompleted/SagaFailed), 자동 중지, ResumeInterruptedSagasAsync를 통한 명시적 일괄 복구 |
@@ -111,7 +110,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | `DomainEventEnvelope` / `DomainEventEnvelope<TEvent>` | 컨텍스트 엔벨로프 — `ActorId`, `Version`, `Event`(전송 / 타입화된 전달) |
 | `ICommandSender` | 핸들러용 좁은 명령 포트 — Send, AskAsync, ExecuteSaga |
 | `Envelope` | 내부——ICommand를 선택적 TaskCompletionSource로 래핑 |
-| `ActorOutputEvent` | 발신 알림——Type, Data, 선택적 ToolCallId/ToolName/TurnId |
+| `ActorOutputEvent` | 발신 알림——Type, Data, 선택적 TurnId |
 | `ConcurrencyException` | 버전 불일치 시 IEventStore가 발생 |
 
 ### PicoActor — 런타임
@@ -120,8 +119,8 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 
 | 타입 | 역할 |
 |------|------|
-| `ActorSystem` | 기본 `IActorSystem`——ConcurrentDictionary 레지스트리, 팩토리 등록, 메시지 라우팅, CancelTurn |
-| `InMemoryEventStore` | 락-프리 인메모리 저장소——ConcurrentDictionary 기반 |
+| `ActorSystem` | 기본 `IActorSystem`——ConcurrentDictionary 레지스트리, 팩토리 등록, 메시지 라우팅 |
+| `InMemoryEventStore` | 인메모리 저장소——스트림 단위 락, 낙관적 동시성(ConcurrentDictionary 기반) |
 | `ActorConfig` | 설정 POCO——PicoCfg에서 바인딩 가능 |
 | `ActorSystemOptions` | 옵션 — 필수 EventStore, 선택 Logger, 선택 DomainEventPublisher;`ActorSystem` 생성자에서 사용 |
 | `MediatorDomainEventPublisher` | 기본 `IDomainEventPublisher` — 이벤트별로 `DomainEventEnvelope` 게시, 이벤트별 격리 |
@@ -202,25 +201,6 @@ Actor는 `ActorOutputEvent` 메시지를 외부 구독자에게 브로드캐스�
 counter.OutputWriter = channel.Writer;
 // OnMessageAsync 내부:
 WriteOutput("Incremented", data: "Delta=5");
-```
-
-### CancelTurn
-
-Actor를 중지하지 않고 장기 실행 작업을 취소합니다:
-
-```csharp
-public sealed class MyActor : Actor, ICancelable
-{
-    private CancellationTokenSource? _currentTurnCts;
-    public void CancelCurrentTurn() => _currentTurnCts?.Cancel();
-
-    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
-    {
-        _currentTurnCts = CancellationTokenSource.CreateLinkedTokenSource(StopToken);
-        // ... _currentTurnCts.Token을 사용한 장기 작업
-    }
-}
-system.CancelTurn(actor.Id);
 ```
 
 ### Spawn
