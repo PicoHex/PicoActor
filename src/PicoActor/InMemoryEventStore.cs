@@ -52,7 +52,7 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
         await gate.WaitAsync().ConfigureAwait(false);
         try
         {
-            return stream.ToList().AsReadOnly();
+            return stream.ToList();
         }
         finally
         {
@@ -86,8 +86,19 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
         var result = new List<Guid>();
         foreach (var (id, stream) in _streams)
         {
-            if (stream.Count > 0 && stream[0].GetType().Name == firstEventType)
-                result.Add(id);
+            // Same gate discipline as Append/Load/Peek: the first-element read
+            // must not race a concurrent AddRange's internal resize.
+            var gate = _locks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
+            gate.Wait();
+            try
+            {
+                if (stream.Count > 0 && stream[0].GetType().Name == firstEventType)
+                    result.Add(id);
+            }
+            finally
+            {
+                gate.Release();
+            }
         }
         return result;
     }
