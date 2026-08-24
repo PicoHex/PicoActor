@@ -184,6 +184,91 @@ OnMessageAsync → RaiseEvent（僅記錄，不改變狀態）
 若 `AppendAsync` 失敗，未提交的事件被丟棄，`Version` 復原。
 Actor **不會被毒化**——下一條訊息正常處理。
 
+### SagaActor（有限生命週期協調器）
+
+`SagaActor extends EventSourcedActor`——面向生命週期有限的跨聚合操作。與信箱永久運行的普通 EventSourcedActor 不同，SagaActor 在框架持久化其終態事件後會**自動停止**。
+
+終態由**框架生成**：`MarkComplete(result)` 會把 `SagaCompleted(result)` 事件附加到與業務事件相同的批次（原子附加——完成與持久化不會分歧）；未捕捉的業務例外會附加 `SagaFailed(reason)`（`"ExceptionType: message"`，截斷至 512 字元），並向呼叫方擲回 `SagaExecutionException(Id, Reason)`。子類別從不 raise 也不處理這些事件——`Mutate` 只看到業務事件。
+
+```csharp
+public sealed class OrderSaga : SagaActor
+{
+    private int _step;
+    private Guid _orderId;
+
+    public OrderSaga() { }  // Parameterless — commands via mailbox
+
+    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        if (command is PlaceOrder cmd)
+        {
+            var orderId = cmd.OrderId;   // local — state changes only via Mutate
+            if (_step < 1) RaiseEvent(new OrderPlaced(orderId));
+            if (_step < 2) RaiseEvent(new PaymentReserved(orderId));
+            MarkComplete(orderId);  // framework appends SagaCompleted(orderId) atomically
+            return orderId;
+        }
+        return null;
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case OrderPlaced e: _step = 1; _orderId = e.OrderId; break;
+            case PaymentReserved: _step = 2; break;
+            // SagaCompleted/SagaFailed are filtered by the framework — never here
+        }
+    }
+
+    protected override async ValueTask ResumeAsync()
+    {
+        // Re-evaluate after crash recovery. Idempotent — _step guards skip
+        // completed steps; may AskAsync external aggregates or no-op to wait.
+        await OnMessageAsync(new PlaceOrder(_orderId));
+    }
+}
+```
+
+**生命週期：**
+
+```
+CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
+→ framework appends SagaCompleted(result) in the same flush batch (atomic)
+→ ProcessAsync returns → auto-stop (fire-and-forget) → removed from registry
+```
+
+業務失敗：`OnMessageAsync`/`ResumeAsync` 擲出例外 → 框架捨棄未提交的業務事件、附加 `SagaFailed(reason)`、自動停止，並以 `SagaExecutionException(Id, Reason)` 讓 Ask 呼叫方收到錯誤。基礎設施失敗（儲存不可用）**不是**終態——事件復原，saga 保持 Running。
+
+**當機復原：** `GetAsync` 重放事件 → 框架從 `SagaCompleted`/`SagaFailed` 還原 `Completed`/`Failed`（已終態的 saga 保持死亡——`GetAsync` 回傳 null）。沒有終態事件的 saga 會收到 `ResumeAsync()` 呼叫；若因此到達終態，框架在同一 flush 批次中持久化 `SagaCompleted`。復原是明確拉取，沒有背景魔法。
+
+**明確批次復原：**
+
+```csharp
+var results = await system.ResumeInterruptedSagasAsync<OrderSaga>(
+    nameof(OrderPlaced));
+
+foreach (var r in results)   // SagaResumeResult(Id, Status, Reason?)
+{
+    // SagaResumeStatus.Completed | Failed (Reason) | Running
+}
+```
+
+`ResumeInterruptedSagasAsync<TSaga>(firstEventType, match?)` 按首事件型別名稱列舉 saga，逐一經 `GetAsync` 單飛復原，並回傳復原後的分類：`Completed` / `Failed`（含框架還原的 reason）/ `Running`（仍在等待外部輸入）。已終態的 saga 永不復活；仍存活的 saga 原地分類。冪等且可安全重試（每個 id 單飛）；儲存失敗會快速失敗，便於呼叫方重試整批。
+
+**Process Manager 模式：**
+
+同一基底類別同樣涵蓋 process manager——外部事件由應用層事件處理器（如 PicoMediator 訂閱者）翻譯為命令，再傳送到 saga 的信箱。事件永不直接進入 actor；saga 只看到命令。
+
+**便利 API：**
+
+```csharp
+var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId));
+// SagaExecution<Guid>(Id, Result) — saga auto-stops, no StopAsync needed
+```
+
+`ExecuteSaga<TSaga, TResult>(command)` 一次呼叫完成 `CreateAsync` + `AskAsync`。成功回傳 `SagaExecution<TResult>(Id, Result)`；業務失敗擲出 `SagaExecutionException(SagaId, Reason)`——呼叫方總能拿到 saga id。
+
 ### 訊息模式：Ask vs Send
 
 | 模式 | 方法 | 語意 |

@@ -209,10 +209,11 @@ public sealed class OrderSaga : SagaActor
     {
         if (command is PlaceOrder cmd)
         {
-            if (_step < 1) { RaiseEvent(new OrderPlaced(cmd.OrderId)); _orderId = cmd.OrderId; }
-            if (_step < 2) RaiseEvent(new PaymentReserved(_orderId));
-            MarkComplete(_orderId);  // framework appends SagaCompleted(_orderId) atomically
-            return _orderId;
+            var orderId = cmd.OrderId;   // local — state changes only via Mutate
+            if (_step < 1) RaiseEvent(new OrderPlaced(orderId));
+            if (_step < 2) RaiseEvent(new PaymentReserved(orderId));
+            MarkComplete(orderId);  // framework appends SagaCompleted(orderId) atomically
+            return orderId;
         }
         return null;
     }

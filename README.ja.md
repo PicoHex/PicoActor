@@ -186,6 +186,91 @@ OnMessageAsync → RaiseEvent（記録のみ、状態変更なし）
 `AppendAsync` が失敗した場合、未コミットイベントは破棄され `Version` が
 ロールバックされます。Actor は**毒化されません**——次のメッセージは正常に処理されます。
 
+### SagaActor（有限ライフタイムのコーディネーター）
+
+`SagaActor extends EventSourcedActor` —— ライフサイクルが有限の集約間操作向けです。メールボックスが永久に動作し続ける通常の EventSourcedActor と異なり、SagaActor はフレームワークが終端イベントを永続化した後**自動的に停止**します。
+
+終端状態は**フレームワーク生成**です：`MarkComplete(result)` は `SagaCompleted(result)` イベントをビジネスイベントと同じバッチへアペンドし（アトミック —— 完了と永続化が乖離することはありません）、捕捉されなかったビジネス例外は `SagaFailed(reason)`（`"ExceptionType: message"`、512 文字に切り詰め）をアペンドし、呼び出し元に `SagaExecutionException(Id, Reason)` をスローします。サブクラスがこれらのイベントを raise したり handle したりすることはありません —— `Mutate` が見るのはビジネスイベントだけです。
+
+```csharp
+public sealed class OrderSaga : SagaActor
+{
+    private int _step;
+    private Guid _orderId;
+
+    public OrderSaga() { }  // Parameterless — commands via mailbox
+
+    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        if (command is PlaceOrder cmd)
+        {
+            var orderId = cmd.OrderId;   // local — state changes only via Mutate
+            if (_step < 1) RaiseEvent(new OrderPlaced(orderId));
+            if (_step < 2) RaiseEvent(new PaymentReserved(orderId));
+            MarkComplete(orderId);  // framework appends SagaCompleted(orderId) atomically
+            return orderId;
+        }
+        return null;
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case OrderPlaced e: _step = 1; _orderId = e.OrderId; break;
+            case PaymentReserved: _step = 2; break;
+            // SagaCompleted/SagaFailed are filtered by the framework — never here
+        }
+    }
+
+    protected override async ValueTask ResumeAsync()
+    {
+        // Re-evaluate after crash recovery. Idempotent — _step guards skip
+        // completed steps; may AskAsync external aggregates or no-op to wait.
+        await OnMessageAsync(new PlaceOrder(_orderId));
+    }
+}
+```
+
+**ライフサイクル：**
+
+```
+CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
+→ framework appends SagaCompleted(result) in the same flush batch (atomic)
+→ ProcessAsync returns → auto-stop (fire-and-forget) → removed from registry
+```
+
+ビジネス失敗：`OnMessageAsync`/`ResumeAsync` がスロー → フレームワークは未コミットのビジネスイベントを破棄し、`SagaFailed(reason)` をアペンドして自動停止し、Ask 呼び出し元に `SagaExecutionException(Id, Reason)` をフォールトとして返します。インフラ障害（ストア停止）は**終端ではありません** —— イベントはロールバックされ、saga は Running のままです。
+
+**クラッシュリカバリ：** `GetAsync` がイベントをリプレイ → フレームワークが `SagaCompleted`/`SagaFailed` から `Completed`/`Failed` を復元します（終端済みの saga は決して復活しません —— `GetAsync` は null を返します）。終端イベントのない saga には `ResumeAsync()` が呼ばれ、そこで終端に達すればフレームワークが同一フラッシュバッチで `SagaCompleted` を永続化します。リカバリは明示的なプルであり、バックグラウンドの魔法ではありません。
+
+**明示的な一括リカバリ：**
+
+```csharp
+var results = await system.ResumeInterruptedSagasAsync<OrderSaga>(
+    nameof(OrderPlaced));
+
+foreach (var r in results)   // SagaResumeResult(Id, Status, Reason?)
+{
+    // SagaResumeStatus.Completed | Failed (Reason) | Running
+}
+```
+
+`ResumeInterruptedSagasAsync<TSaga>(firstEventType, match?)` は先頭イベントの型名で saga を列挙し、それぞれを `GetAsync` でシングルフライト復元した後、リカバリ後の分類を返します：`Completed` / `Failed`（フレームワークが復元した reason 付き）/ `Running`（外部入力待ち）。既に終端の saga は決して復活せず、生存中の saga はその場で分類されます。冪等で安全に再試行でき（id ごとにシングルフライト）、ストア障害時はフェイルファストで呼び出し元がバッチ全体を再試行できます。
+
+**Process Manager パターン：**
+
+同じ基底クラスが process manager もカバーします —— 外部イベントはアプリケーション層のイベントハンドラー（PicoMediator サブスクライバーなど）によってコマンドへ変換され、saga のメールボックスへ送られます。イベントが actor に直接入ることはなく、saga が見るのはコマンドだけです。
+
+**便利 API：**
+
+```csharp
+var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId));
+// SagaExecution<Guid>(Id, Result) — saga auto-stops, no StopAsync needed
+```
+
+`ExecuteSaga<TSaga, TResult>(command)` は `CreateAsync` + `AskAsync` を 1 回の呼び出しで行います。成功すると `SagaExecution<TResult>(Id, Result)` を返し、ビジネス失敗時は `SagaExecutionException(SagaId, Reason)` をスローします —— 呼び出し元は常に saga id を取得できます。
+
 ### メッセージング: Ask vs Send
 
 | パターン | メソッド | 意味 |

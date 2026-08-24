@@ -188,6 +188,91 @@ Si `AppendAsync` échoue, les événements non validés sont rejetés et `Versio
 est restaurée. L'Acteur n'est **pas empoisonné** — le message suivant est
 traité normalement.
 
+### SagaActor (Coordonnateur à durée de vie finie)
+
+`SagaActor extends EventSourcedActor` — pour des opérations inter-agrégats avec un cycle de vie fini. Contrairement à un EventSourcedActor ordinaire dont la boîte aux lettres tourne indéfiniment, un SagaActor **s'arrête automatiquement** une fois que le framework a persisté son événement terminal.
+
+L'état terminal est **généré par le framework** : `MarkComplete(result)` ajoute un événement `SagaCompleted(result)` au même lot que vos événements métier (append atomique — achèvement et persistance ne peuvent diverger) ; une exception métier non interceptée ajoute `SagaFailed(reason)` (« ExceptionType: message », tronqué à 512 caractères) et propage `SagaExecutionException(Id, Reason)` à l'appelant. Les sous-classes ne déclenchent ni ne traitent ces événements — `Mutate` ne voit que les événements métier.
+
+```csharp
+public sealed class OrderSaga : SagaActor
+{
+    private int _step;
+    private Guid _orderId;
+
+    public OrderSaga() { }  // Parameterless — commands via mailbox
+
+    protected override async ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        if (command is PlaceOrder cmd)
+        {
+            var orderId = cmd.OrderId;   // local — state changes only via Mutate
+            if (_step < 1) RaiseEvent(new OrderPlaced(orderId));
+            if (_step < 2) RaiseEvent(new PaymentReserved(orderId));
+            MarkComplete(orderId);  // framework appends SagaCompleted(orderId) atomically
+            return orderId;
+        }
+        return null;
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case OrderPlaced e: _step = 1; _orderId = e.OrderId; break;
+            case PaymentReserved: _step = 2; break;
+            // SagaCompleted/SagaFailed are filtered by the framework — never here
+        }
+    }
+
+    protected override async ValueTask ResumeAsync()
+    {
+        // Re-evaluate after crash recovery. Idempotent — _step guards skip
+        // completed steps; may AskAsync external aggregates or no-op to wait.
+        await OnMessageAsync(new PlaceOrder(_orderId));
+    }
+}
+```
+
+**Cycle de vie :**
+
+```
+CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
+→ framework appends SagaCompleted(result) in the same flush batch (atomic)
+→ ProcessAsync returns → auto-stop (fire-and-forget) → removed from registry
+```
+
+Échec métier : si `OnMessageAsync`/`ResumeAsync` lève une exception, le framework rejette les événements métier non validés, ajoute `SagaFailed(reason)`, s'arrête automatiquement et retourne l'échec `SagaExecutionException(Id, Reason)` à l'appelant d'Ask. Les échecs d'infrastructure (store indisponible) ne sont **pas** terminaux — les événements sont annulés et la saga reste Running.
+
+**Récupération après crash :** `GetAsync` rejoue les événements → le framework restaure `Completed`/`Failed` depuis `SagaCompleted`/`SagaFailed` (les sagas terminales restent mortes — `GetAsync` renvoie null). Les sagas sans événement terminal voient `ResumeAsync()` appelé ; si cela atteint l'état terminal, le framework persiste `SagaCompleted` dans le même lot. La récupération est un tirage explicite, pas de la magie en arrière-plan.
+
+**Récupération explicite par lots :**
+
+```csharp
+var results = await system.ResumeInterruptedSagasAsync<OrderSaga>(
+    nameof(OrderPlaced));
+
+foreach (var r in results)   // SagaResumeResult(Id, Status, Reason?)
+{
+    // SagaResumeStatus.Completed | Failed (Reason) | Running
+}
+```
+
+`ResumeInterruptedSagasAsync<TSaga>(firstEventType, match?)` énumère les sagas par nom du type du premier événement, restaure chacune via `GetAsync` en single-flight et retourne la classification post-récupération : `Completed` / `Failed` (avec la raison restaurée par le framework) / `Running` (encore en attente d'une entrée externe). Les sagas déjà terminales ne ressuscitent jamais ; les vivantes sont classées sur place. Idempotent et sûr à réessayer (single-flight par id) ; un échec du store échoue rapidement afin que l'appelant puisse réessayer tout le lot.
+
+**Patron process manager :**
+
+la même classe de base couvre les process managers — les événements externes sont traduits en commandes par un gestionnaire d'événements au niveau applicatif (par ex. un abonné PicoMediator), qui les envoie dans la boîte aux lettres de la saga. Les événements n'entrent jamais directement dans les acteurs ; la saga ne voit que des commandes.
+
+**API de commodité :**
+
+```csharp
+var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId));
+// SagaExecution<Guid>(Id, Result) — saga auto-stops, no StopAsync needed
+```
+
+`ExecuteSaga<TSaga, TResult>(command)` effectue `CreateAsync` + `AskAsync` en un seul appel. Retourne `SagaExecution<TResult>(Id, Result)` ; en cas d'échec métier elle lève `SagaExecutionException(SagaId, Reason)` afin que l'appelant obtienne toujours l'id de la saga.
+
 ### Messagerie : Ask vs Send
 
 | Modèle | Méthode | Sémantique |
