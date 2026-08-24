@@ -131,7 +131,8 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         // Publish AFTER state is consistent. Replay never reaches this path
         // (ReplayEvents bypasses FlushEventsAsync), so recovery is silent by
         // construction. Failures are isolated — events are already durable.
-        if (Publisher is not null && _events.Count > 0)
+        // (_events.Count > 0 is guaranteed here — empty list early-returned above.)
+        if (Publisher is not null)
         {
             var actorId = Id;
             var version = Version;
@@ -164,8 +165,6 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     }
 
     private void ClearEvents() => _events.Clear();
-
-    IReadOnlyList<IDomainEvent> IEventSourcedActor.GetUncommittedEvents() => _events.AsReadOnly();
 
     void IEventSourcedActor.CommitEvents() => ClearEvents();
 

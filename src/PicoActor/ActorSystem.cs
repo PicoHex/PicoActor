@@ -61,7 +61,7 @@ public sealed class ActorSystem : IActorSystem
         //    are framework-owned), system reference, error routing, ES plumbing
         WireActor(actor, id);
 
-        // 4. Register in the system — a conflict means a duplicate-id bug; fail loudly.
+        // 3. Register in the system — a conflict means a duplicate-id bug; fail loudly.
         //    Discard: the creation constructor already staged events (RaiseEvent
         //    in Actor(ICommand)) that flush in the loop's OnReadyAsync. Without
         //    clearing them, the discarded actor's init flush would race the
@@ -76,7 +76,7 @@ public sealed class ActorSystem : IActorSystem
             throw new InvalidOperationException($"Actor {id} already exists.");
         }
 
-        // 5. Release the consumption loop gate and wait for initialization
+        // 4. Release the consumption loop gate and wait for initialization
         //    (OnReadyAsync: persist + mutate).
         //    If persistence fails, remove from registry and propagate exception.
         await CompleteInitializationAsync(actor, id);
@@ -123,13 +123,12 @@ public sealed class ActorSystem : IActorSystem
         }
         catch
         {
-            actor.MarkDiscarded();
-            await actor.StopAsync().ConfigureAwait(false);
+            await DiscardDuplicateAsync(actor);
             throw;
         }
 
         // Terminal events that already existed before the rebuild (Completed/Failed) → do not resurrect
-        if (actor is SagaActor { IsCompleted: true } or SagaActor { IsFailed: true })
+        if (actor is SagaActor saga && (saga.IsCompleted || saga.IsFailed))
         {
             await actor.StopAsync().ConfigureAwait(false);
             return default;
@@ -140,8 +139,7 @@ public sealed class ActorSystem : IActorSystem
             _logger?.Warning(
                 $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
             );
-            actor.MarkDiscarded();
-            await actor.StopAsync().ConfigureAwait(false);
+            await DiscardDuplicateAsync(actor);
 
             if (_registry.TryGetValue(id, out var winner))
                 return (T)(IActor)winner;
@@ -157,6 +155,16 @@ public sealed class ActorSystem : IActorSystem
         _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
 
         return (T)(IActor)actor;
+    }
+
+    /// <summary>
+    /// Mark a losing/duplicate actor copy as discarded and stop its loop so its
+    /// resources are released. Shared by the GetAsync cleanup paths.
+    /// </summary>
+    private static async ValueTask DiscardDuplicateAsync(ActorBase actor)
+    {
+        actor.MarkDiscarded();
+        await actor.StopAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -254,22 +262,6 @@ public sealed class ActorSystem : IActorSystem
 
         var result = await tcs.Task.ConfigureAwait(false);
         return (TResult)result!;
-    }
-
-    // ═══════════════════════════════════════════════════════════
-    // Turn cancellation
-    // ═══════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Cancel the currently running long-running operation on an actor
-    /// without stopping the actor. Only works on actors implementing ICancellable.
-    /// This bypasses the mailbox — immediate effect.
-    /// Safe to call when no operation is running (no-op).
-    /// </summary>
-    public void CancelTurn(Guid id)
-    {
-        if (_registry.TryGetValue(id, out var actor) && actor is ICancelable c)
-            c.CancelCurrentTurn();
     }
 
     // ═══════════════════════════════════════════════════════════

@@ -61,10 +61,9 @@ public abstract class Actor : IActor, IAsyncDisposable
         }
         catch
         {
-            // Release gate so RunAsync can exit, then clean up
-            _ready.TrySetResult(true);
-            _cts.Cancel();
-            _mailbox.Writer.Complete();
+            // Release gate so RunAsync can exit, then clean up.
+            // Same three signals as SignalStop — reuse it instead of duplicating them.
+            SignalStop();
             throw;
         }
     }
@@ -121,13 +120,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// Write an event to the OutputChannel. No-op if no subscriber.
     /// Subclasses call this during OnMessageAsync to notify external observers.
     /// </summary>
-    protected void WriteOutput(
-        string type,
-        string? data = null,
-        string? toolCallId = null,
-        string? toolName = null,
-        string? turnId = null
-    ) => OutputWriter?.TryWrite(new ActorOutputEvent(type, data, toolCallId, toolName, turnId));
+    protected void WriteOutput(string type, string? data = null, string? turnId = null) =>
+        OutputWriter?.TryWrite(new ActorOutputEvent(type, data, turnId));
 
     /// <summary>
     /// Task that completes when initialization finishes (OnReadyAsync succeeds or fails).

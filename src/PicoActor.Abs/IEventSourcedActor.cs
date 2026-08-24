@@ -9,9 +9,6 @@ public interface IEventSourcedActor : IActor
     /// <summary>Current version. Managed by the persistence layer (runtime) and set by ReplayEvents.</summary>
     ulong Version { get; }
 
-    /// <summary>Uncommitted events produced by the current message.</summary>
-    IReadOnlyList<IDomainEvent> GetUncommittedEvents();
-
     /// <summary>Clear uncommitted events after successful persistence. Does NOT touch the mailbox queue.</summary>
     void CommitEvents();
 

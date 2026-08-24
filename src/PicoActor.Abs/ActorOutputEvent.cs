@@ -6,10 +6,8 @@ namespace PicoActor.Abs;
 /// It is a fire-and-forget notification to external subscribers (SSE, monitoring, etc.).
 /// Symmetric concept to the Mailbox: Mailbox receives commands, OutputChannel broadcasts events.
 /// </summary>
-public sealed record ActorOutputEvent(
-    string Type,
-    string? Data,
-    string? ToolCallId = null,
-    string? ToolName = null,
-    string? TurnId = null
-);
+/// <remarks>
+/// <paramref name="TurnId"/> names a caller-side correlation concept (agent turns);
+/// it is opaque to the framework — pure pass-through payload.
+/// </remarks>
+public sealed record ActorOutputEvent(string Type, string? Data, string? TurnId = null);
