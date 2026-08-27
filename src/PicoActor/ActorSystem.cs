@@ -95,7 +95,17 @@ public sealed class ActorSystem : IActorSystem
         where T : IActor
     {
         if (_registry.TryGetValue(id, out var existing))
-            return (T)(IActor)existing;
+        {
+            // Type guard: an id is framework-owned per-actor; a registry hit on a
+            // DIFFERENT aggregate type means the caller asked for the wrong T
+            // (e.g. querying ChatActor with a SessionActor id). Return default
+            // instead of throwing InvalidCastException so callers can fall back /
+            // degrade gracefully (regression: create_subagent's session-liveness
+            // probe died with "Specified cast is not valid").
+            if (existing is not T typed)
+                return default;
+            return typed;
+        }
 
         if (!_rebuildFactories.TryGetValue(typeof(T), out var rebuildFactory))
             return default;
