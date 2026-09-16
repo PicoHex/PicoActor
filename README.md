@@ -55,7 +55,7 @@ is always consistent with the event stream.
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans all require reflection | ✅ Full NativeAOT support |
 | Event Sourcing | ❌ Proto.Actor, Orleans lack built-in ES | ✅ Persist-then-Mutate, automatic rollback |
-| Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 4 packages — PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs; no other runtime dependencies |
+| Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 1 package — PicoActor (brings PicoActor.Abs plus the PicoDI/PicoLog/PicoMediator abstractions); add PicoMediator for domain-event subscribers and PicoDI for container wiring |
 | DI Integration | ❌ Tied to Microsoft.Extensions.DI | ✅ Native PicoDI, zero-reflection resolution |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor only | ❌ net10.0-only (PicoMediator runtime requires net10.0+) |
 | Learning Curve | ❌ Steep — supervision trees, clustering, remoting | ✅ Minimal — actors + events + mailbox |
@@ -441,6 +441,9 @@ idempotent and bounded.
 > (`AddPicoActor(IPublisher)`) now receive `DomainEventEnvelope` instances
 > instead of raw events — adapt `Publish<TEvent>` implementations accordingly
 > (only the observed payload shape changed; the actor pipeline is unaffected).
+> `IEventStoreEnumerator.ListAggregateIds(string)` became
+> `ListAggregateIdsAsync(string)` (async) — custom enumerators must update the
+> signature.
 
 Notes:
 - **Event → command translation is the subscriber's (business-layer) job** —
@@ -457,6 +460,11 @@ Notes:
   source mailbox is busy flushing the event, so the request would self-deadlock.
   Query read-side projections (separate actors) instead; `Send` to the source
   aggregate is safe (fire-and-forget).
+- `Register<T>` must be called once per actor type: a duplicate registration
+  now throws instead of silently replacing the first factory.
+- `StopAsync`/`RequestStop` remove the actor from the registry first, then drain
+  the messages already buffered in its mailbox (graceful stop); messages sent
+  after the stop fail with `KeyNotFoundException`.
 
 ---
 
@@ -487,6 +495,14 @@ Notes:
 | [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Core abstractions: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor`, `SagaActor` — plus subscription types (`IDomainEventSubscriber<TEvent>`, `DomainEventEnvelope`, `ICommandSender`) and the embedded `PicoActor.Gen` analyzer (declare-and-subscribe) |
 | [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `InMemoryEventStore`, `MediatorDomainEventPublisher` (envelope event outflow), PicoDI integration (`AddPicoActor` auto-wires IMediator + ICommandSender) |
 
+**Required packages by feature** (verified against the package nuspec):
+
+| Need | Packages to add |
+|------|-----------------|
+| Actors + event sourcing only | `PicoActor` (`PicoActor.Abs`, `PicoDI.Abs`, `PicoLog.Abs`, `PicoMediator.Abs` come with it) |
+| Declaring `IDomainEventSubscriber<TEvent>` handlers | + `PicoMediator` (the generated bridge calls `MediatorAutoSubscriptionRegistry`) |
+| PicoDI wiring / event outflow (`SvcContainer`, `AddPicoMediator`) | + `PicoDI`, `PicoMediator.DI` |
+
 ---
 
 ## Comparison
@@ -501,7 +517,7 @@ Notes:
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Distributed / Clustering | ❌ | ✅ | ✅ | ✅ |
 | Single-threaded per actor | ✅ | ✅ | ✅ | ❌ |
-| Packages | 4 | 8+ | 3+ | 10+ |
+| Packages | 1 (+2 optional) | 8+ | 3+ | 10+ |
 
 ---
 

@@ -46,7 +46,7 @@ PicoActor 是**消息驱动**的：一切交互都是消息。命令（`ICommand
 |---------|:----------------:|:--------------:|
 | AOT / 裁剪 | ❌ Akka.NET、Proto.Actor、Orleans 均依赖反射 | ✅ 完整 NativeAOT 支持 |
 | 事件溯源 | ❌ Proto.Actor、Orleans 无内置 ES | ✅ Persist-then-Mutate，自动回滚 |
-| 依赖体积 | ❌ Akka.NET（8+ 包）、Orleans（10+ 包） | ✅ 4 个包——PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs；无其他运行时依赖 |
+| 依赖体积 | ❌ Akka.NET（8+ 包）、Orleans（10+ 包） | ✅ 1 个包——PicoActor(自带 PicoActor.Abs 与 PicoDI/PicoLog/PicoMediator 抽象包);声明领域事件订阅者时加 PicoMediator,使用容器接线时加 PicoDI |
 | DI 集成 | ❌ 绑定 Microsoft.Extensions.DI | ✅ 原生 PicoDI，零反射解析 |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor 仅部分支持 | ❌ 仅 net10.0(PicoMediator 运行时要求 net10.0+) |
 | 学习曲线 | ❌ 陡峭——监督树、集群、远程 | ✅ 极简——Actor + Event + Mailbox |
@@ -372,13 +372,17 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 自定义 publisher 显式接线:AddPicoActor(IPublisher)(实例需在 Build() 前可用)。
 ```
 
+> **必需包:** 需要添加的只有 `PicoActor`(自带 `PicoActor.Abs` 与 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs` 抽象)。声明 `IDomainEventSubscriber<TEvent>` 处理器时需再加 `PicoMediator`(生成的桥代码调用该包的 `MediatorAutoSubscriptionRegistry`);使用容器接线(`SvcContainer`、`AddPicoMediator`)时需再加 `PicoDI` 与 `PicoMediator.DI`。
+
 > **本地开发(ProjectReference):** analyzer 不随 ProjectReference 链传递——工程消费者需直接引用 `PicoActor.Gen`(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`,镜像 `tests/PicoActor.Tests`)。NuGet 消费者经 `PicoActor.Abs` 包的 `buildTransitive` props 自动注入生成器,无需额外引用。
 
 事件以信封形式经 PicoMediator 在 persist+mutate 之后流出;replay 不重复发布。处理器失败不影响 actor(逐处理器隔离)。事件→命令→事件的翻译循环是预期用法——保持处理器幂等且有界。
 
-> **破坏性变更:** 直连 `ISubscriber<TEvent>`(PicoMediator)订阅者不再收到 PicoActor 领域事件。迁移到 `IDomainEventSubscriber<TEvent>`;信封的 `ActorId`/`Version` 取代任何手工内嵌的聚合 id。自定义 publisher(`AddPicoActor(IPublisher)`)现在收到的是 `DomainEventEnvelope` 实例而非裸事件——相应适配 `Publish<TEvent>` 实现(仅观察到的载荷形状变化;actor 管线不受影响)。
+> **破坏性变更:** 直连 `ISubscriber<TEvent>`(PicoMediator)订阅者不再收到 PicoActor 领域事件。迁移到 `IDomainEventSubscriber<TEvent>`;信封的 `ActorId`/`Version` 取代任何手工内嵌的聚合 id。自定义 publisher(`AddPicoActor(IPublisher)`)现在收到的是 `DomainEventEnvelope` 实例而非裸事件——相应适配 `Publish<TEvent>` 实现(仅观察到的载荷形状变化;actor 管线不受影响)。 `IEventStoreEnumerator.ListAggregateIds(string)` 改为异步 `ListAggregateIdsAsync(string)`——自定义枚举器需更新签名。
 
 注意:
+- `Register<T>` 每个 actor 类型只能调用一次:重复注册现在会抛异常,而不是静默替换先前的工厂。
+- `StopAsync`/`RequestStop` 先从注册表移除 actor,再排空 mailbox 中已缓冲的消息(优雅停机);停机之后发送的消息会抛 `KeyNotFoundException`。
 - **事件→命令翻译是订阅者(业务层)职责**——PicoActor 只发布;命令只能经 mailbox 进入 actor。
 - 发布发生在 **persist+mutate 之后**——发布失败不影响 actor 状态(事件已落盘)。
 - 恢复静默:replay 不重复发布。
@@ -429,7 +433,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 分布式 / 集群 | ❌ | ✅ | ✅ | ✅ |
 | 单线程每 Actor | ✅ | ✅ | ✅ | ❌ |
-| 包数量 | 4 | 8+ | 3+ | 10+ |
+| 包数量 | 1 (+2 optional) | 8+ | 3+ | 10+ |
 
 ---
 

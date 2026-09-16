@@ -49,7 +49,7 @@ Event Sourcing Actors следуют **Persist-then-Mutate** (Сначала с�
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans требуют рефлексию | ✅ Полная поддержка NativeAOT |
 | Event Sourcing | ❌ Proto.Actor, Orleans без встроенного ES | ✅ Persist-then-Mutate, автоматический откат |
-| Размер зависимостей | ❌ Akka.NET (8+ пакетов), Orleans (10+ пакетов) | ✅ 4 пакета — PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs; других зависимостей нет |
+| Размер зависимостей | ❌ Akka.NET (8+ пакетов), Orleans (10+ пакетов) | ✅ 1 пакет — PicoActor (включает PicoActor.Abs и абстракции PicoDI/PicoLog/PicoMediator); PicoMediator — для подписчиков, PicoDI — для контейнера |
 | Интеграция DI | ❌ Привязан к Microsoft.Extensions.DI | ✅ Нативный PicoDI, разрешение без рефлексии |
 | netstandard2.0 | ⚠️ Частичная поддержка в Akka.NET / Proto.Actor | ❌ Только net10.0 (среда PicoMediator требует net10.0+) |
 | Кривая обучения | ❌ Крутая — деревья супервизии, кластеризация, remoting | ✅ Минимальная — Actor + Event + Mailbox |
@@ -378,13 +378,17 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (экземпляр должен быть доступен до Build()).
 ```
 
+> **Необходимые пакеты:** добавить нужно только `PicoActor` (он включает `PicoActor.Abs` и абстракции `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`). Добавьте `PicoMediator`, если объявляете обработчики `IDomainEventSubscriber<TEvent>` (сгенерированный bridge вызывает `MediatorAutoSubscriptionRegistry` из этого пакета), и `PicoDI` + `PicoMediator.DI`, если используете контейнер (`SvcContainer`, `AddPicoMediator`).
+
 > **Локальная разработка (ProjectReference):** анализаторы не распространяются по цепочкам `ProjectReference` — проектные потребители должны добавить прямую ссылку на `PicoActor.Gen` (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, зеркало `tests/PicoActor.Tests`). Потребители NuGet получают генератор автоматически через props `buildTransitive` пакета `PicoActor.Abs` — дополнительная ссылка не нужна.
 
 События выходят как конверты через PicoMediator после persist+mutate; replay никогда не публикует. Сбои обработчика никогда не влияют на актора (изоляция по обработчикам). Циклы перевода (событие → команда → событие) являются предназначенным использованием — держите обработчики идемпотентными и ограниченными.
 
-> **Разрушающее изменение:** прямые подписчики `ISubscriber<TEvent>` (PicoMediator) больше не получают доменные события PicoActor. Мигрируйте на `IDomainEventSubscriber<TEvent>`; `ActorId`/`Version` конверта заменяют любой вручную встроенный id агрегата. Пользовательские publisher (`AddPicoActor(IPublisher)`) теперь получают экземпляры `DomainEventEnvelope` вместо сырых событий — адаптируйте реализации `Publish<TEvent>` соответствующим образом (изменилась только наблюдаемая форма полезной нагрузки; конвейер актора не затронут).
+> **Разрушающее изменение:** прямые подписчики `ISubscriber<TEvent>` (PicoMediator) больше не получают доменные события PicoActor. Мигрируйте на `IDomainEventSubscriber<TEvent>`; `ActorId`/`Version` конверта заменяют любой вручную встроенный id агрегата. Пользовательские publisher (`AddPicoActor(IPublisher)`) теперь получают экземпляры `DomainEventEnvelope` вместо сырых событий — адаптируйте реализации `Publish<TEvent>` соответствующим образом (изменилась только наблюдаемая форма полезной нагрузки; конвейер актора не затронут). `IEventStoreEnumerator.ListAggregateIds(string)` стал асинхронным `ListAggregateIdsAsync(string)` — пользовательским перечислителям нужно обновить сигнатуру.
 
 Примечания:
+- `Register<T>` вызывается один раз на тип актора: повторная регистрация теперь выбрасывает исключение, а не молча заменяет первую фабрику.
+- `StopAsync`/`RequestStop` сначала удаляют актор из реестра, затем обрабатывают уже буферизованные в mailbox сообщения (graceful stop); отправленные после остановки сообщения завершаются `KeyNotFoundException`.
 - **Перевод событие→команда — обязанность подписчика (бизнес-слоя)** — PicoActor только публикует; команды входят в акторы исключительно через mailbox.
 - Публикация происходит **после persist+mutate** — сбой публикации не повреждает состояние актора (события уже долговечны).
 - Восстановление молчаливо: replay не публикует повторно.
@@ -435,7 +439,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Распределённый / Кластеризация | ❌ | ✅ | ✅ | ✅ |
 | Однопоточность на актор | ✅ | ✅ | ✅ | ❌ |
-| Пакетов | 4 | 8+ | 3+ | 10+ |
+| Пакетов | 1 (+2 optional) | 8+ | 3+ | 10+ |
 
 ---
 

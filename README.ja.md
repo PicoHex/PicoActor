@@ -48,7 +48,7 @@ Event Sourcing Actor は**Persist-then-Mutate**（永続化してから変更）
 |---------|:----------------:|:--------------:|
 | AOT / トリミング | ❌ Akka.NET、Proto.Actor、Orleans はリフレクション必須 | ✅ 完全 NativeAOT 対応 |
 | Event Sourcing | ❌ Proto.Actor、Orleans は ES 非内蔵 | ✅ Persist-then-Mutate、自動ロールバック |
-| 依存サイズ | ❌ Akka.NET（8+ パッケージ）、Orleans（10+ パッケージ） | ✅ 4 パッケージ——PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs;他のランタイム依存なし |
+| 依存サイズ | ❌ Akka.NET（8+ パッケージ）、Orleans（10+ パッケージ） | ✅ 1 パッケージ——PicoActor(`PicoActor.Abs` と PicoDI/PicoLog/PicoMediator 抽象を同梱);購読者を宣言する場合は PicoMediator、コンテナ配線時は PicoDI を追加 |
 | DI 統合 | ❌ Microsoft.Extensions.DI に依存 | ✅ ネイティブ PicoDI、ゼロリフレクション |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor は一部のみ | ❌ net10.0 のみ(PicoMediator ランタイムは net10.0+ 必須) |
 | 学習曲線 | ❌ 急峻——監視ツリー、クラスタリング、リモート | ✅ 最小限——Actor + Event + Mailbox |
@@ -375,13 +375,17 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // カスタム publisher の明示的配線:AddPicoActor(IPublisher)(インスタンスは Build() 前に必要)。
 ```
 
+> **必要なパッケージ:** 追加が必要なのは `PicoActor` のみです(`PicoActor.Abs` と `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs` を同梱)。`IDomainEventSubscriber<TEvent>` を宣言する場合は `PicoMediator` を追加してください(生成されるブリッジは同パッケージの `MediatorAutoSubscriptionRegistry` を呼び出します)。コンテナ配線(`SvcContainer`、`AddPicoMediator`)を使う場合は `PicoDI` と `PicoMediator.DI` を追加します。
+
 > **ローカル開発(ProjectReference):** analyzer は ProjectReference チェーンを伝播しません——プロジェクト消費者は `PicoActor.Gen` への直接参照が必要です(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`、`tests/PicoActor.Tests` をミラー)。NuGet 消費者は `PicoActor.Abs` パッケージの `buildTransitive` props 経由で生成器を自動取得——追加参照不要。
 
 イベントは persist+mutate の後にエンベロープとして PicoMediator を経由して流出します;replay は決して公開しません。ハンドラー失敗はアクターに影響しません(ハンドラー単位の分離)。イベント→コマンド→イベントの翻訳ループは意図された使い方です——ハンドラーを冪等かつ有界に保ってください。
 
-> **破壊的変更:** 直接の `ISubscriber<TEvent>`(PicoMediator)サブスクライバは PicoActor ドメインイベントを受信しなくなります。`IDomainEventSubscriber<TEvent>` に移行してください;エンベロープの `ActorId`/`Version` が手動で埋め込んだ集約 id を置き換えます。カスタム publisher(`AddPicoActor(IPublisher)`)は現在、生イベントの代わりに `DomainEventEnvelope` インスタンスを受信します——`Publish<TEvent>` 実装をそれに合わせて適応してください(観測されるペイロード形状のみ変化;アクターパイプラインは影響なし)。
+> **破壊的変更:** 直接の `ISubscriber<TEvent>`(PicoMediator)サブスクライバは PicoActor ドメインイベントを受信しなくなります。`IDomainEventSubscriber<TEvent>` に移行してください;エンベロープの `ActorId`/`Version` が手動で埋め込んだ集約 id を置き換えます。カスタム publisher(`AddPicoActor(IPublisher)`)は現在、生イベントの代わりに `DomainEventEnvelope` インスタンスを受信します——`Publish<TEvent>` 実装をそれに合わせて適応してください(観測されるペイロード形状のみ変化;アクターパイプラインは影響なし)。 `IEventStoreEnumerator.ListAggregateIds(string)` は非同期の `ListAggregateIdsAsync(string)` になりました——独自の列挙子はシグネチャを更新してください。
 
 注意:
+- `Register<T>` は actor 型ごとに 1 回だけ呼び出します:重複登録は最初のファクトリを黙って置き換えず、例外をスローします。
+- `StopAsync`/`RequestStop` はまずレジストリから actor を削除し、その後メールボックスに既にバッファされたメッセージを排出します(グレースフル停止)。停止後に送信したメッセージは `KeyNotFoundException` になります。
 - **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
 - 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
 - リカバリは静粛:replay は再公開しません。
@@ -432,7 +436,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | 分散 / クラスタリング | ❌ | ✅ | ✅ | ✅ |
 | シングルスレッド/Actor | ✅ | ✅ | ✅ | ❌ |
-| パッケージ数 | 4 | 8+ | 3+ | 10+ |
+| パッケージ数 | 1 (+2 optional) | 8+ | 3+ | 10+ |
 
 ---
 

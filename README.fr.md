@@ -49,7 +49,7 @@ toujours cohérent avec le flux d'événements.
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans nécessitent la réflexion | ✅ Support complet NativeAOT |
 | Event Sourcing | ❌ Proto.Actor, Orleans sans ES intégré | ✅ Persist-then-Mutate, rollback automatique |
-| Taille des dépendances | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 4 packages — PicoActor + PicoActor.Abs + PicoMediator.Abs + PicoDI.Abs ; aucune autre dépendance d'exécution |
+| Taille des dépendances | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 1 package — PicoActor (embarque PicoActor.Abs et les abstractions PicoDI/PicoLog/PicoMediator) ; ajoutez PicoMediator pour les abonnés et PicoDI pour le conteneur |
 | Intégration DI | ❌ Couplé à Microsoft.Extensions.DI | ✅ PicoDI natif, résolution sans réflexion |
 | netstandard2.0 | ⚠️ Support partiel dans Akka.NET / Proto.Actor | ❌ net10.0 uniquement (le runtime PicoMediator exige net10.0+) |
 | Courbe d'apprentissage | ❌ Raide — arbres de supervision, clustering, remoting | ✅ Minimale — Actor + Event + Mailbox |
@@ -378,13 +378,17 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (l'instance doit être disponible avant Build()).
 ```
 
+> **Packages requis :** un seul package à ajouter, `PicoActor` (il embarque `PicoActor.Abs` et les abstractions `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`). Ajoutez `PicoMediator` lorsque vous déclarez des handlers `IDomainEventSubscriber<TEvent>` (le bridge généré appelle `MediatorAutoSubscriptionRegistry` de ce package), et `PicoDI` + `PicoMediator.DI` lorsque vous câblez le conteneur (`SvcContainer`, `AddPicoMediator`).
+
 > **Développement local (ProjectReference) :** les analyzers ne se propagent pas à travers les chaînes `ProjectReference` — les consommateurs par projet doivent ajouter une référence directe à `PicoActor.Gen` (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, miroir de `tests/PicoActor.Tests`). Les consommateurs NuGet reçoivent le générateur automatiquement via les props `buildTransitive` de `PicoActor.Abs` — aucune référence supplémentaire.
 
 Les événements circulent sous forme d'enveloppes via PicoMediator après persist+mutate ; le replay ne publie jamais. Les échecs de handler n'affectent jamais l'acteur (isolation par handler). Les boucles de traduction (événement → commande → événement) sont intentionnelles ; gardez les handlers idempotents et bornés.
 
-> **Changement cassant :** les abonnés directs `ISubscriber<TEvent>` (PicoMediator) ne reçoivent plus les événements de domaine de PicoActor. Migrez vers `IDomainEventSubscriber<TEvent>` ; l'`ActorId`/`Version` de l'enveloppe remplace tout id d'agrégat incrusté manuellement. Les publishers personnalisés (`AddPicoActor(IPublisher)`) reçoivent désormais des instances de `DomainEventEnvelope` au lieu d'événements bruts — adaptez les implémentations de `Publish<TEvent>` en conséquence (seule la forme du payload observé a changé ; le pipeline de l'acteur n'est pas affecté).
+> **Changement cassant :** les abonnés directs `ISubscriber<TEvent>` (PicoMediator) ne reçoivent plus les événements de domaine de PicoActor. Migrez vers `IDomainEventSubscriber<TEvent>` ; l'`ActorId`/`Version` de l'enveloppe remplace tout id d'agrégat incrusté manuellement. Les publishers personnalisés (`AddPicoActor(IPublisher)`) reçoivent désormais des instances de `DomainEventEnvelope` au lieu d'événements bruts — adaptez les implémentations de `Publish<TEvent>` en conséquence (seule la forme du payload observé a changé ; le pipeline de l'acteur n'est pas affecté). `IEventStoreEnumerator.ListAggregateIds(string)` devient `ListAggregateIdsAsync(string)` (asynchrone) — les énumérateurs personnalisés doivent mettre à jour la signature.
 
 Notes :
+- `Register<T>` s'appelle une seule fois par type d'acteur : une seconde inscription lève désormais une exception au lieu de remplacer silencieusement la première fabrique.
+- `StopAsync`/`RequestStop` retirent d'abord l'acteur du registre puis vident les messages déjà présents dans sa mailbox (arrêt gracieux) ; les messages envoyés après échouent avec `KeyNotFoundException`.
 - **La traduction événement→commande est la responsabilité de l'abonné (couche métier)** — PicoActor ne fait que publier ; les commandes entrent dans les acteurs exclusivement via la mailbox.
 - La publication a lieu **après persist+mutate** — un échec de publication ne corrompt pas l'état de l'acteur (les événements sont déjà durables).
 - La récupération est silencieuse : le replay ne republie pas.
@@ -435,7 +439,7 @@ Notes :
 | Persist-then-Mutate | ✅ | ❌ | ❌ | ❌ |
 | Distribué / Clustering | ❌ | ✅ | ✅ | ✅ |
 | Mono-thread par Acteur | ✅ | ✅ | ✅ | ❌ |
-| Packages | 4 | 8+ | 3+ | 10+ |
+| Packages | 1 (+2 optional) | 8+ | 3+ | 10+ |
 
 ---
 
