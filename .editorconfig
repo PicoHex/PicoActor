@@ -1,0 +1,155 @@
+# EditorConfig — PicoHex ecosystem baseline.
+# The [*.cs] block mirrors PicoHex/PicoInfra/.editorconfig verbatim; the non-C#
+# sections are repo-local: they give CSharpier (and MSBuild/JSON/MD files) their
+# charset, line ending and indentation rules.
+root = true
+
+# ── Global + non-C# files ───────────────────────────────────────────────
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{csproj,props,targets,slnx,config,nuspec}]
+indent_style = space
+indent_size = 2
+
+[*.{json,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+# ── C# files (ecosystem baseline) ───────────────────────────────────────
+# C# files
+[*.cs]
+
+#### Core EditorConfig formatting options ####
+
+# Use 4 spaces for indentation
+indent_size = 4
+indent_style = space
+
+# Newline at the end of file
+insert_final_newline = true
+
+# Trim trailing whitespace
+trim_trailing_whitespace = true
+
+#### .NET coding conventions ####
+
+# Prefer "var" for built-in types
+csharp_style_var_for_built_in_types = true
+
+# Prefer "var" when type is apparent
+csharp_style_var_when_type_is_apparent = true
+
+# Prefer "var" elsewhere
+csharp_style_var_elsewhere = false
+
+# Prefer simple 'using' statement
+csharp_style_namespace_declarations = file_scoped:warning
+
+# Prefer expression-bodied members for methods
+csharp_style_expression_bodied_methods = false:silent
+
+# Prefer expression-bodied members for properties
+csharp_style_expression_bodied_properties = true:silent
+
+# Prefer expression-bodied members for accessors
+csharp_style_expression_bodied_accessors = true:silent
+
+# Prefer expression-bodied members for constructors
+csharp_style_expression_bodied_constructors = false:silent
+
+# Prefer expression-bodied members for operators
+csharp_style_expression_bodied_operators = false:silent
+
+# Prefer "default" over "default(T)"
+csharp_prefer_simple_default_expression = true
+
+# Avoid unused parameters
+csharp_style_unused_value_expression_statement_preference = discard_variable:silent
+
+#### Naming conventions ####
+
+# Class, struct, enum, interface, delegate names should be PascalCase
+dotnet_naming_rule.types_should_be_pascal_case.severity = suggestion
+dotnet_naming_rule.types_should_be_pascal_case.symbols = types
+dotnet_naming_rule.types_should_be_pascal_case.style = pascal_case_style
+
+dotnet_naming_symbols.types.applicable_kinds = class, struct, enum, interface, delegate
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
+
+# Async methods should end with Async
+dotnet_naming_rule.async_methods_should_have_async_suffix.severity = suggestion
+dotnet_naming_rule.async_methods_should_have_async_suffix.symbols = async_methods
+dotnet_naming_rule.async_methods_should_have_async_suffix.style = async_suffix_style
+
+dotnet_naming_symbols.async_methods.applicable_kinds = method
+dotnet_naming_symbols.async_methods.required_modifiers = async
+dotnet_naming_style.async_suffix_style.capitalization = pascal_case
+dotnet_naming_style.async_suffix_style.required_suffix = Async
+
+#### Formatting rules ####
+
+# Space before and after binary operators
+csharp_space_around_binary_operators = before_and_after
+
+# No space between method call parentheses and argument list
+csharp_space_between_method_call_parentheses = false
+
+# No space between method declaration parentheses and parameter list
+csharp_space_between_method_declaration_parentheses = false
+
+# Space after commas in argument lists
+csharp_space_after_comma = true
+
+# Space after keywords
+csharp_space_after_keywords_in_control_flow_statements = true
+
+# No space before open square bracket
+csharp_space_before_open_square_bracket = false
+
+# No space between empty square brackets
+csharp_space_between_empty_square_brackets = false
+
+# No space before semicolon
+csharp_space_before_semicolon_in_for_statement = false
+
+# Space before colons in inheritance constraints
+csharp_space_before_colon_in_inheritance_clause = true
+
+# Space after colons in inheritance constraints
+csharp_space_after_colon_in_inheritance_clause = true
+
+# Space around declaration statements
+csharp_space_around_declaration_statements = do_not_ignore
+
+#### Diagnostic severity ####
+
+dotnet_diagnostic.IDE0005.severity = warning
+dotnet_diagnostic.IDE0051.severity = warning
+dotnet_diagnostic.IDE0052.severity = warning
+dotnet_diagnostic.IDE0060.severity = warning
+dotnet_diagnostic.CA1812.severity = suggestion
+dotnet_diagnostic.CA1823.severity = suggestion
+dotnet_diagnostic.CA1822.severity = suggestion
+
+#### Parentheses preferences ####
+
+csharp_style_prefer_parentheses_in_arithmetic_binary_operators = never:silent
+csharp_style_prefer_parentheses_in_relational_binary_operators = never:silent
+csharp_style_prefer_parentheses_in_other_binary_operators = never:silent
+csharp_style_prefer_parentheses_in_other_operators = never:silent
+
+# ── Test files ──────────────────────────────────────────────────────────
+# Repo-local exception to the ecosystem baseline: TUnit's [Timeout] support
+# requires a `CancellationToken cancellationToken = default` parameter on the test
+# method even when the body never reads it (analyzer TUnit0015), so IDE0060 (unused
+# parameter, warning in the baseline above) would only produce false positives here.
+[tests/**/*.cs]
+dotnet_diagnostic.IDE0060.severity = none
+

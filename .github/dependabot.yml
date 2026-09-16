@@ -1,0 +1,25 @@
+# Dependabot configuration for automated dependency updates
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      picohex-stack:
+        # The PicoHex packages are released together and must stay version-aligned
+        # (PicoActor's generated bridge code compiles against PicoMediator/PicoDI).
+        patterns:
+          - "PicoDI*"
+          - "PicoLog*"
+          - "PicoMediator*"
+      microsoft-codeanalysis:
+        patterns:
+          - "Microsoft.CodeAnalysis.*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

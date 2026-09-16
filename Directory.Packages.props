@@ -1,49 +1,31 @@
 <Project>
+  <!-- Central Package Management.
+       Only packages this repo actually references are declared: CPM + transitive
+       pinning means every extra entry forces a dependency upgrade that the repo
+       does not consume. Shared build properties live in Directory.Build.props. -->
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
-    <Deterministic>true</Deterministic>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-    <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <DebugType>portable</DebugType>
   </PropertyGroup>
   <ItemGroup>
-    <PackageVersion Include="Microsoft.ApplicationInsights" Version="3.1.2" />
-    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="5.9.0" />
-    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
-    <PackageVersion Include="Microsoft.DiaSymReader" Version="2.2.11" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyModel" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Diagnostics.Abstractions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.FileProviders.Abstractions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Configuration" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Primitives" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.400" />
+    <!-- PicoHex stack — released together, kept version-aligned (the generated
+         bridge code compiles against PicoMediator/PicoDI). Dependabot groups them:
+         see .github/dependabot.yml. -->
+    <PackageVersion Include="PicoDI" Version="2026.9.3" />
+    <PackageVersion Include="PicoDI.Abs" Version="2026.9.3" />
+    <PackageVersion Include="PicoLog.Abs" Version="2026.9.3" />
+    <PackageVersion Include="PicoMediator" Version="2026.9.3" />
+    <PackageVersion Include="PicoMediator.Abs" Version="2026.9.3" />
+    <PackageVersion Include="PicoMediator.DI" Version="2026.9.3" />
+    <!-- Own packages: consumed by PackageReference when UseProjectReferences=false -->
     <PackageVersion Include="PicoActor" Version="$(Version)" />
     <PackageVersion Include="PicoActor.Abs" Version="$(Version)" />
-    <PackageVersion Include="PicoDI" Version="2026.9.1" />
-    <PackageVersion Include="PicoDI.Abs" Version="2026.9.1" />
-    <PackageVersion Include="PicoLog.Abs" Version="2026.9.1" />
-    <PackageVersion Include="PicoMediator" Version="2026.9.1" />
-    <PackageVersion Include="PicoMediator.Abs" Version="2026.9.1" />
-    <PackageVersion Include="PicoMediator.DI" Version="2026.9.1" />
-    <PackageVersion Include="System.Collections.Immutable" Version="10.0.11" />
-    <PackageVersion Include="System.Memory.Data" Version="10.0.11" />
-    <PackageVersion Include="System.Reflection.Metadata" Version="10.0.11" />
-    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
-    <PackageVersion Include="System.Text.Encoding.CodePages" Version="10.0.11" />
-    <PackageVersion Include="System.Threading.Channels" Version="10.0.11" />
-    <PackageVersion Include="TUnit" Version="1.65.51" />
+    <!-- Source generators (PicoActor.Gen) and generator tests -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+    <!-- Packing -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.401" />
+    <!-- Tests — TUnit is NOT frozen: it tracks the latest release (a newer major of
+         the PicoHex stack must not hold it back), which Dependabot keeps current. -->
+    <PackageVersion Include="TUnit" Version="1.68.0" />
   </ItemGroup>
 </Project>

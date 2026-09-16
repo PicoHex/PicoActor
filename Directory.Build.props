@@ -3,6 +3,32 @@
        PicoActor shared build properties
        ═══════════════════════════════════════════════════════ -->
 
+  <!-- Language baseline — identical for src / tests / samples -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Ecosystem baseline: run the newest analyzer rules available on this SDK -->
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!-- ═══════════════════════════════════════════════════════
+       AOT tiering (AotOptimizationLevel)
+       minimal (default): reflection-free baseline — PublishAot + full trimming.
+       aggressive: minimal + size levers, declared per csproj (Sample/Benchmark).
+
+       Only the tier SELECTION lives here. Tier bodies live in
+       Directory.Build.targets, because this file is imported before the project
+       body: properties a csproj declares (AotOptimizationLevel, IsPackable,
+       TargetFramework) are not visible yet at this point.
+       ═══════════════════════════════════════════════════════ -->
+  <PropertyGroup>
+    <AotOptimizationLevel Condition="'$(AotOptimizationLevel)' == ''">minimal</AotOptimizationLevel>
+  </PropertyGroup>
+
+  <!-- ═══════════════════════════════════════════════════════
+       General build properties
+       ═══════════════════════════════════════════════════════ -->
   <PropertyGroup>
     <!-- Default version for local / non-CI builds -->
     <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
@@ -28,7 +54,7 @@
   </PropertyGroup>
 
   <!-- ═══════════════════════════════════════════════════════
-       SourceLink — enabled only for packable projects
+       SourceLink — packable projects only
        ═══════════════════════════════════════════════════════ -->
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />

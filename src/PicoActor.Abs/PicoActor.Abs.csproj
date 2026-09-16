@@ -1,12 +1,6 @@
-<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="PublishAot">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <PublishAot>false</PublishAot>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
-    <IsAotCompatible>true</IsAotCompatible>
-    <IsTrimmable>true</IsTrimmable>
     <IsPackable>true</IsPackable>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageId>PicoActor.Abs</PackageId>
@@ -15,7 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="PicoActor.Abs.Tests" />
-    <InternalsVisibleTo Include="PicoActor" />
     <InternalsVisibleTo Include="PicoActor.Tests" />
     <InternalsVisibleTo Include="PicoNode.Agent.Core.Tests" />
   </ItemGroup>

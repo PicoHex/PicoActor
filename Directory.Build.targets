@@ -1,0 +1,47 @@
+<Project>
+  <!-- ═══════════════════════════════════════════════════════
+       PicoActor shared build targets
+
+       Everything that depends on properties a csproj declares (IsPackable,
+       TargetFramework, AotOptimizationLevel) must live HERE: this file is
+       imported after the project body, Directory.Build.props is not (measured:
+       a TargetFrameworkIdentifier / IsPackable condition in .props never matches).
+       ═══════════════════════════════════════════════════════ -->
+
+  <!-- MINIMAL tier (the reflection-free baseline): shared by minimal AND aggressive -->
+  <PropertyGroup Condition="'$(AotOptimizationLevel)' == 'minimal' Or '$(AotOptimizationLevel)' == 'aggressive'">
+    <PublishAot>true</PublishAot>
+    <TrimMode>full</TrimMode>
+  </PropertyGroup>
+
+  <!-- AGGRESSIVE tier = minimal + size levers — never apply to Test projects (it drops
+       stack traces, which test failure diagnostics need). -->
+  <PropertyGroup Condition="'$(AotOptimizationLevel)' == 'aggressive'">
+    <!-- Ilc* MSBuild properties are gone (SDK >= 10.0.400, silently ignored):
+         these two are the verified replacements. -->
+    <StackTraceSupport>false</StackTraceSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+  </PropertyGroup>
+
+  <!-- Packable libraries carry the AOT/trim contract: annotated + analyzer-checked -->
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+  </PropertyGroup>
+
+  <!-- ⚠️ netstandard2.0 must NEVER AOT (source generators / Roslyn loader).
+       MUST stay last so it overrides the AOT tier blocks above.
+       TrimMode=partial keeps the minimal tier's TrimMode=full from leaking
+       (IL2104 in consumers).
+       Deliberate deviation from the ecosystem baseline: it also sets
+       IsTrimmable/EnableTrimAnalyzer here, but on the pinned SDK that emits
+       NETSDK1212 ("not supported for the target framework", measured on
+       10.0.400) — the trim analyzer cannot run for netstandard2.0 anyway, and
+       this repo keeps a warning-free build. TrimMode=partial already covers
+       the leak those two properties were guarding against. -->
+  <PropertyGroup Condition="'$(TargetFrameworkIdentifier)' == '.NETStandard'">
+    <PublishAot>false</PublishAot>
+    <IsAotCompatible>false</IsAotCompatible>
+    <TrimMode>partial</TrimMode>
+  </PropertyGroup>
+</Project>
