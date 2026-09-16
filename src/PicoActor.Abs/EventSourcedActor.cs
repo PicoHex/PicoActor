@@ -21,13 +21,24 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     public ulong Version { get; protected set; }
 
     /// <summary>
-    /// Set by IActorSystem after construction, before SignalReady.
     /// May be null in tests or non-persistent scenarios (pure in-memory mode).
     /// </summary>
-    internal IEventStore? EventStore { get; set; }
+    private IEventStore? _eventStore;
 
-    /// <summary>Set by IActorSystem. Publish hook; default null (no publishing).</summary>
-    internal IDomainEventPublisher? Publisher { get; set; }
+    /// <summary>Publish hook; default null (no publishing).</summary>
+    private IDomainEventPublisher? _publisher;
+
+    /// <summary>
+    /// Framework wiring: attaches the event store and the publish hook.
+    /// Called by IActorSystem via <see cref="Actor.AttachToSystem"/>'s flow, before
+    /// SignalReady(). Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void AttachPersistence(IEventStore? eventStore, IDomainEventPublisher? publisher)
+    {
+        _eventStore = eventStore;
+        _publisher = publisher;
+    }
 
     /// <summary>Creation path. Chains to Actor(ICommand).</summary>
     protected EventSourcedActor(ICommand creationCommand)
@@ -107,12 +118,12 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         // expectedVersion = Version - _events.Count would recompute to a stale
         // baseline forever, and a later successful append would reapply discarded
         // commands whose callers already saw an exception.
-        if (EventStore is not null)
+        if (_eventStore is not null)
         {
             var expectedVersion = Version - (ulong)_events.Count;
             try
             {
-                await EventStore.AppendAsync(Id, expectedVersion, _events).ConfigureAwait(false);
+                await _eventStore.AppendAsync(Id, expectedVersion, _events).ConfigureAwait(false);
             }
             catch
             {
@@ -132,14 +143,14 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         // (ReplayEvents bypasses FlushEventsAsync), so recovery is silent by
         // construction. Failures are isolated — events are already durable.
         // (_events.Count > 0 is guaranteed here — empty list early-returned above.)
-        if (Publisher is not null)
+        if (_publisher is not null)
         {
             var actorId = Id;
             var version = Version;
             var toPublish = _events.ToList();
             try
             {
-                await Publisher.PublishAsync(actorId, version, toPublish).ConfigureAwait(false);
+                await _publisher.PublishAsync(actorId, version, toPublish).ConfigureAwait(false);
             }
             catch
             {

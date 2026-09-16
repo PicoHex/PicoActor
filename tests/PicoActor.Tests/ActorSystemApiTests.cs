@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 /// <summary>
@@ -40,21 +38,57 @@ public sealed class ActorSystemApiTests
     // ═══════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Calling Register<T> twice should warn or throw.
-    /// Currently it silently overwrites, which can hide bugs.
+    /// Registering the same actor type twice is a startup bug (the second factory
+    /// would silently replace the first): fail loudly instead of overwriting, and
+    /// keep the original registration usable.
     /// </summary>
     [Test]
-    public async Task Register_DuplicateRegistration_ShouldThrow()
+    public async Task Register_DuplicateRegistration_Throws()
     {
         var store = new InMemoryEventStore();
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
-        system.Register<SimpleActor>(_ => new SimpleActor((NoOpCmd)_!));
-        system.Register<SimpleActor>(_ => new SimpleActor((NoOpCmd)_!));
+        var firstFactoryCalls = 0;
+        system.Register<SimpleActor>(cmd =>
+        {
+            firstFactoryCalls++;
+            return new SimpleActor((NoOpCmd)cmd);
+        });
 
-        // Verify the system works (but the duplicate was silent)
+        await Assert
+            .That(() => system.Register<SimpleActor>(_ => new SimpleActor((NoOpCmd)_!)))
+            .Throws<InvalidOperationException>();
+
+        // The original factory is still the registered one (not replaced by the duplicate)
         var actor = await system.CreateAsync<SimpleActor>(new NoOpCmd());
         await Assert.That(actor).IsNotNull();
+        await Assert.That(firstFactoryCalls).IsEqualTo(1);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // AskAsync result-shape failures
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// AskAsync&lt;TResult&gt; with a handler that produced no value (null) for a value-type
+    /// result must fail with a diagnostic InvalidCastException naming the expected type,
+    /// not a bare NullReferenceException from the cast.
+    /// </summary>
+    [Test]
+    public async Task AskAsync_NullResultForValueType_ThrowsDescriptiveInvalidCast()
+    {
+        var store = new InMemoryEventStore();
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        system.Register<SimpleActor>(cmd => new SimpleActor((NoOpCmd)cmd));
+
+        var actor = await system.CreateAsync<SimpleActor>(new NoOpCmd());
+
+        var ex = await Assert
+            .That(async () => await system.AskAsync<int>(actor.Id, new NoOpCmd()))
+            .Throws<InvalidCastException>();
+
+        await Assert.That(ex!.Message).Contains("Int32");
+        await Assert.That(ex.Message).Contains(nameof(NoOpCmd));
     }
 
     // ═══════════════════════════════════════════════════════════

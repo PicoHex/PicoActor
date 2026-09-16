@@ -21,33 +21,44 @@ var store = new InMemoryEventStore();
 var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
 system.Register<Counter>(
-    createFactory: cmd => cmd switch
-    {
-        CreateCounter c => new Counter(c),
-        _ => throw new InvalidOperationException($"Unexpected creation command: {cmd.GetType().Name}"),
-    },
+    createFactory: cmd =>
+        cmd switch
+        {
+            CreateCounter c => new Counter(c),
+            _ => throw new InvalidOperationException(
+                $"Unexpected creation command: {cmd.GetType().Name}"
+            ),
+        },
     rebuildFactory: () => new Counter()
 );
 
 // ── CreateAsync ────────────────────────────────────────────────
 var counter = await system.CreateAsync<Counter>(new CreateCounter(10));
 Console.WriteLine($"[CreateAsync] Counter created: Id={counter.Id}");
-Console.WriteLine($"[AskAsync]    GetValue → {await system.AskAsync<int>(counter.Id, new GetValue())}");
+Console.WriteLine(
+    $"[AskAsync]    GetValue → {await system.AskAsync<int>(counter.Id, new GetValue())}"
+);
 
 // ── Send (fire-and-forget) ─────────────────────────────────────
 system.Send(counter.Id, new Increment(5));
 system.Send(counter.Id, new Increment(3));
 await Task.Delay(100); // yield to let mailbox process
-Console.WriteLine($"[Send+Ask]    After +5, +3 → {await system.AskAsync<int>(counter.Id, new GetValue())}");
+Console.WriteLine(
+    $"[Send+Ask]    After +5, +3 → {await system.AskAsync<int>(counter.Id, new GetValue())}"
+);
 
 system.Send(counter.Id, new Decrement(2));
 await Task.Delay(100);
-Console.WriteLine($"[Send+Ask]    After -2 → {await system.AskAsync<int>(counter.Id, new GetValue())}");
+Console.WriteLine(
+    $"[Send+Ask]    After -2 → {await system.AskAsync<int>(counter.Id, new GetValue())}"
+);
 
 // ── Multi-event scenario (Reset) ───────────────────────────────
 system.Send(counter.Id, new Reset(100));
 await Task.Delay(100);
-Console.WriteLine($"[MultiEvent]  After Reset(100) → {await system.AskAsync<int>(counter.Id, new GetValue())}");
+Console.WriteLine(
+    $"[MultiEvent]  After Reset(100) → {await system.AskAsync<int>(counter.Id, new GetValue())}"
+);
 Console.WriteLine($"              Version: {counter.Version} (5 events applied)");
 
 // ── Subscribe to OutputChannel ─────────────────────────────────
@@ -74,7 +85,9 @@ Console.WriteLine($"[StopAsync]   Actor {oldId} stopped");
 // Rebuild from persisted events
 var rebuilt = await system.GetAsync<Counter>(oldId);
 Console.WriteLine($"[GetAsync]    Actor {oldId} rebuilt from event stream");
-Console.WriteLine($"[AskAsync]    Rebuilt GetValue → {await system.AskAsync<int>(rebuilt!.Id, new GetValue())}");
+Console.WriteLine(
+    $"[AskAsync]    Rebuilt GetValue → {await system.AskAsync<int>(rebuilt!.Id, new GetValue())}"
+);
 Console.WriteLine($"              Version: {rebuilt.Version} (7 events replayed)");
 Console.WriteLine($"              Same Id: {rebuilt.Id == oldId}");
 
@@ -141,9 +154,15 @@ static async Task SagaAndEventOutflowDemoAsync()
     // 4. Saga completed via event loopback; terminal event flowed out; auto-stopped
     var gone = await system.GetAsync<PaymentSaga>(execution.Id);
     Console.WriteLine($"[Loopback]   saga auto-stopped: {gone is null}");
-    Console.WriteLine($"[Outflow]    OrderPaid envelopes received (multi-subscriber): {OrderPaidAuditSub.Received.Count}");
-    Console.WriteLine($"[Outflow]    SagaCompleted events received: {SagaCompletedSub.Received.Count}");
-    Console.WriteLine($"[Outflow]    SagaCompleted result: {SagaCompletedSub.Received.LastOrDefault()?.Result}");
+    Console.WriteLine(
+        $"[Outflow]    OrderPaid envelopes received (multi-subscriber): {OrderPaidAuditSub.Received.Count}"
+    );
+    Console.WriteLine(
+        $"[Outflow]    SagaCompleted events received: {SagaCompletedSub.Received.Count}"
+    );
+    Console.WriteLine(
+        $"[Outflow]    SagaCompleted result: {SagaCompletedSub.Received.LastOrDefault()?.Result}"
+    );
 
     // 5. Recovery: interrupt a saga after step 1 (no terminal event), then resume explicitly
     var interruptedId = Guid.CreateVersion7();
@@ -161,15 +180,22 @@ static async Task SagaAndEventOutflowDemoAsync()
 
 // ── Commands ───────────────────────────────────────────────────
 public sealed record CreateCounter(int InitialValue) : ICommand;
+
 public sealed record Increment(int Delta) : ICommand;
+
 public sealed record Decrement(int Delta) : ICommand;
+
 public sealed record Reset(int NewValue) : ICommand;
+
 public sealed record GetValue : ICommand;
 
 // ── Domain Events ──────────────────────────────────────────────
 public sealed record CounterCreated(int InitialValue) : IDomainEvent;
+
 public sealed record CounterIncremented(int Delta) : IDomainEvent;
+
 public sealed record CounterDecremented(int Delta) : IDomainEvent;
+
 public sealed record CounterReset(int OldValue, int NewValue) : IDomainEvent;
 
 // ── Event-Sourced Counter Actor ───────────────────────────────
@@ -178,7 +204,8 @@ public sealed class Counter : EventSourcedActor
     private int _value;
 
     /// <summary>Creation path — atomic initialization from CreateCounter.</summary>
-    public Counter(CreateCounter cmd) : base(cmd) { }
+    public Counter(CreateCounter cmd)
+        : base(cmd) { }
 
     /// <summary>Rebuild path — required for GetAsync event-sourced recovery.</summary>
     public Counter() { }
@@ -233,10 +260,18 @@ public sealed class Counter : EventSourcedActor
     {
         switch (@event)
         {
-            case CounterCreated e:  _value = e.InitialValue;  break;
-            case CounterIncremented e: _value += e.Delta;     break;
-            case CounterDecremented e: _value -= e.Delta;     break;
-            case CounterReset e:       _value = e.NewValue;   break;
+            case CounterCreated e:
+                _value = e.InitialValue;
+                break;
+            case CounterIncremented e:
+                _value += e.Delta;
+                break;
+            case CounterDecremented e:
+                _value -= e.Delta;
+                break;
+            case CounterReset e:
+                _value = e.NewValue;
+                break;
         }
     }
 }
@@ -247,17 +282,26 @@ public sealed class Counter : EventSourcedActor
 
 // ── Commands ───────────────────────────────────────────────────
 public sealed record CreateOrder(Guid OrderId) : ICommand;
+
 public sealed record MarkPaid(Guid OrderId) : ICommand;
+
 public sealed record GetPaymentStatus : ICommand;
+
 public sealed record StartPayment(Guid OrderId) : ICommand;
+
 public sealed record PaymentReceived(Guid OrderId) : ICommand;
+
 public sealed record RecordPayment(Guid OrderId) : ICommand;
+
 public sealed record GetLedgerCount : ICommand;
 
 // ── Domain Events ──────────────────────────────────────────────
 public sealed record OrderCreated(Guid OrderId) : IDomainEvent;
+
 public sealed record OrderPaid(Guid OrderId) : IDomainEvent;
+
 public sealed record PaymentStep1Started(Guid OrderId) : IDomainEvent;
+
 public sealed record PaymentStep2Done : IDomainEvent;
 
 /// <summary>Shared context for the typed subscriber (demo-only wiring).</summary>

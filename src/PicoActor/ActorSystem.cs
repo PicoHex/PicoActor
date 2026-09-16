@@ -35,7 +35,16 @@ public sealed class ActorSystem : IActorSystem
     public void Register<T>(Func<ICommand, T> createFactory, Func<T>? rebuildFactory = null)
         where T : IActor
     {
-        _factories[typeof(T)] = cmd => createFactory(cmd)!;
+        ArgumentNullException.ThrowIfNull(createFactory);
+
+        // TryAdd, not assignment: a duplicate registration is a startup bug, and silently
+        // replacing the first factory would hide it. Atomic — concurrent Register calls
+        // for the same type cannot both win.
+        if (!_factories.TryAdd(typeof(T), cmd => createFactory(cmd)!))
+            throw new InvalidOperationException(
+                $"{typeof(T).Name} is already registered. Register each actor type exactly once."
+            );
+
         if (rebuildFactory is not null)
             _rebuildFactories[typeof(T)] = () => rebuildFactory()!;
     }
@@ -152,7 +161,12 @@ public sealed class ActorSystem : IActorSystem
             await DiscardDuplicateAsync(actor);
 
             if (_registry.TryGetValue(id, out var winner))
-                return (T)(IActor)winner;
+            {
+                // Same type guard as the registry-hit path above: if another thread won
+                // the rebuild with a DIFFERENT aggregate type, degrade to default instead
+                // of throwing InvalidCastException from the cast.
+                return winner is T typedWinner ? typedWinner : default;
+            }
 
             return default;
         }
@@ -186,15 +200,11 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     private void WireActor(ActorBase actor, Guid id)
     {
-        actor.Id = id;
-        actor.System = this;
+        actor.AttachToSystem(id, this);
         WireErrorHandler(actor);
 
         if (actor is EventSourcedActor es)
-        {
-            es.EventStore = _eventStore;
-            es.Publisher = _publisher;
-        }
+            es.AttachPersistence(_eventStore, _publisher);
     }
 
     /// <summary>
@@ -271,7 +281,20 @@ public sealed class ActorSystem : IActorSystem
             tcs.TrySetException(new InvalidOperationException($"Actor {id} is stopping."));
 
         var result = await tcs.Task.ConfigureAwait(false);
-        return (TResult)result!;
+
+        // Result-shape guard: `(TResult)result!` used to throw a bare
+        // NullReferenceException when the handler produced null for a value-type
+        // result. Keep null valid for reference/nullable results, and fail with a
+        // diagnostic InvalidCastException otherwise.
+        if (result is TResult typed)
+            return typed;
+        if (result is null && default(TResult) is null)
+            return default!;
+
+        throw new InvalidCastException(
+            $"AskAsync<{typeof(TResult).Name}> on actor {id} with {command.GetType().Name}: "
+                + $"the handler produced {(result is null ? "no value (null)" : result.GetType().Name)}."
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -320,7 +343,9 @@ public sealed class ActorSystem : IActorSystem
             return Array.Empty<Guid>();
 
         var result = new List<Guid>();
-        foreach (var id in enumerator.ListAggregateIds(firstEventType))
+        foreach (
+            var id in await enumerator.ListAggregateIdsAsync(firstEventType).ConfigureAwait(false)
+        )
         {
             var first = await _eventStore.PeekFirstAsync(id).ConfigureAwait(false);
             if (first is not null && firstEventMatch(first))
@@ -342,7 +367,9 @@ public sealed class ActorSystem : IActorSystem
 
         var match = firstEventMatch ?? (_ => true);
         var results = new List<SagaResumeResult>();
-        foreach (var id in enumerator.ListAggregateIds(firstEventType))
+        foreach (
+            var id in await enumerator.ListAggregateIdsAsync(firstEventType).ConfigureAwait(false)
+        )
         {
             try
             {

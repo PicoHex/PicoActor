@@ -1,5 +1,3 @@
-using PicoMediator.Abs;
-
 namespace PicoActor.Abs;
 
 /// <summary>

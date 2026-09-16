@@ -1,6 +1,3 @@
-using PicoActor.Abs;
-using PicoMediator.Abs;
-
 namespace PicoActor.Abs.Tests;
 
 internal sealed record SubscriptionSampleEvent(int Value) : IDomainEvent;
@@ -34,7 +31,11 @@ public sealed class EventSubscriptionAbstractionTests
     public async Task Subscriber_HandlesTypedEnvelope()
     {
         var handler = new SampleSubscriber();
-        var envelope = new DomainEventEnvelope<SubscriptionSampleEvent>(Guid.CreateVersion7(), 3, new SubscriptionSampleEvent(9));
+        var envelope = new DomainEventEnvelope<SubscriptionSampleEvent>(
+            Guid.CreateVersion7(),
+            3,
+            new SubscriptionSampleEvent(9)
+        );
 
         await handler.Handle(envelope, new NoopSender(), CancellationToken.None);
 
@@ -60,9 +61,10 @@ public sealed class EventSubscriptionAbstractionTests
     private sealed class NoopSender : ICommandSender
     {
         public void Send(Guid actorId, ICommand command) { }
+
         public ValueTask<TResult> AskAsync<TResult>(Guid actorId, ICommand command) => default;
+
         public ValueTask<SagaExecution<TResult>> ExecuteSaga<TSaga, TResult>(ICommand command)
-            where TSaga : SagaActor
-            => default;
+            where TSaga : SagaActor => default;
     }
 }

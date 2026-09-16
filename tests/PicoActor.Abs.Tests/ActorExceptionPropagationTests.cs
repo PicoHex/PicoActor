@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Abs.Tests;
 
 internal sealed record TestCommand : ICommand;
@@ -25,7 +23,7 @@ public sealed class ActorExceptionPropagationTests
     {
         var actor = new ThrowingActor();
         // Simulate what ActorSystem does: assign Id, then release the gate
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
         var tcs = new TaskCompletionSource<object?>();
@@ -49,7 +47,7 @@ public sealed class ActorExceptionPropagationTests
     )
     {
         var actor = new ThrowingActor();
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
         Exception? caught = null;

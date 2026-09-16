@@ -1,8 +1,6 @@
-using PicoActor.Abs;
-using PicoLog.Abs;
-using PicoMediator.Abs;
-
 // TUnit0055: the ODE diagnostic tests deliberately redirect Console.Error (to verify the no-logger stderr diagnostic); finally restores it.
+// [NotInParallel]: Console.Error is process-global — the redirecting tests must not run
+// concurrently with each other, or one test's restore races the other's capture.
 #pragma warning disable TUnit0055
 
 namespace PicoActor.Tests;
@@ -137,6 +135,7 @@ internal sealed record PubEventA(int Value) : IDomainEvent;
 
 internal sealed record PubEventB(string Name) : IDomainEvent;
 
+[NotInParallel]
 public sealed class MediatorDomainEventPublisherTests
 {
     private static readonly Guid ActorId = Guid.CreateVersion7();
@@ -174,8 +173,12 @@ public sealed class MediatorDomainEventPublisherTests
         await sut.PublishAsync(ActorId, 7, events); // does not throw — per-event isolation
 
         await Assert.That(publisher.Published.Count).IsEqualTo(2); // events 1 and 3 arrive
-        await Assert.That(((DomainEventEnvelope)publisher.Published[0]).Event).IsTypeOf<PubEventA>();
-        await Assert.That(((DomainEventEnvelope)publisher.Published[1]).Event).IsTypeOf<PubEventA>();
+        await Assert
+            .That(((DomainEventEnvelope)publisher.Published[0]).Event)
+            .IsTypeOf<PubEventA>();
+        await Assert
+            .That(((DomainEventEnvelope)publisher.Published[1]).Event)
+            .IsTypeOf<PubEventA>();
     }
 
     [Test]
@@ -202,6 +205,32 @@ public sealed class MediatorDomainEventPublisherTests
         await Assert.That(log.Messages.Count).IsEqualTo(1);
         await Assert.That(log.Messages[0]).Contains("root scope");
         await Assert.That(log.Messages[0]).Contains("PubEventA");
+    }
+
+    [Test]
+    public async Task PublishAsync_SubscriberFailure_NoLogger_WritesDiagnostic()
+    {
+        // A subscriber failure with no logger configured must not be silent: the events are
+        // durable but downstream consumers missed them, so the failure has to be observable.
+        var publisher = new RecordingMediatorPublisher { FailOnCall = 1 };
+        var sut = new MediatorDomainEventPublisher(publisher);
+
+        var original = Console.Error;
+        try
+        {
+            using var writer = new StringWriter();
+            Console.SetError(writer);
+
+            await sut.PublishAsync(ActorId, 7, new IDomainEvent[] { new PubEventA(1) });
+
+            var output = writer.ToString();
+            await Assert.That(output).Contains("[PicoActor]");
+            await Assert.That(output).Contains("PubEventA");
+        }
+        finally
+        {
+            Console.SetError(original);
+        }
     }
 
     [Test]

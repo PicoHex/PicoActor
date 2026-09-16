@@ -1,6 +1,9 @@
 global using System.Collections.Concurrent;
+global using System.Threading.Channels;
 global using PicoActor.Abs;
+global using PicoDI;
 global using PicoDI.Abs;
 global using PicoLog.Abs;
 global using PicoMediator.Abs;
+global using PicoMediator.DI;
 global using ActorBase = PicoActor.Abs.Actor;

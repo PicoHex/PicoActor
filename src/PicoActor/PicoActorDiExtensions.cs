@@ -1,7 +1,5 @@
 namespace PicoActor;
 
-using PicoMediator.Abs;
-
 /// <summary>PicoDI registration extensions for PicoActor.</summary>
 public static class PicoActorDiExtensions
 {
@@ -10,14 +8,19 @@ public static class PicoActorDiExtensions
     /// The event store type is determined by <see cref="ActorConfig.EventStore"/>.
     /// Users can bind <see cref="ActorConfig"/> from PicoCfg:
     /// <code>var cfg = CfgBind.Bind&lt;ActorConfig&gt;(configuration, "Actor");</code>
+    /// A store already registered on the container takes precedence over the
+    /// config-derived default (see <see cref="AddPicoActor(ISvcContainer)"/>).
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container, ActorConfig? config)
     {
         var storeType = config?.EventStore?.Type ?? "InMemory";
 
-        IEventStore store = storeType switch
+        // "InMemory" is the implicit default: pass null so the core probes for an existing
+        // registration instead of clobbering it. Future store types are explicit choices
+        // and pass a real instance.
+        IEventStore? store = storeType switch
         {
-            "InMemory" => new InMemoryEventStore(),
+            "InMemory" => null,
             _ => throw new NotSupportedException(
                 $"Event store type '{storeType}' is not supported. " + "Supported types: InMemory."
             ),
@@ -28,7 +31,11 @@ public static class PicoActorDiExtensions
 
     /// <summary>
     /// Registers PicoActor services in the DI container.
-    /// IEventStore defaults to <see cref="InMemoryEventStore"/>.
+    /// IEventStore defaults to <see cref="InMemoryEventStore"/> — but only when the
+    /// container has no <see cref="IEventStore"/> registration yet: a store the
+    /// application registered itself always takes precedence (the implicit default
+    /// never clobbers explicit intent). Use the <see cref="IEventStore"/> overload to
+    /// override a previously registered store.
     /// If <see cref="ILoggerFactory"/> is registered in the container,
     /// a logger is automatically resolved and injected into <see cref="ActorSystem"/>.
     /// If <see cref="IMediator"/> (e.g. via AddPicoMediator) is registered,
@@ -46,6 +53,8 @@ public static class PicoActorDiExtensions
 
     /// <summary>
     /// Registers PicoActor services with a custom event store.
+    /// The explicit instance always wins — it overrides a store already registered
+    /// on the container (unlike the implicit InMemory default of the other overloads).
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container, IEventStore? eventStore)
     {
@@ -55,7 +64,8 @@ public static class PicoActorDiExtensions
     /// <summary>
     /// Registers PicoActor services and wires PicoMediator event outflow.
     /// ActorSystem's DomainEventPublisher = MediatorDomainEventPublisher(publisher).
-    /// IEventStore defaults to InMemory; a container-registered IEventStore takes precedence.
+    /// IEventStore is only defaulted to InMemory when the container has no IEventStore
+    /// registration — a container-registered IEventStore takes precedence.
     /// </summary>
     public static ISvcContainer AddPicoActor(this ISvcContainer container, IPublisher publisher)
     {
@@ -66,10 +76,12 @@ public static class PicoActorDiExtensions
     }
 
     /// <summary>
-    /// Single registration path shared by all overloads: IEventStore (custom or
-    /// default in-memory), IActorSystem singleton, and the ICommandSender narrow
-    /// port. Event outflow wiring: an explicit <paramref name="publisher"/> wins;
+    /// Single registration path shared by all overloads: IEventStore (explicit instance
+    /// or implicit in-memory default), IActorSystem singleton, and the ICommandSender
+    /// narrow port. Event outflow wiring: an explicit <paramref name="publisher"/> wins;
     /// otherwise the container is probed for <see cref="IMediator"/> (auto-wire).
+    /// Precedence: an explicit store instance is registered unconditionally; the
+    /// implicit default is registered only when the container has no IEventStore yet.
     /// </summary>
     private static ISvcContainer AddPicoActorCore(
         ISvcContainer container,
@@ -77,12 +89,16 @@ public static class PicoActorDiExtensions
         IPublisher? publisher
     )
     {
-        // Register event store (custom or default in-memory)
-        container.Register(
-            typeof(IEventStore),
-            scope => eventStore ?? new InMemoryEventStore(),
-            SvcLifetime.Singleton
-        );
+        // Register event store (explicit instance or default in-memory unless one is
+        // already registered — never silently replace the application's store)
+        if (eventStore is not null || !container.IsRegistered(typeof(IEventStore)))
+        {
+            container.Register(
+                typeof(IEventStore),
+                scope => eventStore ?? new InMemoryEventStore(),
+                SvcLifetime.Singleton
+            );
+        }
 
         // Register ActorSystem singleton
         container.Register(

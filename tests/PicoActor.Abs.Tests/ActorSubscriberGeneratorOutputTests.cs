@@ -1,8 +1,7 @@
+using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using PicoActor.Gen;
-using PicoDI.Abs;
-using PicoMediator.Abs;
 
 namespace PicoActor.Abs.Tests;
 
@@ -45,16 +44,22 @@ public sealed class ActorSubscriberGeneratorOutputTests
         }
         """;
 
-    private static GeneratorDriver RunGenerator(string assemblyName)
+    private static CSharpCompilation CreateCompilation(string assemblyName, string source)
     {
         var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview);
-        var inputTree = CSharpSyntaxTree.ParseText(InputSource, parseOptions);
-        var compilation = CSharpCompilation.Create(
+        var inputTree = CSharpSyntaxTree.ParseText(source, parseOptions);
+        return CSharpCompilation.Create(
             assemblyName: assemblyName,
             syntaxTrees: [inputTree],
             references: GetMetadataReferences(),
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
         );
+    }
+
+    private static GeneratorDriver RunGenerator(string assemblyName, string? source = null)
+    {
+        var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview);
+        var compilation = CreateCompilation(assemblyName, source ?? InputSource);
 
         var generator = new ActorSubscriberGenerator();
         return CSharpGeneratorDriver
@@ -71,9 +76,24 @@ public sealed class ActorSubscriberGeneratorOutputTests
         var refs = trustedPlatformAssemblies
             .Select(static p => MetadataReference.CreateFromFile(p))
             .ToList();
-        refs.Add(MetadataReference.CreateFromFile(typeof(IDomainEvent).Assembly.Location));
-        refs.Add(MetadataReference.CreateFromFile(typeof(IEvent).Assembly.Location));
-        refs.Add(MetadataReference.CreateFromFile(typeof(ISvcScope).Assembly.Location));
+
+        // AppContext.BaseDirectory, not Assembly.Location: the latter is empty under
+        // single-file/AOT packaging and trips IL3000 once the AOT analyzer is on.
+        refs.Add(
+            MetadataReference.CreateFromFile(
+                Path.Combine(AppContext.BaseDirectory, "PicoActor.Abs.dll")
+            )
+        );
+        refs.Add(
+            MetadataReference.CreateFromFile(
+                Path.Combine(AppContext.BaseDirectory, "PicoMediator.Abs.dll")
+            )
+        );
+        refs.Add(
+            MetadataReference.CreateFromFile(
+                Path.Combine(AppContext.BaseDirectory, "PicoDI.Abs.dll")
+            )
+        );
         return [.. refs];
     }
 
@@ -81,9 +101,14 @@ public sealed class ActorSubscriberGeneratorOutputTests
     {
         var runResult = driver.GetRunResult();
         foreach (var result in runResult.Results)
-        foreach (var source in result.GeneratedSources)
-        if (source.HintName.Contains(fileNamePart, StringComparison.Ordinal))
-            return source.SourceText.ToString();
+        {
+            foreach (var source in result.GeneratedSources)
+            {
+                if (source.HintName.Contains(fileNamePart, StringComparison.Ordinal))
+                    return source.SourceText.ToString();
+            }
+        }
+
         return null;
     }
 
@@ -109,11 +134,17 @@ public sealed class ActorSubscriberGeneratorOutputTests
         var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations")!;
 
         // 3 handler classes (Paid ×2, Shipped ×1) → 3 handler registrations
-        await Assert.That(CountOccurrences(source, "IDomainEventSubscriber<global::Paid>")).IsGreaterThanOrEqualTo(3);
+        await Assert
+            .That(CountOccurrences(source, "IDomainEventSubscriber<global::Paid>"))
+            .IsGreaterThanOrEqualTo(3);
 
         // exactly 2 bridge classes (Paid, Shipped) and 2 bridge registrations
-        await Assert.That(CountOccurrences(source, "internal sealed class PicoActorEnvelopeBridge_")).IsEqualTo(2);
-        await Assert.That(CountOccurrences(source, "static scope => new PicoActorEnvelopeBridge_")).IsEqualTo(2);
+        await Assert
+            .That(CountOccurrences(source, "internal sealed class PicoActorEnvelopeBridge_"))
+            .IsEqualTo(2);
+        await Assert
+            .That(CountOccurrences(source, "static scope => new PicoActorEnvelopeBridge_"))
+            .IsEqualTo(2);
     }
 
     [Test]
@@ -123,12 +154,20 @@ public sealed class ActorSubscriberGeneratorOutputTests
         var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations")!;
 
         await Assert.That(source).Contains("if (envelope.Event is global::Paid e)");
-        await Assert.That(source)
-            .Contains("_scope.TryGetServices(typeof(global::PicoActor.Abs.IDomainEventSubscriber<global::Paid>), out var rawHandlers)");
-        await Assert.That(source)
-            .Contains("new global::PicoActor.Abs.DomainEventEnvelope<global::Paid>(envelope.ActorId, envelope.Version, e)");
+        await Assert
+            .That(source)
+            .Contains(
+                "_scope.TryGetServices(typeof(global::PicoActor.Abs.IDomainEventSubscriber<global::Paid>), out var rawHandlers)"
+            );
+        await Assert
+            .That(source)
+            .Contains(
+                "new global::PicoActor.Abs.DomainEventEnvelope<global::Paid>(envelope.ActorId, envelope.Version, e)"
+            );
         await Assert.That(source).Contains("exceptions ??= []");
-        await Assert.That(source).Contains("throw new global::System.AggregateException(exceptions)");
+        await Assert
+            .That(source)
+            .Contains("throw new global::System.AggregateException(exceptions)");
     }
 
     [Test]
@@ -140,5 +179,152 @@ public sealed class ActorSubscriberGeneratorOutputTests
         // the generator must only react to PicoActor.Abs.IDomainEventSubscriber`1 —
         // a PicoMediator ISubscriber in the input must NOT generate anything extra
         await Assert.That(source).DoesNotContain("ISubscriber<global::Paid>");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Incremental behavior
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// An edit that changes neither the subscriber set nor the assembly name must not
+    /// re-run source generation: a Compilation instance changes on every edit, so feeding
+    /// the whole CompilationProvider into RegisterSourceOutput invalidates the output on
+    /// every keystroke.
+    /// </summary>
+    [Test]
+    public async Task Generator_UnrelatedEdit_DoesNotRerunSourceOutput()
+    {
+        var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview);
+        var compilation1 = CreateCompilation("App", InputSource);
+        var compilation2 = compilation1.AddSyntaxTrees(
+            CSharpSyntaxTree.ParseText(
+                "internal sealed class UnrelatedEdit { } // no subscriber here",
+                parseOptions
+            )
+        );
+
+        var driver = CSharpGeneratorDriver.Create(
+            [new ActorSubscriberGenerator().AsSourceGenerator()],
+            parseOptions: parseOptions,
+            driverOptions: new GeneratorDriverOptions(
+                IncrementalGeneratorOutputKind.None,
+                trackIncrementalGeneratorSteps: true
+            )
+        );
+
+        driver = (CSharpGeneratorDriver)driver.RunGenerators(compilation1);
+        driver = (CSharpGeneratorDriver)driver.RunGenerators(compilation2);
+
+        var reasons = driver
+            .GetRunResult()
+            .Results[0]
+            .TrackedOutputSteps.SelectMany(kv => kv.Value)
+            .SelectMany(step => step.Outputs)
+            .Select(o => o.Reason)
+            .ToArray();
+
+        await Assert.That(reasons).IsNotEmpty();
+        await Assert
+            .That(
+                reasons.All(r =>
+                    r == IncrementalStepRunReason.Cached || r == IncrementalStepRunReason.Unchanged
+                )
+            )
+            .IsTrue();
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Constructor selection / generated-shape robustness
+    // ═══════════════════════════════════════════════════════════
+
+    private const string MultiCtorSource = """
+        using PicoActor.Abs;
+        using PicoMediator.Abs;
+        using System.Threading;
+
+        public interface IMyDep { }
+
+        public record Paid(int Id) : IDomainEvent;
+
+        // Parameterless ctor declared FIRST: DI resolves the greediest ctor, so the
+        // generated factory must pick the IMyDep one.
+        public sealed class TwoCtorHandler : IDomainEventSubscriber<Paid>
+        {
+            private readonly IMyDep? _dep;
+
+            public TwoCtorHandler() { }
+
+            public TwoCtorHandler(IMyDep dep) => _dep = dep;
+
+            public ValueTask Handle(DomainEventEnvelope<Paid> envelope, ICommandSender sender, CancellationToken ct)
+                => ValueTask.CompletedTask;
+        }
+        """;
+
+    [Test]
+    public async Task HandlerWithMultipleConstructors_UsesGreediestConstructor()
+    {
+        var driver = RunGenerator("App", MultiCtorSource);
+        var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations")!;
+
+        await Assert
+            .That(source)
+            .Contains(
+                "new global::TwoCtorHandler((global::IMyDep)scope.GetService(typeof(global::IMyDep)))"
+            );
+    }
+
+    private const string CollidingNamesSource = """
+        using PicoActor.Abs;
+        using PicoMediator.Abs;
+        using System.Threading;
+
+        namespace My
+        {
+            public record Event(int Id) : IDomainEvent;
+        }
+
+        // Sanitizes to the same bridge identifier as global::My.Event
+        public record My_Event(int Id) : IDomainEvent;
+
+        public sealed class EventHandler : IDomainEventSubscriber<My.Event>
+        {
+            public ValueTask Handle(DomainEventEnvelope<My.Event> envelope, ICommandSender sender, CancellationToken ct)
+                => ValueTask.CompletedTask;
+        }
+
+        public sealed class MyEventHandler : IDomainEventSubscriber<My_Event>
+        {
+            public ValueTask Handle(DomainEventEnvelope<My_Event> envelope, ICommandSender sender, CancellationToken ct)
+                => ValueTask.CompletedTask;
+        }
+        """;
+
+    [Test]
+    public async Task EventTypesWithCollidingSanitizedNames_ProduceDistinctBridgeClasses()
+    {
+        var driver = RunGenerator("App", CollidingNamesSource);
+        var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations")!;
+
+        var bridgeNames = Regex
+            .Matches(source, @"internal sealed class (PicoActorEnvelopeBridge_\w+) :")
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
+
+        // Two distinct event types → two distinct bridge classes (one file, so a name
+        // collision would be a CS0101 duplicate-class error)
+        await Assert.That(bridgeNames.Length).IsEqualTo(2);
+        await Assert.That(bridgeNames.Distinct(StringComparer.Ordinal).Count()).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task Bridge_MissingCommandSenderRegistration_FailsWithDiagnostic()
+    {
+        var driver = RunGenerator("App");
+        var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations")!;
+
+        // Without AddPicoActor() the port is unregistered: the bridge must fail loudly
+        // with an actionable message instead of passing null into the handler.
+        await Assert.That(source).Contains("ICommandSender is not registered");
     }
 }

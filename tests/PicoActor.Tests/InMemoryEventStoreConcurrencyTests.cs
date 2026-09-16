@@ -1,13 +1,10 @@
-using System.Collections.Concurrent;
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 /// <summary>Test event — file-level so the Mediator generator can reference it.</summary>
 public sealed record ProbeCreated(int Seq) : IDomainEvent;
 
 /// <summary>
-/// InMemoryEventStore thread-safety: ListAggregateIds reads stream state while
+/// InMemoryEventStore thread-safety: ListAggregateIdsAsync reads stream state while
 /// concurrent AppendAsync mutates the same List. The enumeration path must take
 /// the per-stream gate like Append/Load/Peek do — otherwise the unsynchronized
 /// List read can race AddRange's internal resize.
@@ -25,7 +22,7 @@ public sealed class InMemoryEventStoreConcurrencyTests
         var hotId = Guid.CreateVersion7();
         var coldId = Guid.CreateVersion7();
 
-        // Seed both streams so ListAggregateIds always has a first event to inspect.
+        // Seed both streams so ListAggregateIdsAsync always has a first event to inspect.
         await store.AppendAsync(hotId, 0, [new ProbeCreated(0)]);
         await store.AppendAsync(coldId, 0, [new ProbeCreated(0)]);
 
@@ -33,13 +30,13 @@ public sealed class InMemoryEventStoreConcurrencyTests
         var stopEnumeration = new CancellationTokenSource();
 
         var enumerator = Task.Run(
-            () =>
+            async () =>
             {
                 try
                 {
                     while (!stopEnumeration.Token.IsCancellationRequested)
                     {
-                        var ids = store.ListAggregateIds(nameof(ProbeCreated));
+                        var ids = await store.ListAggregateIdsAsync(nameof(ProbeCreated));
                         if (ids.Count != 2 || !ids.Contains(hotId) || !ids.Contains(coldId))
                             errors.Add(
                                 $"unexpected enumeration result: [{string.Join(", ", ids)}]"
@@ -71,7 +68,7 @@ public sealed class InMemoryEventStoreConcurrencyTests
 
         if (!errors.IsEmpty)
             Assert.Fail(
-                $"ListAggregateIds raced concurrent appends ({errors.Count} failures, first: {errors.First()})"
+                $"ListAggregateIdsAsync raced concurrent appends ({errors.Count} failures, first: {errors.First()})"
             );
     }
 }

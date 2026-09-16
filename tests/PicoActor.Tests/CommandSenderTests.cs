@@ -1,8 +1,3 @@
-using PicoActor.Abs;
-using PicoDI;
-using PicoMediator.Abs;
-using PicoMediator.DI;
-
 namespace PicoActor.Tests;
 
 internal sealed record Echo(string Msg) : ICommand;
@@ -15,7 +10,9 @@ internal sealed class EchoActor : Actor
 {
     private string _last = "";
 
-    public EchoActor(Echo cmd) : base(cmd) => _last = cmd.Msg;
+    public EchoActor(Echo cmd)
+        : base(cmd) => _last = cmd.Msg;
+
     public EchoActor() { }
 
     protected override ValueTask<object?> OnMessageAsync(ICommand command)

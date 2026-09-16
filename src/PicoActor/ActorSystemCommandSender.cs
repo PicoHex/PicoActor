@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor;
 
 /// <summary>IActorSystem adapter for the ICommandSender narrow port.</summary>

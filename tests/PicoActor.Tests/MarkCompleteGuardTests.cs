@@ -1,6 +1,3 @@
-using System.IO;
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 internal sealed record GuardProbeEvent : IDomainEvent;
@@ -122,7 +119,7 @@ public sealed class MarkCompleteGuardTests
     public async Task MarkComplete_InMutate_ThrowsInvalidOperation()
     {
         var actor = new MutateMarkCompleteSaga();
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
         try

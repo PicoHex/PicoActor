@@ -1,8 +1,3 @@
-using PicoActor.Abs;
-using PicoDI;
-using PicoMediator.Abs;
-using PicoMediator.DI;
-
 namespace PicoActor.Tests;
 
 /// <summary>Business-event subscriber (declare-and-subscribe via PicoActor.Gen) —
@@ -115,7 +110,9 @@ internal sealed class TriggerSagaHandler : IDomainEventSubscriber<MedIntegration
     )
     {
         Results.Add(
-            await sender.ExecuteSaga<MedIntegrationSaga, string>(new MedIntegrationCmd("from-trigger"))
+            await sender.ExecuteSaga<MedIntegrationSaga, string>(
+                new MedIntegrationCmd("from-trigger")
+            )
         );
     }
 }
@@ -137,7 +134,9 @@ internal sealed record UnobservedCmd(string Name) : ICommand;
 /// <summary>Raises MedIntegrationTrigger — the event handlers translate to commands.</summary>
 internal sealed class MedIntegrationTriggerActor : EventSourcedActor
 {
-    public MedIntegrationTriggerActor(TriggerCmd cmd) : base(cmd) { }
+    public MedIntegrationTriggerActor(TriggerCmd cmd)
+        : base(cmd) { }
+
     public MedIntegrationTriggerActor() { }
 
     protected override ValueTask<object?> OnMessageAsync(ICommand command)
@@ -155,7 +154,8 @@ internal sealed class MedIntegrationTargetActor : Actor
 {
     public static readonly List<string> ReceivedPayloads = [];
 
-    public MedIntegrationTargetActor(TargetCmd cmd) : base(cmd)
+    public MedIntegrationTargetActor(TargetCmd cmd)
+        : base(cmd)
     {
         ReceivedPayloads.Add(cmd.Payload);
     }
@@ -176,7 +176,9 @@ internal sealed class MedIntegrationTargetActor : Actor
 /// <summary>Raises an event nobody subscribes to — must be silently dropped.</summary>
 internal sealed class MedIntegrationUnobservedActor : EventSourcedActor
 {
-    public MedIntegrationUnobservedActor(UnobservedCmd cmd) : base(cmd) { }
+    public MedIntegrationUnobservedActor(UnobservedCmd cmd)
+        : base(cmd) { }
+
     public MedIntegrationUnobservedActor() { }
 
     protected override ValueTask<object?> OnMessageAsync(ICommand command)

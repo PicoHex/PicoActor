@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 internal sealed record DiscardProbeCmd : ICommand;
@@ -31,7 +29,7 @@ public sealed class ActorSystemDiscardTests
     public async Task DiscardedActor_SkipsOnReadyAsync()
     {
         var actor = new DiscardProbeActor();
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.MarkDiscarded();
 
         await actor.StopAsync(); // releases the gate → RunAsync wakes → skips OnReadyAsync → exits

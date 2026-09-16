@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 /// <summary>Counts OnMessageAsync invocations — subclasses must not be called after the terminal guard.</summary>

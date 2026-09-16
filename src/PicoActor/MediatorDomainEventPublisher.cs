@@ -1,7 +1,3 @@
-using PicoActor.Abs;
-using PicoLog.Abs;
-using PicoMediator.Abs;
-
 namespace PicoActor;
 
 /// <summary>
@@ -47,18 +43,13 @@ public sealed class MediatorDomainEventPublisher : IDomainEventPublisher
             {
                 // Captive-dependency diagnostic: the Mediator is bound to a disposed
                 // scope (the location where ActorSystem was first resolved).
-                // Without a logger, the diagnostic still goes to stderr so event outflow
-                // never fails silently (events are already persisted — no data loss —
-                // but downstream subscribers miss them). Fix direction: PicoDI singleton
-                // factories should always create from the root scope.
-                var message =
+                // Fix direction: PicoDI singleton factories should always create from
+                // the root scope.
+                Report(
                     $"Event publish failed for {e.GetType().Name} (actor {actorId} v{version}): "
-                    + $"{ex.Message}. The IMediator is bound to a disposed scope — resolve "
-                    + "IActorSystem from the application-level root scope.";
-                if (_logger is not null)
-                    _logger.Error(message);
-                else
-                    Console.Error.WriteLine($"[PicoActor] {message}");
+                        + $"{ex.Message}. The IMediator is bound to a disposed scope — resolve "
+                        + "IActorSystem from the application-level root scope."
+                );
             }
             catch (Exception ex)
             {
@@ -66,10 +57,23 @@ public sealed class MediatorDomainEventPublisher : IDomainEventPublisher
                 // AggregateException) does not interrupt subsequent events.
                 // Events are already persisted (publishing happens after persist+mutate),
                 // so the failure does not affect the actor.
-                _logger?.Error(
+                Report(
                     $"Event publish failed for {e.GetType().Name} (actor {actorId} v{version}): {ex.Message}"
                 );
             }
         }
+    }
+
+    /// <summary>
+    /// Report a publish failure. Without a logger the diagnostic still goes to stderr:
+    /// the events are durable but downstream subscribers missed them, so a silent
+    /// swallow would hide a real delivery gap.
+    /// </summary>
+    private void Report(string message)
+    {
+        if (_logger is not null)
+            _logger.Error(message);
+        else
+            Console.Error.WriteLine($"[PicoActor] {message}");
     }
 }

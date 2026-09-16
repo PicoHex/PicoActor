@@ -1,6 +1,3 @@
-using PicoActor.Abs;
-using PicoDI;
-
 namespace PicoActor.Tests;
 
 public sealed class ActorConfigTests

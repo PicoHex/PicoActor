@@ -39,13 +39,16 @@ public abstract class SagaActor : EventSourcedActor
     protected SagaActor() { }
 
     /// <summary>Restored by the framework from the event stream on replay.</summary>
-    protected internal bool IsCompleted => _completed;
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool IsCompleted => _completed;
 
     /// <summary>Restored by the framework from the event stream on replay.</summary>
-    protected internal bool IsFailed => _failed;
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool IsFailed => _failed;
 
     /// <summary>Restored by the framework from SagaFailed(reason) on replay; used for recovery-API classification.</summary>
-    protected internal string? FailedReason => _failedReason;
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public string? FailedReason => _failedReason;
 
     /// <summary>
     /// Mark the saga as complete. Only records a pending completion — the framework's

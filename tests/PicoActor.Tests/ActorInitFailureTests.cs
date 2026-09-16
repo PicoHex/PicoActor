@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 /// <summary>

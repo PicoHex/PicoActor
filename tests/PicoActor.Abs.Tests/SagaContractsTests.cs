@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Abs.Tests;
 
 public sealed class SagaContractsTests

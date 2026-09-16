@@ -12,6 +12,8 @@ public interface IActorSystem
     /// <paramref name="rebuildFactory"/> returns an actor without a command — used by GetAsync
     /// to rebuild from persisted events. If null, GetAsync cannot rebuild this type.
     /// Both factories should inject the same infrastructure dependencies (ILlmClient, etc.).
+    /// Registering the same actor type twice throws — a duplicate registration is a
+    /// startup bug, and silently overwriting the first factory would hide it.
     /// </summary>
     void Register<T>(Func<ICommand, T> createFactory, Func<T>? rebuildFactory = null)
         where T : IActor;
@@ -40,7 +42,13 @@ public interface IActorSystem
     /// <summary>Send a command and await the result.</summary>
     ValueTask<TResult> AskAsync<TResult>(Guid id, ICommand command);
 
-    /// <summary>Stop an actor. Waits for the current message to complete, discards remaining queue.</summary>
+    /// <summary>
+    /// Stop an actor: remove it from the registry, then signal its loop to stop, and
+    /// wait for the loop to exit. Messages already buffered in the mailbox are still
+    /// dispatched before the loop exits (a graceful stop drains the queue — nothing is
+    /// silently dropped); messages sent after the stop fail with KeyNotFoundException
+    /// because the registry entry is removed first. Idempotent.
+    /// </summary>
     ValueTask StopAsync(Guid id);
 
     /// <summary>

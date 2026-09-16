@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Abs.Tests;
 
 internal sealed record FrameworkProbeEvent : IDomainEvent;
@@ -42,7 +40,7 @@ public sealed class EventSourcedActorFrameworkEventTests
         FrameworkFilterActor.FrameworkHandled = 0;
 
         var actor = new FrameworkFilterActor();
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
         // Drive one flush directly: calling FlushEventsAsync (protected) after RaiseEvent

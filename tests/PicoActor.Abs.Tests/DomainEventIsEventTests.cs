@@ -1,6 +1,3 @@
-using PicoActor.Abs;
-using PicoMediator.Abs;
-
 namespace PicoActor.Abs.Tests;
 
 internal sealed record SampleEvent(int Value) : IDomainEvent;

@@ -1,5 +1,3 @@
-using PicoMediator.Abs;
-
 namespace PicoActor.Abs;
 
 /// <summary>
@@ -25,5 +23,4 @@ public sealed record DomainEventEnvelope<TEvent>(Guid ActorId, ulong Version, TE
 /// <summary>Transport envelope. Implements IEvent but NOT IDomainEvent — it never
 /// enters the event store. Published per event by MediatorDomainEventPublisher;
 /// the generated bridge narrows <see cref="Event"/> to its concrete type.</summary>
-public sealed record DomainEventEnvelope(Guid ActorId, ulong Version, IDomainEvent Event)
-    : IEvent;
+public sealed record DomainEventEnvelope(Guid ActorId, ulong Version, IDomainEvent Event) : IEvent;

@@ -10,6 +10,9 @@ public interface IEventStoreEnumerator
     /// <summary>
     /// List ids of aggregates whose FIRST event type name matches
     /// <paramref name="firstEventType"/>. Empty if no matches.
+    /// Async by design: enumeration takes a per-stream gate and scans every stream, so a
+    /// synchronous wait would block the caller's thread inside an otherwise awaitable
+    /// recovery path.
     /// </summary>
-    IReadOnlyList<Guid> ListAggregateIds(string firstEventType);
+    ValueTask<IReadOnlyList<Guid>> ListAggregateIdsAsync(string firstEventType);
 }

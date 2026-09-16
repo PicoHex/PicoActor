@@ -1,9 +1,3 @@
-using System.Collections.Immutable;
-using System.Text;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
-
 namespace PicoActor.Gen;
 
 /// <summary>
@@ -27,8 +21,23 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             .Where(static x => x.Length > 0)
             .SelectMany(static (x, _) => x);
 
+        // Only the assembly name is needed from the compilation: projecting it to a string
+        // keeps the output node cacheable. Feeding CompilationProvider straight into
+        // RegisterSourceOutput would re-run generation on every edit (a Compilation
+        // instance changes on every keystroke).
+        var assemblyNameProvider = context.CompilationProvider.Select(
+            static (compilation, _) => compilation.AssemblyName ?? "Unknown"
+        );
+
+        // The batch node marks itself modified whenever its inputs change (any edit inside
+        // any file), even when the collected subscribers are byte-for-byte the same. Compare
+        // the collected set structurally so an unrelated edit leaves the source output cached.
+        var subscriberSummary = subscriberDeclarations
+            .Collect()
+            .WithComparer(SubscriberSetComparer.Instance);
+
         context.RegisterSourceOutput(
-            context.CompilationProvider.Combine(subscriberDeclarations.Collect()),
+            assemblyNameProvider.Combine(subscriberSummary),
             static (spc, pair) => GenerateRegistrations(spc, pair.Left, pair.Right)
         );
     }
@@ -49,6 +58,59 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         public string EventTypeFqn { get; }
         public string ImplementationType { get; }
         public ImmutableArray<string> ConstructorParameterTypes { get; }
+
+        /// <summary>Structural comparison over the fields that affect generated code.</summary>
+        public bool HasSameShapeAs(SubscriberInfo other) =>
+            string.Equals(EventTypeFqn, other.EventTypeFqn, StringComparison.Ordinal)
+            && string.Equals(ImplementationType, other.ImplementationType, StringComparison.Ordinal)
+            && ConstructorParameterTypes.SequenceEqual(
+                other.ConstructorParameterTypes,
+                StringComparer.Ordinal
+            );
+
+        // netstandard2.0 target: no System.HashCode — combine manually
+        public int ShapeHashCode()
+        {
+            unchecked
+            {
+                var hash = 17;
+                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(EventTypeFqn);
+                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(ImplementationType);
+                hash = (hash * 31) + ConstructorParameterTypes.Length;
+                return hash;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Value comparer for the collected subscriber set: Roslyn compares node outputs with
+    /// this to decide whether generation must re-run. Without it a changed array instance
+    /// (produced on every edit anywhere in the project) invalidates the output node.
+    /// </summary>
+    private sealed class SubscriberSetComparer : IEqualityComparer<ImmutableArray<SubscriberInfo>>
+    {
+        public static readonly SubscriberSetComparer Instance = new();
+
+        public bool Equals(ImmutableArray<SubscriberInfo> x, ImmutableArray<SubscriberInfo> y)
+        {
+            if (x.Length != y.Length)
+                return false;
+            for (var i = 0; i < x.Length; i++)
+                if (!x[i].HasSameShapeAs(y[i]))
+                    return false;
+            return true;
+        }
+
+        public int GetHashCode(ImmutableArray<SubscriberInfo> obj)
+        {
+            unchecked
+            {
+                var hash = obj.Length;
+                foreach (var item in obj)
+                    hash = (hash * 31) + item.ShapeHashCode();
+                return hash;
+            }
+        }
     }
 
     private static ImmutableArray<SubscriberInfo> GetSubscriberInfos(
@@ -81,9 +143,14 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             if (constructed.MetadataName != "IDomainEventSubscriber`1")
                 continue;
 
-            var ctor = typeSymbol.InstanceConstructors.FirstOrDefault(c =>
-                c.DeclaredAccessibility == Accessibility.Public && !c.IsStatic
-            );
+            var ctor = typeSymbol
+                .InstanceConstructors.Where(c =>
+                    c.DeclaredAccessibility == Accessibility.Public && !c.IsStatic
+                )
+                // Greediest constructor (DI convention, mirrors PicoDI): a parameterless
+                // ctor declared first must not win over the injectable one.
+                .OrderByDescending(static c => c.Parameters.Length)
+                .FirstOrDefault();
             var ctorParams = ctor is null
                 ? []
                 : ctor
@@ -94,9 +161,9 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
             results.Add(
                 new SubscriberInfo(
-                    iface.TypeArguments[0].ToDisplayString(
-                        SymbolDisplayFormat.FullyQualifiedFormat
-                    ),
+                    iface
+                        .TypeArguments[0]
+                        .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                     typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                     ctorParams
                 )
@@ -108,14 +175,13 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
     private static void GenerateRegistrations(
         SourceProductionContext context,
-        Compilation compilation,
+        string assemblyName,
         ImmutableArray<SubscriberInfo> subscribers
     )
     {
         if (subscribers.IsDefaultOrEmpty)
             return;
 
-        var assemblyName = compilation.AssemblyName ?? "Unknown";
         var safeAssemblyName = SanitizeIdentifier(assemblyName);
         var className = $"PicoActorSubscriberRegistrations_{safeAssemblyName}";
         var configuratorId = $"pico-actor::{assemblyName}";
@@ -125,6 +191,12 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static x => x, StringComparer.Ordinal)
             .ToArray();
+
+        // Bridge class names must stay unique within the generated file: sanitization maps
+        // distinct fully-qualified names onto the same identifier (My.Event → globalMy_Event,
+        // My_Event → globalMy_Event), which would emit two identically named classes (CS0101).
+        // Colliding names get a stable FQN-derived suffix.
+        var bridgeNames = BuildBridgeNames(distinctEventTypes);
 
         var sb = new StringBuilder(8192);
         sb.AppendLine("// <auto-generated/>");
@@ -136,7 +208,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
         foreach (var eventType in distinctEventTypes)
         {
-            var bridgeName = "PicoActorEnvelopeBridge_" + SanitizeIdentifier(eventType);
+            var bridgeName = bridgeNames[eventType];
             sb.AppendLine(
                 $"internal sealed class {bridgeName} : global::PicoMediator.Abs.ISubscriber<global::PicoActor.Abs.DomainEventEnvelope>"
             );
@@ -157,8 +229,13 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 $"            if (!_scope.TryGetServices(typeof(global::PicoActor.Abs.IDomainEventSubscriber<{eventType}>), out var rawHandlers))"
             );
             sb.AppendLine("                return;");
+            sb.AppendLine("            var sender =");
             sb.AppendLine(
-                "            var sender = (global::PicoActor.Abs.ICommandSender)_scope.GetService(typeof(global::PicoActor.Abs.ICommandSender));"
+                "                _scope.GetService(typeof(global::PicoActor.Abs.ICommandSender)) as global::PicoActor.Abs.ICommandSender"
+            );
+            sb.AppendLine("                ?? throw new global::System.InvalidOperationException(");
+            sb.AppendLine(
+                "                    \"ICommandSender is not registered — call AddPicoActor() before AddPicoMediator().\");"
             );
             sb.AppendLine(
                 $"            var typed = new global::PicoActor.Abs.DomainEventEnvelope<{eventType}>(envelope.ActorId, envelope.Version, e);"
@@ -195,9 +272,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         sb.AppendLine("    [ModuleInitializer]");
         sb.AppendLine("    internal static void AutoRegister()");
         sb.AppendLine("    {");
-        sb.AppendLine(
-            "        global::PicoMediator.MediatorAutoSubscriptionRegistry.Register("
-        );
+        sb.AppendLine("        global::PicoMediator.MediatorAutoSubscriptionRegistry.Register(");
         sb.AppendLine(
             $"            \"{EscapeStringLiteral(configuratorId)}\", static container => ConfigureGeneratedHandlers(container));"
         );
@@ -219,7 +294,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         }
         foreach (var eventType in distinctEventTypes)
         {
-            var bridgeName = "PicoActorEnvelopeBridge_" + SanitizeIdentifier(eventType);
+            var bridgeName = bridgeNames[eventType];
             sb.AppendLine("        container.Register(global::PicoDI.Abs.SvcDescriptor.Create(");
             sb.AppendLine(
                 "            typeof(global::PicoMediator.Abs.ISubscriber<global::PicoActor.Abs.DomainEventEnvelope>),"
@@ -246,6 +321,43 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             s.ConstructorParameterTypes.Select(p => $"({p})scope.GetService(typeof({p}))")
         );
         return $"static scope => new {s.ImplementationType}({args})";
+    }
+
+    /// <summary>
+    /// Bridge class name per distinct event type. Names are derived from the sanitized
+    /// fully-qualified name; when two different event types sanitize to the same identifier,
+    /// all members of the colliding group get a stable FQN-derived suffix so the generated
+    /// file stays compilable (CS0101-free).
+    /// </summary>
+    private static Dictionary<string, string> BuildBridgeNames(string[] eventTypes)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var group in eventTypes.GroupBy(SanitizeIdentifier, StringComparer.Ordinal))
+        {
+            var collides = group.Count() > 1;
+            foreach (var eventType in group)
+            {
+                var sanitized = SanitizeIdentifier(eventType);
+                names[eventType] = collides
+                    ? $"PicoActorEnvelopeBridge_{sanitized}_{StableSuffix(eventType)}"
+                    : $"PicoActorEnvelopeBridge_{sanitized}";
+            }
+        }
+        return names;
+    }
+
+    /// <summary>Deterministic 8-hex-char FNV-1a suffix (never randomized, unlike string.GetHashCode).</summary>
+    private static string StableSuffix(string value)
+    {
+        const uint offsetBasis = 2166136261;
+        const uint prime = 16777619;
+        var hash = offsetBasis;
+        foreach (var c in value)
+        {
+            hash ^= c;
+            hash *= prime;
+        }
+        return hash.ToString("x8");
     }
 
     private static string SanitizeIdentifier(string value) =>

@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 /// <summary>
@@ -94,8 +92,8 @@ public sealed class ActorSystemFindAggregateIdsTests
         public ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId) =>
             _inner.PeekFirstAsync(actorId);
 
-        public IReadOnlyList<Guid> ListAggregateIds(string firstEventType) =>
-            _inner.ListAggregateIds(firstEventType);
+        public ValueTask<IReadOnlyList<Guid>> ListAggregateIdsAsync(string firstEventType) =>
+            _inner.ListAggregateIdsAsync(firstEventType);
     }
 
     /// <summary>Minimal store without IEventStoreEnumerator.</summary>

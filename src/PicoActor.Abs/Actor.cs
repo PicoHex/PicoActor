@@ -31,10 +31,23 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     /// <summary>
     /// Framework-generated UUID v7 identity.
-    /// Set by IActorSystem after construction, before SignalReady().
-    /// Immutable thereafter.
+    /// Assigned by IActorSystem via <see cref="AttachToSystem"/> after construction,
+    /// before SignalReady(). Immutable for application code thereafter.
     /// </summary>
-    public Guid Id { get; internal set; }
+    public Guid Id { get; private set; }
+
+    /// <summary>
+    /// Framework wiring (identity + owning system). Called by IActorSystem right after
+    /// construction and before <see cref="SignalReady"/>; <paramref name="system"/> is
+    /// optional so an actor can be driven manually (tests, embedded hosts).
+    /// Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void AttachToSystem(Guid id, IActorSystem? system = null)
+    {
+        Id = id;
+        System = system;
+    }
 
     /// <summary>
     /// Creation path. Constructs the actor and synchronously processes the creation command.
@@ -85,7 +98,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// Id assigned, registered in the system, and (for ES actors) replayed from events.
     /// Releases the gated consumption loop to start processing queued messages.
     /// </summary>
-    internal void SignalReady() => _ready.TrySetResult(true);
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void SignalReady() => _ready.TrySetResult(true);
 
     /// <summary>
     /// The actor's cancellation token. Canceled when StopAsync is called.
@@ -94,10 +108,10 @@ public abstract class Actor : IActor, IAsyncDisposable
     protected CancellationToken StopToken => _cts.Token;
 
     /// <summary>
-    /// Reference to the owning IActorSystem. Set by ActorSystem during CreateAsync/GetAsync.
+    /// Reference to the owning IActorSystem (set by <see cref="AttachToSystem"/>).
     /// Subclasses use this for spawn operations.
     /// </summary>
-    protected internal IActorSystem? System { get; set; }
+    protected IActorSystem? System { get; private set; }
 
     /// <summary>
     /// Outbound channel writer. External subscribers (e.g., SSE Server) set this
@@ -114,7 +128,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// TCS to propagate the exception to. Set by IActorSystem to route unhandled
     /// message errors to logging. Ask-style failures still fault the TCS first.
     /// </summary>
-    internal Action<Exception, ICommand>? UnhandledErrorHandler { get; set; }
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public Action<Exception, ICommand>? UnhandledErrorHandler { get; set; }
 
     /// <summary>
     /// Write an event to the OutputChannel. No-op if no subscriber.
@@ -127,19 +142,22 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// Task that completes when initialization finishes (OnReadyAsync succeeds or fails).
     /// Used by ActorSystem.CreateAsync to wait for persistence before returning.
     /// </summary>
-    internal Task InitCompletedTask => _initCompleted.Task;
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public Task InitCompletedTask => _initCompleted.Task;
 
     /// <summary>
     /// Marks this actor as a discarded duplicate (the loser of a concurrent rebuild).
     /// RunAsync skips OnReadyAsync — a discarded copy must not run business logic
     /// (including saga resume) or write to the event stream; it only cleans up resources.
     /// </summary>
-    internal void MarkDiscarded() => Interlocked.Exchange(ref _discarded, 1);
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void MarkDiscarded() => Interlocked.Exchange(ref _discarded, 1);
 
-    internal bool IsDiscarded => _discarded != 0;
+    private bool IsDiscarded => _discarded != 0;
 
     /// <summary>Called by IActorSystem to deliver an envelope. False = delivery failed (stopping).</summary>
-    internal bool Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
 
     private async Task RunAsync(CancellationToken ct)
     {
@@ -157,48 +175,99 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     private async Task RunCoreAsync(CancellationToken ct)
     {
-        // Gate: wait until ActorSystem calls SignalReady().
-        // This guarantees that Id is assigned, the actor is in the registry,
-        // and (for ES actors) ReplayEvents has completed before any message is dispatched.
-        // Messages posted during this wait safely queue in the Channel.
-        await _ready.Task.ConfigureAwait(false);
-
-        // Hook: flush any events produced during construction (EventSourcedActor).
-        // Base implementation is a no-op. Discarded copies skip it entirely.
-        if (!IsDiscarded)
-        {
-            try
-            {
-                await OnReadyAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _initCompleted.TrySetException(ex);
-                throw;
-            }
-        }
-        _initCompleted.TrySetResult(true);
-
+        // Any exit from this method ends message dispatch. Envelopes still buffered at
+        // that point would otherwise be abandoned with their TCS uncompleted — an Ask
+        // caller would wait forever (there is no Ask timeout by design). Fault them.
         try
         {
-            await foreach (var envelope in _mailbox.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            // Gate: wait until ActorSystem calls SignalReady().
+            // This guarantees that Id is assigned, the actor is in the registry,
+            // and (for ES actors) ReplayEvents has completed before any message is dispatched.
+            // Messages posted during this wait safely queue in the Channel.
+            await _ready.Task.ConfigureAwait(false);
+
+            // Hook: flush any events produced during construction (EventSourcedActor).
+            // Base implementation is a no-op. Discarded copies skip it entirely.
+            if (!IsDiscarded)
             {
                 try
                 {
-                    await ProcessAsync(envelope).ConfigureAwait(false);
+                    await OnReadyAsync().ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    // Propagate failure to Ask callers; single message failure does not stop the loop
-                    if (envelope.Tcs is not null)
-                        envelope.Tcs.TrySetException(ex);
-                    else
-                        UnhandledErrorHandler?.Invoke(ex, envelope.Command);
+                    _initCompleted.TrySetException(ex);
+                    throw;
                 }
             }
+            _initCompleted.TrySetResult(true);
+
+            try
+            {
+                await foreach (
+                    var envelope in _mailbox.Reader.ReadAllAsync(ct).ConfigureAwait(false)
+                )
+                {
+                    try
+                    {
+                        await ProcessAsync(envelope).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Propagate failure to Ask callers; single message failure does not stop the loop
+                        if (envelope.Tcs is not null)
+                            envelope.Tcs.TrySetException(ex);
+                        else
+                            InvokeErrorHandler(ex, envelope.Command);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            { /* expected on Stop */
+            }
         }
-        catch (OperationCanceledException)
-        { /* expected on Stop */
+        finally
+        {
+            FailPendingEnvelopes();
+        }
+    }
+
+    /// <summary>
+    /// Report a fire-and-forget failure through the error handler without letting a
+    /// throwing handler kill the consumption loop. The handler is the logging seam
+    /// (ActorSystem routes to ILogger); a failing log sink must not black-hole the actor.
+    /// </summary>
+    private void InvokeErrorHandler(Exception ex, ICommand command)
+    {
+        try
+        {
+            UnhandledErrorHandler?.Invoke(ex, command);
+        }
+        catch (Exception handlerEx)
+        {
+            // Abs has no logger dependency: report on stderr (same fallback as
+            // MediatorDomainEventPublisher) instead of rethrowing and losing the loop.
+            Console.Error.WriteLine(
+                $"[PicoActor] Error handler failed for {command.GetType().Name} on actor {Id}: {handlerEx.Message}"
+            );
+        }
+    }
+
+    /// <summary>
+    /// Fault every envelope still buffered in the mailbox. A graceful stop has already
+    /// drained the queue (messages are processed before the loop exits), so this only
+    /// fires when the loop ends early — an initialization failure, or any future
+    /// unexpected exit. Without it those Ask callers never complete.
+    /// </summary>
+    private void FailPendingEnvelopes()
+    {
+        while (_mailbox.Reader.TryRead(out var pending))
+        {
+            pending.Tcs?.TrySetException(
+                new InvalidOperationException(
+                    $"Actor {Id} stopped before processing {pending.Command.GetType().Name}."
+                )
+            );
         }
     }
 
@@ -228,7 +297,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// Synchronous and safe from any thread, including the actor's own message
     /// turn (the loop exits asynchronously — no self-await). Idempotent.
     /// </summary>
-    internal void SignalStop()
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void SignalStop()
     {
         if (Interlocked.Exchange(ref _stopped, 1) != 0)
             return;
@@ -239,7 +309,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     }
 
     /// <summary>Signal the loop to stop, wait for it to finish. The loop's finally disposes the CTS.</summary>
-    internal async ValueTask StopAsync()
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public async ValueTask StopAsync()
     {
         SignalStop();
         // A faulted loop (e.g. init failure) rethrows here — callers decide

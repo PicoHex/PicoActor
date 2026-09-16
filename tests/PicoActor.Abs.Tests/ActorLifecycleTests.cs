@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Abs.Tests;
 
 internal sealed record NoOpCommand : ICommand;
@@ -19,7 +17,7 @@ public sealed class ActorLifecycleTests
     public async Task Actor_implements_IAsyncDisposable()
     {
         var actor = new NoOpActor();
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
         await Assert.That(actor).IsAssignableTo<IAsyncDisposable>();
@@ -32,7 +30,7 @@ public sealed class ActorLifecycleTests
     public async Task StopAsync_is_idempotent()
     {
         var actor = new NoOpActor();
-        actor.Id = Guid.CreateVersion7();
+        actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
         actor.Post(new Envelope { Command = new NoOpCommand() });

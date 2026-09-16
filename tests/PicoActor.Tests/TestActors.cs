@@ -1,6 +1,3 @@
-using PicoActor.Abs;
-using ActorBase = PicoActor.Abs.Actor;
-
 namespace PicoActor.Tests;
 
 // ═══════════════════════════════════════════════════════════

@@ -1,5 +1,3 @@
-using PicoActor.Abs;
-
 namespace PicoActor.Tests;
 
 /// <summary>Store whose LoadAsync throws for a given id — simulates store flakiness during recovery (fail-fast verification).</summary>
@@ -34,8 +32,8 @@ internal sealed class ThrowingLoadStore : IEventStore, IEventStoreEnumerator
         return await _inner.PeekFirstAsync(actorId);
     }
 
-    public IReadOnlyList<Guid> ListAggregateIds(string firstEventType) =>
-        ((IEventStoreEnumerator)_inner).ListAggregateIds(firstEventType);
+    public ValueTask<IReadOnlyList<Guid>> ListAggregateIdsAsync(string firstEventType) =>
+        ((IEventStoreEnumerator)_inner).ListAggregateIdsAsync(firstEventType);
 }
 
 public sealed class ResumeInterruptedSagasTests
