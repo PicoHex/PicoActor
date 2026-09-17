@@ -185,6 +185,7 @@ OnMessageAsync → RaiseEvent(기록만, 상태 변경 없음)
 
 `AppendAsync`가 실패하면 미커밋 이벤트는 폐기되고 `Version`이
 롤백됩니다. Actor는 **오염되지 않습니다**——다음 메시지가 정상 처리됩니다.
+`Mutate`는 순수 함수여야 하며 예외를 던지면 안 됩니다. 던지면 배치는 이미 영속화되어 상태를 신뢰할 수 없으므로, actor는 **중지**되고(레지스트리에서 제거) 신뢰할 수 없는 상태로 계속 실행되지 않습니다.
 
 ### SagaActor(유한 수명 코디네이터)
 
@@ -241,6 +242,7 @@ CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
 ```
 
 비즈니스 실패: `OnMessageAsync`/`ResumeAsync` 가 예외를 던지면 → 프레임워크는 커밋되지 않은 비즈니스 이벤트를 폐기하고, `SagaFailed(reason)` 을 추가하고, 자동 중지하며, Ask 호출자에게 `SagaExecutionException(Id, Reason)` 을 전달합니다. 인프라 실패(스토어 다운)는 **종단이 아닙니다** — 이벤트는 롤백되고 saga 는 Running 상태로 유지됩니다.
+`SagaFailed` 자체의 영속화가 실패하면(스토어 계속 다운) 종단 상태가 만들어지지 않고 **원래 예외**가 호출자에게 전파됩니다.
 
 **크래시 복구:** `GetAsync` 가 이벤트를 리플레이 → 프레임워크가 `SagaCompleted`/`SagaFailed` 로부터 `Completed`/`Failed` 를 복원합니다(종단 상태인 saga 는 되살아나지 않음 — `GetAsync` 는 null 반환). 종단 이벤트가 없는 saga 에는 `ResumeAsync()` 가 호출되고, 이로써 종단에 도달하면 프레임워크가 같은 플러시 배치에 `SagaCompleted` 를 영속화합니다. 복구는 명시적 풀 방식이며 백그라운드 마법이 아닙니다.
 
@@ -276,7 +278,7 @@ var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId
 | 패턴 | 메서드 | 의미 |
 |---------|--------|-----------|
 | 요청-응답 | `AskAsync<TResult>(id, command)` | 메시지 처리 후 결과 반환 |
-| Fire-and-Forget | `Send(id, command)` | 응답 없음; 예외는 UnhandledErrorHandler로 라우팅 |
+| Fire-and-Forget | `Send(id, command)` | 응답 없음; 실패는 UnhandledErrorHandler로 라우팅(logger 없으면 stderr); actor 미등록/mailbox 닫힘(종료 경쟁) 시 예외 |
 
 ### OutputChannel
 
@@ -352,6 +354,8 @@ public sealed class PostgresEventStore : IEventStore
 
 이벤트 핸들러는 `IDomainEventSubscriber<TEvent>`를 구현하는 일반 클래스입니다——PicoActor.Gen(PicoActor.Abs에 내장)이 스캔하여 자동 등록, 수동 배선 제로. 핸들러는 소스 애그리거트 컨텍스트(`ActorId`, `Version`)를 담은 타입화된 엔벨로프와 좁은 포트 `ICommandSender`를 받습니다:
 
+handler는 class 또는 record로 선언할 수 있습니다. 접근 가능한(public/internal) 인스턴스 생성자가 없는 구현은 잘못된 등록 코드를 생성하는 대신 빌드 시 **PICA001**로 실패합니다.
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -385,7 +389,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 참고:
 - `Register<T>`는 actor 타입당 한 번만 호출해야 합니다: 중복 등록은 이전 팩터리를 조용히 교체하지 않고 예외를 던집니다.
-- `StopAsync`/`RequestStop`는 먼저 레지스트리에서 actor를 제거한 뒤 메일박스에 이미 버퍼된 메시지를 모두 처리합니다(정상 종료). 종료 후 보낸 메시지는 `KeyNotFoundException`을 던집니다.
+- `Register<T>`는 런타임이 처리할 수 없는 타입을 거부합니다: `Actor`를 상속하지 않는 구현, `EventSourcedActor`를 상속하지 않는 `IEventSourcedActor`(영속화는 구체 기반 클래스에만 연결됩니다).
+- `StopAsync`/`RequestStop`는 먼저 레지스트리에서 actor를 제거한 뒤 메일박스에 이미 버퍼된 메시지를 모두 처리합니다(정상 종료). 종료 후 보낸 메시지는 `KeyNotFoundException`을 던집니다(mailbox가 이미 닫힌 경우 `InvalidOperationException` — 종료 경쟁 구간).
 - **이벤트→명령 변환은 구독자(비즈니스 계층)의 책임**——PicoActor는 발행만;명령은 mailbox로만 actor에 진입합니다.
 - 발행은 **persist+mutate 이후**——발행 실패는 actor 상태에 영향을 주지 않습니다(이벤트는 이미 영속화됨).
 - 복구는 조용함:replay는 재발행하지 않습니다.

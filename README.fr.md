@@ -187,6 +187,7 @@ OnMessageAsync → RaiseEvent (enregistrement seul, sans changement d'état)
 Si `AppendAsync` échoue, les événements non validés sont rejetés et `Version`
 est restaurée. L'Acteur n'est **pas empoisonné** — le message suivant est
 traité normalement.
+`Mutate` doit être une fonction pure qui ne lève jamais d'exception ; sinon, le lot est déjà durable et l'acteur est **arrêté** (retiré du registre) au lieu de continuer avec un état non fiable.
 
 ### SagaActor (Coordonnateur à durée de vie finie)
 
@@ -243,6 +244,7 @@ CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
 ```
 
 Échec métier : si `OnMessageAsync`/`ResumeAsync` lève une exception, le framework rejette les événements métier non validés, ajoute `SagaFailed(reason)`, s'arrête automatiquement et retourne l'échec `SagaExecutionException(Id, Reason)` à l'appelant d'Ask. Les échecs d'infrastructure (store indisponible) ne sont **pas** terminaux — les événements sont annulés et la saga reste Running.
+Si la persistance de `SagaFailed` échoue elle aussi (store toujours indisponible), aucun état terminal n'est produit et l'exception **d'origine** est propagée à l'appelant.
 
 **Récupération après crash :** `GetAsync` rejoue les événements → le framework restaure `Completed`/`Failed` depuis `SagaCompleted`/`SagaFailed` (les sagas terminales restent mortes — `GetAsync` renvoie null). Les sagas sans événement terminal voient `ResumeAsync()` appelé ; si cela atteint l'état terminal, le framework persiste `SagaCompleted` dans le même lot. La récupération est un tirage explicite, pas de la magie en arrière-plan.
 
@@ -278,7 +280,7 @@ var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId
 | Modèle | Méthode | Sémantique |
 |---------|--------|-----------|
 | Requête-Réponse | `AskAsync<TResult>(id, command)` | Retourne le résultat après traitement du message |
-| Fire-and-Forget | `Send(id, command)` | Pas de réponse ; exceptions routées vers UnhandledErrorHandler |
+| Fire-and-Forget | `Send(id, command)` | Pas de réponse ; les échecs sont routés vers UnhandledErrorHandler (stderr sans logger) ; lève une exception pour un acteur inconnu ou une mailbox fermée (course d'arrêt) |
 
 ### OutputChannel
 
@@ -354,6 +356,8 @@ public sealed class PostgresEventStore : IEventStore
 
 Les handlers d'événements sont des classes simples qui implémentent `IDomainEventSubscriber<TEvent>` — PicoActor.Gen (intégré dans PicoActor.Abs) les scanne et les auto-enregistre ; zéro câblage manuel. Le handler reçoit une enveloppe typée portant le contexte de l'agrégat source (`ActorId`, `Version`) plus un port étroit `ICommandSender` :
 
+Les handlers peuvent être déclarés en class ou record. Une implémentation sans constructeur d'instance accessible (public/internal) échoue à la compilation avec **PICA001** au lieu de générer du code d'enregistrement cassé.
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -388,7 +392,8 @@ Les événements circulent sous forme d'enveloppes via PicoMediator après persi
 
 Notes :
 - `Register<T>` s'appelle une seule fois par type d'acteur : une seconde inscription lève désormais une exception au lieu de remplacer silencieusement la première fabrique.
-- `StopAsync`/`RequestStop` retirent d'abord l'acteur du registre puis vident les messages déjà présents dans sa mailbox (arrêt gracieux) ; les messages envoyés après échouent avec `KeyNotFoundException`.
+- `Register<T>` rejette les types que le runtime ne peut pas servir : implémentations ne dérivant pas de `Actor`, et implémentations d'`IEventSourcedActor` ne dérivant pas d'`EventSourcedActor` (la persistance n'est câblée que pour les bases concrètes).
+- `StopAsync`/`RequestStop` retirent d'abord l'acteur du registre puis vident les messages déjà présents dans sa mailbox (arrêt gracieux) ; les messages envoyés après échouent avec `KeyNotFoundException` (ou `InvalidOperationException` si la mailbox était déjà fermée — fenêtre de course d'arrêt).
 - **La traduction événement→commande est la responsabilité de l'abonné (couche métier)** — PicoActor ne fait que publier ; les commandes entrent dans les acteurs exclusivement via la mailbox.
 - La publication a lieu **après persist+mutate** — un échec de publication ne corrompt pas l'état de l'acteur (les événements sont déjà durables).
 - La récupération est silencieuse : le replay ne republie pas.

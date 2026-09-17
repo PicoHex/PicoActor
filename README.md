@@ -250,6 +250,7 @@ uncommitted business events, appends `SagaFailed(reason)`, auto-stops, and
 faults the Ask caller with `SagaExecutionException(Id, Reason)`. Infrastructure
 failures (store down) are **not** terminal — events roll back and the saga
 stays Running.
+If persisting `SagaFailed` itself fails (store still down), no terminal state is produced and the **original** exception propagates to the caller.
 
 **Crash recovery:** `GetAsync` replays events → the framework restores
 `Completed`/`Failed` from `SagaCompleted`/`SagaFailed` (terminal sagas stay
@@ -307,13 +308,14 @@ OnMessageAsync → RaiseEvent (record only, no state change)
 If `AppendAsync` fails, uncommitted events are discarded and `Version`
 is rolled back. The actor is **not poisoned** — the next message
 processes cleanly.
+`Mutate` must be a pure function that never throws; if it does, the batch is already durable and the actor is **stopped** (removed from the registry) instead of continuing with untrusted state.
 
 ### Messaging: Ask vs Send
 
 | Pattern | Method | Semantics |
 |---------|--------|-----------|
 | Request-Reply | `AskAsync<TResult>(id, command)` | Returns result after message processing |
-| Fire-and-Forget | `Send(id, command)` | No reply; exceptions routed to UnhandledErrorHandler |
+| Fire-and-Forget | `Send(id, command)` | No reply; failures routed to UnhandledErrorHandler (stderr without a logger); throws for unknown actors / closed mailbox (stop race) |
 
 ### OutputChannel
 
@@ -398,6 +400,8 @@ Event handlers are plain classes implementing `IDomainEventSubscriber<TEvent>`
 no manual wiring. The handler receives a typed envelope carrying the source
 aggregate context (`ActorId`, `Version`) plus a narrow `ICommandSender` port:
 
+Handlers may be declared as classes or records. An implementation with no accessible (public or internal) instance constructor fails the build with **PICA001** instead of emitting broken registration code.
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -462,9 +466,10 @@ Notes:
   aggregate is safe (fire-and-forget).
 - `Register<T>` must be called once per actor type: a duplicate registration
   now throws instead of silently replacing the first factory.
+- `Register<T>` rejects types the runtime cannot serve: a non-`Actor` implementation, or an `IEventSourcedActor` that does not derive from `EventSourcedActor` (persistence is wired for the concrete bases only).
 - `StopAsync`/`RequestStop` remove the actor from the registry first, then drain
   the messages already buffered in its mailbox (graceful stop); messages sent
-  after the stop fail with `KeyNotFoundException`.
+  after the stop fail with `KeyNotFoundException` (or `InvalidOperationException` when the mailbox was already closed — the stop-race window).
 
 ---
 

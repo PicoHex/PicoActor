@@ -185,6 +185,7 @@ OnMessageAsync → RaiseEvent（記録のみ、状態変更なし）
 
 `AppendAsync` が失敗した場合、未コミットイベントは破棄され `Version` が
 ロールバックされます。Actor は**毒化されません**——次のメッセージは正常に処理されます。
+`Mutate` は純粋関数であり、例外を投げてはいけません。投げた場合、バッチは既に永続化済みで状態は信頼できないため、actor は**停止**されます(レジストリから削除)。
 
 ### SagaActor（有限ライフタイムのコーディネーター）
 
@@ -241,6 +242,7 @@ CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
 ```
 
 ビジネス失敗：`OnMessageAsync`/`ResumeAsync` がスロー → フレームワークは未コミットのビジネスイベントを破棄し、`SagaFailed(reason)` をアペンドして自動停止し、Ask 呼び出し元に `SagaExecutionException(Id, Reason)` をフォールトとして返します。インフラ障害（ストア停止）は**終端ではありません** —— イベントはロールバックされ、saga は Running のままです。
+`SagaFailed` 自体の永続化が失敗した場合(ストア停止継続)は終端状態は作られず、**元の例外**が呼び出し元に伝播します。
 
 **クラッシュリカバリ：** `GetAsync` がイベントをリプレイ → フレームワークが `SagaCompleted`/`SagaFailed` から `Completed`/`Failed` を復元します（終端済みの saga は決して復活しません —— `GetAsync` は null を返します）。終端イベントのない saga には `ResumeAsync()` が呼ばれ、そこで終端に達すればフレームワークが同一フラッシュバッチで `SagaCompleted` を永続化します。リカバリは明示的なプルであり、バックグラウンドの魔法ではありません。
 
@@ -276,7 +278,7 @@ var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId
 | パターン | メソッド | 意味 |
 |---------|--------|-----------|
 | リクエスト-リプライ | `AskAsync<TResult>(id, command)` | メッセージ処理後に結果を返す |
-| Fire-and-Forget | `Send(id, command)` | 返信なし；例外は UnhandledErrorHandler にルーティング |
+| Fire-and-Forget | `Send(id, command)` | 返信なし；失敗は UnhandledErrorHandler にルーティング(logger 未設定時は stderr);actor 不在 / mailbox クローズ済み(停止競合)では例外 |
 
 ### OutputChannel
 
@@ -352,6 +354,8 @@ public sealed class PostgresEventStore : IEventStore
 
 イベントハンドラーは `IDomainEventSubscriber<TEvent>` を実装するプレーンなクラスです——PicoActor.Gen(PicoActor.Abs に内蔵)がスキャンして自動登録、手動配線ゼロ。ハンドラーはソース集約コンテキスト(`ActorId`、`Version`)を運ぶ型付きエンベロープと、狭いポート `ICommandSender` を受け取ります:
 
+ハンドラーは class でも record でも宣言できます。アクセス可能(public/internal)なインスタンスコンストラクターを持たない実装は、壊れた登録コードを生成する代わりにビルド時に **PICA001** で失敗します。
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -385,7 +389,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 注意:
 - `Register<T>` は actor 型ごとに 1 回だけ呼び出します:重複登録は最初のファクトリを黙って置き換えず、例外をスローします。
-- `StopAsync`/`RequestStop` はまずレジストリから actor を削除し、その後メールボックスに既にバッファされたメッセージを排出します(グレースフル停止)。停止後に送信したメッセージは `KeyNotFoundException` になります。
+- `Register<T>` はランタイムが扱えない型を拒否します:`Actor` を継承しない実装、および `EventSourcedActor` を継承しない `IEventSourcedActor`(永続化は具象基底クラスにのみ配線されます)。
+- `StopAsync`/`RequestStop` はまずレジストリから actor を削除し、その後メールボックスに既にバッファされたメッセージを排出します(グレースフル停止)。停止後に送信したメッセージは `KeyNotFoundException` になります(mailbox が既にクローズ済みの場合は `InvalidOperationException`——停止競合ウィンドウ)。
 - **イベント→コマンド変換はサブスクライバ(業務層)の責務**——PicoActor は公開のみ;コマンドは mailbox 経由でのみ actor に入ります。
 - 公開は **persist+mutate の後**——公開失敗は actor 状態に影響しません(イベントは永続化済み)。
 - リカバリは静粛:replay は再公開しません。

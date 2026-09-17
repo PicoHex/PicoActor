@@ -187,6 +187,7 @@ OnMessageAsync → RaiseEvent (apenas registro, sem mudança de estado)
 Se `AppendAsync` falhar, os eventos não confirmados são descartados e
 `Version` é revertida. O Ator **não é envenenado** — a próxima mensagem
 é processada normalmente.
+`Mutate` deve ser uma função pura que nunca lança; se lançar, o lote já está durável e o ator é **parado** (removido do registro) em vez de continuar com estado não confiável.
 
 ### SagaActor (Coordenador de vida finita)
 
@@ -243,6 +244,7 @@ CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
 ```
 
 Falha de negócio: `OnMessageAsync`/`ResumeAsync` lança exceção → o framework descarta os eventos de negócio não commitados, acrescenta `SagaFailed(reason)`, para automaticamente e retorna a falha `SagaExecutionException(Id, Reason)` ao chamador do Ask. Falhas de infraestrutura (store fora do ar) **não** são terminais — os eventos revertem e a saga permanece Running.
+Se o próprio `SagaFailed` não puder ser persistido (store ainda fora), nenhum estado terminal é produzido e a exceção **original** é propagada ao chamador.
 
 **Recuperação de falhas:** `GetAsync` repete os eventos → o framework restaura `Completed`/`Failed` a partir de `SagaCompleted`/`SagaFailed` (sagas terminais permanecem mortas — `GetAsync` retorna null). Sagas sem evento terminal recebem a chamada de `ResumeAsync()` e, se isso atingir o estado terminal, o framework persiste `SagaCompleted` no mesmo lote. A recuperação é pull explícito, não mágica em segundo plano.
 
@@ -278,7 +280,7 @@ var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId
 | Padrão | Método | Semântica |
 |---------|--------|-----------|
 | Requisição-Resposta | `AskAsync<TResult>(id, command)` | Retorna resultado após processamento da mensagem |
-| Dispara-e-Esquece | `Send(id, command)` | Sem resposta; exceções roteadas para UnhandledErrorHandler |
+| Dispara-e-Esquece | `Send(id, command)` | Sem resposta; falhas são roteadas para UnhandledErrorHandler (stderr sem logger); lança para ator inexistente ou mailbox fechada (corrida de parada) |
 
 ### OutputChannel
 
@@ -354,6 +356,8 @@ public sealed class PostgresEventStore : IEventStore
 
 Handlers de eventos são classes simples que implementam `IDomainEventSubscriber<TEvent>` — o PicoActor.Gen (integrado no PicoActor.Abs) os escaneia e auto-registra; zero fiação manual. O handler recebe um envelope tipado com o contexto do agregado fonte (`ActorId`, `Version`) mais uma porta estreita `ICommandSender`:
 
+Handlers podem ser declarados como class ou record. Uma implementação sem construtor de instância acessível (public/internal) falha na compilação com **PICA001** em vez de gerar código de registro quebrado.
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -388,7 +392,8 @@ Os eventos fluem como envelopes através do PicoMediator após persist+mutate; o
 
 Notas:
 - `Register<T>` deve ser chamado uma única vez por tipo de ator: uma segunda chamada lança exceção em vez de substituir silenciosamente a primeira fábrica.
-- `StopAsync`/`RequestStop` removem primeiro o ator do registro e depois drenam as mensagens já presentes na mailbox (parada graciosa); mensagens enviadas após a parada falham com `KeyNotFoundException`.
+- `Register<T>` rejeita tipos que o runtime não consegue servir: implementações que não derivam de `Actor` e implementações de `IEventSourcedActor` que não derivam de `EventSourcedActor` (a persistência só é ligada para as bases concretas).
+- `StopAsync`/`RequestStop` removem primeiro o ator do registro e depois drenam as mensagens já presentes na mailbox (parada graciosa); mensagens enviadas após a parada falham com `KeyNotFoundException` (ou `InvalidOperationException` se a mailbox já estava fechada — janela de corrida de parada).
 - **A tradução evento→comando é responsabilidade do assinante (camada de negócios)** — o PicoActor apenas publica; comandos entram nos atores exclusivamente via mailbox.
 - A publicação ocorre **após persist+mutate** — uma falha de publicação não corrompe o estado do ator (os eventos já são duráveis).
 - A recuperação é silenciosa: o replay não republica.

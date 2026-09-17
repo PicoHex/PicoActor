@@ -187,6 +187,7 @@ OnMessageAsync → RaiseEvent (nur Aufzeichnung, keine Zustandsänderung)
 Schlägt `AppendAsync` fehl, werden nicht-committete Ereignisse verworfen und
 `Version` wird zurückgesetzt. Der Actor wird **nicht vergiftet** — die nächste
 Nachricht wird normal verarbeitet.
+`Mutate` muss eine reine Funktion sein und darf nie werfen; wenn doch, ist der Batch bereits dauerhaft und der Actor wird **gestoppt** (aus der Registry entfernt), statt mit nicht vertrauenswürdigem Zustand weiterzulaufen.
 
 ### SagaActor (Koordinator mit endlicher Lebensdauer)
 
@@ -243,6 +244,7 @@ CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
 ```
 
 Geschäftlicher Fehler: Wirft `OnMessageAsync`/`ResumeAsync`, verwirft das Framework uncommittete Geschäftsereignisse, hängt `SagaFailed(reason)` an, stoppt selbsttätig und lässt den Ask-Aufrufer mit `SagaExecutionException(Id, Reason)` fehlschlagen. Infrastrukturfehler (Store nicht erreichbar) sind **kein** Terminalzustand — Ereignisse werden zurückgerollt, die Saga bleibt Running.
+Schlägt das Persistieren von `SagaFailed` selbst fehl (Store weiterhin down), entsteht kein Terminalzustand und die **ursprüngliche** Ausnahme wird an den Aufrufer weitergegeben.
 
 **Crash-Wiederherstellung:** `GetAsync` spielt Ereignisse erneut ab → das Framework stellt `Completed`/`Failed` aus `SagaCompleted`/`SagaFailed` wieder her (terminale Sagas bleiben tot — `GetAsync` gibt null zurück). Sagas ohne Terminal-Ereignis erhalten einen `ResumeAsync()`-Aufruf; erreicht dies den Terminalzustand, persistiert das Framework `SagaCompleted` im selben Flush-Batch. Wiederherstellung ist explizites Pullen, keine Hintergrundmagie.
 
@@ -278,7 +280,7 @@ var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId
 | Muster | Methode | Semantik |
 |---------|--------|-----------|
 | Request-Reply | `AskAsync<TResult>(id, command)` | Gibt Ergebnis nach Nachrichtenverarbeitung zurück |
-| Fire-and-Forget | `Send(id, command)` | Keine Antwort; Ausnahmen werden an UnhandledErrorHandler geroutet |
+| Fire-and-Forget | `Send(id, command)` | Keine Antwort; Fehler werden an UnhandledErrorHandler geroutet (ohne Logger nach stderr); wirft bei unbekanntem Actor / geschlossener Mailbox (Stop-Race) |
 
 ### OutputChannel
 
@@ -354,6 +356,8 @@ public sealed class PostgresEventStore : IEventStore
 
 Event-Handler sind einfache Klassen, die `IDomainEventSubscriber<TEvent>` implementieren — PicoActor.Gen (in PicoActor.Abs eingebettet) scannt und auto-registriert sie; null manuelle Verdrahtung. Der Handler erhält einen typisierten Envelope mit dem Kontext des Quell-Aggregats (`ActorId`, `Version`) plus einen schmalen `ICommandSender`-Port:
 
+Handler können als class oder record deklariert werden. Eine Implementierung ohne zugänglichen (public/internal) Instanzkonstruktor schlägt beim Build mit **PICA001** fehl, statt fehlerhaften Registrierungscode zu erzeugen.
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -388,7 +392,8 @@ Events fließen nach persist+mutate als Envelopes durch PicoMediator; Replay ver
 
 Hinweise:
 - `Register<T>` wird genau einmal pro Actor-Typ aufgerufen: eine zweite Registrierung wirft jetzt eine Ausnahme, statt die erste Factory still zu ersetzen.
-- `StopAsync`/`RequestStop` entfernen den Actor zuerst aus der Registry und arbeiten dann die bereits in der Mailbox gepufferten Nachrichten ab (graceful stop); danach gesendete Nachrichten schlagen mit `KeyNotFoundException` fehl.
+- `Register<T>` lehnt Typen ab, die die Laufzeit nicht bedienen kann: Implementierungen ohne Ableitung von `Actor` sowie `IEventSourcedActor`-Implementierungen ohne Ableitung von `EventSourcedActor` (Persistenz wird nur für die konkreten Basen verdrahtet).
+- `StopAsync`/`RequestStop` entfernen den Actor zuerst aus der Registry und arbeiten dann die bereits in der Mailbox gepufferten Nachrichten ab (graceful stop); danach gesendete Nachrichten schlagen mit `KeyNotFoundException` fehl (bei bereits geschlossener Mailbox mit `InvalidOperationException` — Stop-Race-Fenster).
 - **Event→Command-Übersetzung ist Aufgabe des Subscribers (Geschäftsebene)** — PicoActor veröffentlicht nur; Commands gelangen ausschließlich über die Mailbox in Actor.
 - Veröffentlichung erfolgt **nach persist+mutate** — ein fehlgeschlagener Publish beeinträchtigt den Actor-Zustand nicht (Events sind bereits dauerhaft).
 - Wiederherstellung ist still: Replay veröffentlicht nicht erneut.

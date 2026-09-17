@@ -183,6 +183,7 @@ OnMessageAsync → RaiseEvent（仅记录，不改变状态）
 
 若 `AppendAsync` 失败，未提交的事件被丢弃，`Version` 回滚。
 Actor **不会被毒化**——下一条消息正常处理。
+`Mutate` 必须是纯函数且不得抛异常;一旦抛出,批次已落盘、状态不可信——actor 会被**停止**(移出 registry),而不是带着不可信状态继续运行。
 
 ### SagaActor（有限生命周期协调器）
 
@@ -239,6 +240,7 @@ CreateAsync(cmd) → mailbox processes cmd → MarkComplete(result)
 ```
 
 业务失败：`OnMessageAsync`/`ResumeAsync` 抛出异常 → 框架丢弃未提交的业务事件、追加 `SagaFailed(reason)`、自动停止，并以 `SagaExecutionException(Id, Reason)` 使 Ask 调用方收到故障。基础设施失败（存储不可用）**不是**终态——事件回滚，saga 保持 Running。
+若 `SagaFailed` 本身落盘失败(store 仍不可用),则不产生终态,向调用方传播**原始异常**。
 
 **崩溃恢复：** `GetAsync` 重放事件 → 框架从 `SagaCompleted`/`SagaFailed` 恢复 `Completed`/`Failed`（已终态的 saga 保持死亡——`GetAsync` 返回 null）。没有终态事件的 saga 会收到 `ResumeAsync()` 调用；若因此到达终态，框架在同一 flush 批次中持久化 `SagaCompleted`。恢复是显式拉取，没有后台魔法。
 
@@ -274,7 +276,7 @@ var execution = await system.ExecuteSaga<OrderSaga, Guid>(new PlaceOrder(orderId
 | 模式 | 方法 | 语义 |
 |---------|--------|-----------|
 | 请求-回复 | `AskAsync<TResult>(id, command)` | 消息处理后返回结果 |
-| 发后不理 | `Send(id, command)` | 无回复；异常路由到 UnhandledErrorHandler |
+| 发后不理 | `Send(id, command)` | 无回复；失败路由到 UnhandledErrorHandler(无 logger 时写 stderr)；actor 不存在或 mailbox 已关闭(停机竞态)时抛异常 |
 
 ### OutputChannel
 
@@ -350,6 +352,8 @@ public sealed class PostgresEventStore : IEventStore
 
 事件处理器是实现 `IDomainEventSubscriber<TEvent>` 的普通类——PicoActor.Gen(内嵌于 PicoActor.Abs)扫描并自动注册,零手动接线。处理器收到携带源聚合上下文(`ActorId`、`Version`)的类型化信封,外加窄端口 `ICommandSender`:
 
+handler 可以是 class 或 record;无可访问(public/internal)实例构造函数的实现会在构建期以 **PICA001** 报错,而不是生成不可编译的注册代码。
+
 ```csharp
 public sealed class OrderPaidHandler : IDomainEventSubscriber<OrderPaid>
 {
@@ -382,7 +386,8 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 
 注意:
 - `Register<T>` 每个 actor 类型只能调用一次:重复注册现在会抛异常,而不是静默替换先前的工厂。
-- `StopAsync`/`RequestStop` 先从注册表移除 actor,再排空 mailbox 中已缓冲的消息(优雅停机);停机之后发送的消息会抛 `KeyNotFoundException`。
+- `Register<T>` 会拒绝运行时无法服务的类型:不派生自 `Actor` 的实现,以及不派生自 `EventSourcedActor` 的 `IEventSourcedActor`(持久化只为具体基类接线)。
+- `StopAsync`/`RequestStop` 先从注册表移除 actor,再排空 mailbox 中已缓冲的消息(优雅停机);停机之后发送的消息会抛 `KeyNotFoundException`(若 mailbox 已关闭则为 `InvalidOperationException`——停机竞态窗口)。
 - **事件→命令翻译是订阅者(业务层)职责**——PicoActor 只发布;命令只能经 mailbox 进入 actor。
 - 发布发生在 **persist+mutate 之后**——发布失败不影响 actor 状态(事件已落盘)。
 - 恢复静默:replay 不重复发布。

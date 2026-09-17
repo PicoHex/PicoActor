@@ -4,8 +4,8 @@ TUnit test suites for PicoActor.
 
 | Project | Coverage |
 |---------|----------|
-| [PicoActor.Abs.Tests](PicoActor.Abs.Tests) | `Actor` exception propagation, `UnhandledErrorHandler` hook |
-| [PicoActor.Tests](PicoActor.Tests) | `ActorSystem` concurrency, `GetAsync` race, `EventSourcedActor` recovery, append failure rollback |
+| [PicoActor.Abs.Tests](PicoActor.Abs.Tests) | `Actor` exception propagation, `UnhandledErrorHandler` hook, generator shapes (records, PICA001 diagnostics) |
+| [PicoActor.Tests](PicoActor.Tests) | `ActorSystem` concurrency, `GetAsync` race, registration validation, `EventSourcedActor` recovery, append failure rollback, fatal `Mutate`, saga failure classification (business vs infrastructure), `Send` failure diagnostics |
 
 ## Run
 
