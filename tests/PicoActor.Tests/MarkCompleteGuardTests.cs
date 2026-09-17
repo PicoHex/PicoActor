@@ -157,17 +157,29 @@ public sealed class MarkCompleteGuardTests
         var saga = await system.CreateAsync<PendingProbeSaga>(new PendingStart());
         await system.AskAsync<object?>(saga.Id, new PendingStart()); // append #1 OK
 
-        // append #2 fails: the whole [PendingStep2 + SagaCompleted] batch is dropped,
-        // pending is cleared → FailAsync's SagaFailed flush must not carry a stale SagaCompleted
+        // append #2 fails: the whole [PendingStep2 + SagaCompleted] batch is dropped and
+        // pending is cleared. Infrastructure failure = NON-terminal (spec §2.6/§7.1):
+        // the original store exception propagates and the saga stays Running.
         await Assert
             .That(async () => await system.AskAsync<string>(saga.Id, new PendingFinish()))
-            .Throws<SagaExecutionException>();
+            .Throws<IOException>();
 
+        // A later flush must not carry a stale pending completion: a neutral command
+        // (no events, no MarkComplete) triggers no append at all.
+        await system.AskAsync<object?>(saga.Id, new GetSagaStep());
+        var afterNeutral = await store.LoadAsync(saga.Id);
+        await Assert.That(afterNeutral.Count).IsEqualTo(1);
+        await Assert.That(afterNeutral[0]).IsTypeOf<PendingStep1>();
+        await Assert.That(saga.IsCompleted).IsFalse();
+
+        // Retry after the store recovers: exactly one SagaCompleted is appended.
+        await system.AskAsync<string>(saga.Id, new PendingFinish());
         var events = await store.LoadAsync(saga.Id);
-        await Assert.That(events.Count).IsEqualTo(2);
+        await Assert.That(events.Count).IsEqualTo(3);
         await Assert.That(events[0]).IsTypeOf<PendingStep1>();
-        await Assert.That(events[1]).IsTypeOf<SagaFailed>();
-        await Assert.That(events.OfType<SagaCompleted>().Count()).IsEqualTo(0);
+        await Assert.That(events[1]).IsTypeOf<PendingStep2>();
+        await Assert.That(events[2]).IsTypeOf<SagaCompleted>();
+        await Assert.That(events.OfType<SagaCompleted>().Count()).IsEqualTo(1);
     }
 
     // ═══════════════════════════════════════════════════════════

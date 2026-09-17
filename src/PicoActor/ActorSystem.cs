@@ -37,6 +37,27 @@ public sealed class ActorSystem : IActorSystem
     {
         ArgumentNullException.ThrowIfNull(createFactory);
 
+        // Composition-root validation: the runtime owns the mailbox/lifecycle and only
+        // wires event-store persistence for Actor / EventSourcedActor. Reject shapes it
+        // cannot serve BEFORE anything is built — otherwise a hand-rolled IEventSourcedActor
+        // would silently never persist, and a non-Actor implementation would fail later
+        // with a bare InvalidCastException that hides the real contract.
+        if (!typeof(ActorBase).IsAssignableFrom(typeof(T)))
+            throw new InvalidOperationException(
+                $"{typeof(T).Name} implements IActor but does not derive from Actor; "
+                    + "actor types must derive from Actor (the runtime owns the mailbox and lifecycle)."
+            );
+
+        if (
+            typeof(IEventSourcedActor).IsAssignableFrom(typeof(T))
+            && !typeof(EventSourcedActor).IsAssignableFrom(typeof(T))
+        )
+            throw new InvalidOperationException(
+                $"{typeof(T).Name} implements IEventSourcedActor but does not derive from "
+                    + "EventSourcedActor; the runtime only wires event-store persistence for "
+                    + "EventSourcedActor — a hand-rolled implementation would silently never persist."
+            );
+
         // TryAdd, not assignment: a duplicate registration is a startup bug, and silently
         // replacing the first factory would hide it. Atomic — concurrent Register calls
         // for the same type cannot both win.
@@ -244,14 +265,24 @@ public sealed class ActorSystem : IActorSystem
     /// <summary>
     /// Route unhandled fire-and-forget message errors to the logger so they are
     /// not silently swallowed. Ask-style failures still fault their TCS.
+    /// Without a logger the diagnostic still goes to stderr — consistent with
+    /// <see cref="MediatorDomainEventPublisher"/>'s no-logger fallback: a lost
+    /// command must not vanish without a trace.
     /// </summary>
     private void WireErrorHandler(ActorBase actor)
     {
-        if (_logger is null)
+        if (_logger is not null)
+        {
+            actor.UnhandledErrorHandler = (ex, cmd) =>
+                _logger.Error(
+                    $"Unhandled error in actor {actor.Id} on {cmd.GetType().Name}: {ex.Message}"
+                );
             return;
+        }
+
         actor.UnhandledErrorHandler = (ex, cmd) =>
-            _logger.Error(
-                $"Unhandled error in actor {actor.Id} on {cmd.GetType().Name}: {ex.Message}"
+            Console.Error.WriteLine(
+                $"[PicoActor] Unhandled error in actor {actor.Id} on {cmd.GetType().Name}: {ex.Message}"
             );
     }
 
@@ -265,7 +296,12 @@ public sealed class ActorSystem : IActorSystem
         if (!_registry.TryGetValue(id, out var actor))
             throw new KeyNotFoundException($"Actor {id} not found.");
 
-        actor.Post(new Envelope { Command = command });
+        // A closed mailbox means the actor is stopping but not yet removed from the
+        // registry (stop-race window). Fail loud — a silently dropped command is worse.
+        if (!actor.Post(new Envelope { Command = command }))
+            throw new InvalidOperationException(
+                $"Actor {id} is stopping; the command was not delivered."
+            );
     }
 
     /// <inheritdoc/>

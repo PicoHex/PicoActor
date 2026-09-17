@@ -10,12 +10,26 @@ namespace PicoActor.Gen;
 [Generator(LanguageNames.CSharp)]
 public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 {
+    /// <summary>
+    /// A subscriber declaration that cannot be constructed (no accessible instance
+    /// constructor) must fail loudly at build time — emitting `new T()` for it would
+    /// surface as CS0122/CS7036 inside generated code with no hint about the cause.
+    /// </summary>
+    private static readonly DiagnosticDescriptor UnregistrableSubscriber = new(
+        id: "PICA001",
+        title: "Domain-event subscriber is not registrable",
+        messageFormat: "IDomainEventSubscriber implementation '{0}' has no accessible (public or internal) instance constructor and cannot be registered; declare one or remove the implementation",
+        category: "PicoActor.Gen",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true
+    );
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         var subscriberDeclarations = context
             .SyntaxProvider.CreateSyntaxProvider(
                 predicate: static (node, _) =>
-                    node is ClassDeclarationSyntax c && c.BaseList?.Types.Count > 0,
+                    node is TypeDeclarationSyntax t && t.BaseList?.Types.Count > 0,
                 transform: static (ctx, ct) => GetSubscriberInfos(ctx, ct)
             )
             .Where(static x => x.Length > 0)
@@ -47,22 +61,28 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         public SubscriberInfo(
             string eventTypeFqn,
             string implementationType,
-            ImmutableArray<string> constructorParameterTypes
+            ImmutableArray<string> constructorParameterTypes,
+            bool hasAccessibleConstructor
         )
         {
             EventTypeFqn = eventTypeFqn;
             ImplementationType = implementationType;
             ConstructorParameterTypes = constructorParameterTypes;
+            HasAccessibleConstructor = hasAccessibleConstructor;
         }
 
         public string EventTypeFqn { get; }
         public string ImplementationType { get; }
         public ImmutableArray<string> ConstructorParameterTypes { get; }
 
+        /// <summary>False → the declaration cannot be instantiated by generated code (PICA001).</summary>
+        public bool HasAccessibleConstructor { get; }
+
         /// <summary>Structural comparison over the fields that affect generated code.</summary>
         public bool HasSameShapeAs(SubscriberInfo other) =>
             string.Equals(EventTypeFqn, other.EventTypeFqn, StringComparison.Ordinal)
             && string.Equals(ImplementationType, other.ImplementationType, StringComparison.Ordinal)
+            && HasAccessibleConstructor == other.HasAccessibleConstructor
             && ConstructorParameterTypes.SequenceEqual(
                 other.ConstructorParameterTypes,
                 StringComparer.Ordinal
@@ -77,6 +97,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(EventTypeFqn);
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(ImplementationType);
                 hash = (hash * 31) + ConstructorParameterTypes.Length;
+                hash = (hash * 31) + (HasAccessibleConstructor ? 1 : 0);
                 return hash;
             }
         }
@@ -118,10 +139,10 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         CancellationToken ct
     )
     {
-        if (ctx.Node is not ClassDeclarationSyntax classDecl)
+        if (ctx.Node is not TypeDeclarationSyntax typeDecl)
             return [];
 
-        var typeSymbol = ctx.SemanticModel.GetDeclaredSymbol(classDecl, ct) as INamedTypeSymbol;
+        var typeSymbol = ctx.SemanticModel.GetDeclaredSymbol(typeDecl, ct) as INamedTypeSymbol;
         var accessibility = typeSymbol?.DeclaredAccessibility;
         if (
             typeSymbol is null
@@ -145,7 +166,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
             var ctor = typeSymbol
                 .InstanceConstructors.Where(c =>
-                    c.DeclaredAccessibility == Accessibility.Public && !c.IsStatic
+                    !c.IsStatic
+                    && c.DeclaredAccessibility is Accessibility.Public or Accessibility.Internal
                 )
                 // Greediest constructor (DI convention, mirrors PicoDI): a parameterless
                 // ctor declared first must not win over the injectable one.
@@ -165,7 +187,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                         .TypeArguments[0]
                         .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                     typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                    ctorParams
+                    ctorParams,
+                    ctor is not null
                 )
             );
         }
@@ -182,11 +205,32 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         if (subscribers.IsDefaultOrEmpty)
             return;
 
+        // Unregistrable shapes (no accessible instance constructor) get a loud build-time
+        // diagnostic instead of an uncompilable `new T()` factory in consumer builds.
+        var registrable = ImmutableArray.CreateBuilder<SubscriberInfo>(subscribers.Length);
+        foreach (var s in subscribers)
+        {
+            if (s.HasAccessibleConstructor)
+            {
+                registrable.Add(s);
+                continue;
+            }
+
+            context.ReportDiagnostic(
+                Diagnostic.Create(UnregistrableSubscriber, Location.None, s.ImplementationType)
+            );
+        }
+
+        if (registrable.Count == 0)
+            return;
+
+        var usable = registrable.ToImmutable();
+
         var safeAssemblyName = SanitizeIdentifier(assemblyName);
         var className = $"PicoActorSubscriberRegistrations_{safeAssemblyName}";
         var configuratorId = $"pico-actor::{assemblyName}";
 
-        var distinctEventTypes = subscribers
+        var distinctEventTypes = usable
             .Select(static s => s.EventTypeFqn)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static x => x, StringComparer.Ordinal)
@@ -282,7 +326,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             "    internal static void ConfigureGeneratedHandlers(global::PicoDI.Abs.ISvcContainer container)"
         );
         sb.AppendLine("    {");
-        foreach (var s in subscribers)
+        foreach (var s in usable)
         {
             sb.AppendLine("        container.Register(global::PicoDI.Abs.SvcDescriptor.Create(");
             sb.AppendLine(

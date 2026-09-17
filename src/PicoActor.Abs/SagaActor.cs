@@ -122,10 +122,19 @@ public abstract class SagaActor : EventSourcedActor
             }
             catch (Exception ex)
             {
-                // Business failure on the recovery path = terminal: record SagaFailed,
-                // do not throw (if persisting SagaFailed itself fails, it throws here
-                // and is handled by GetAsync's init-failure cleanup path)
-                await FailAsync(ex).ConfigureAwait(false);
+                // Business failure on the recovery path = terminal: record SagaFailed.
+                try
+                {
+                    await FailAsync(ex).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // SagaFailed itself could not be persisted (store down): no terminal
+                    // state, and spec §5.2 requires the ORIGINAL exception to propagate
+                    // (GetAsync's init-failure cleanup handles the rest).
+                    ExceptionDispatchInfo.Capture(ex).Throw();
+                    throw; // unreachable — keeps flow analysis explicit
+                }
             }
             finally
             {
@@ -156,26 +165,48 @@ public abstract class SagaActor : EventSourcedActor
         }
 
         _inCommandContext = true;
+        object? result;
         try
         {
-            await base.ProcessAsync(envelope).ConfigureAwait(false);
+            // Dispatch ONLY — this is the business boundary. A persistence failure from
+            // FlushEventsAsync below is an INFRASTRUCTURE failure (spec §2.6/§7.1): the
+            // batch rolls back, the saga stays Running, and the original exception propagates.
+            // Routing it into FailAsync would make a transient store failure a permanent
+            // terminal state (the regression this shape prevents).
+            result = await OnMessageAsync(envelope.Command).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            // Business failure → terminal. If persisting SagaFailed fails (store down),
-            // the original exception is thrown here and RunAsync faults the TCS with it —
-            // consistent with the "infrastructure failure is not terminal" semantics.
-            await FailAsync(ex).ConfigureAwait(false);
+            try
+            {
+                await FailAsync(ex).ConfigureAwait(false);
+            }
+            catch
+            {
+                // SagaFailed itself could not be persisted (store down): no terminal state,
+                // and spec §5.2 requires the ORIGINAL exception to propagate.
+                ExceptionDispatchInfo.Capture(ex).Throw();
+                throw; // unreachable — keeps flow analysis explicit
+            }
+
             var failure = new SagaExecutionException(Id, MakeReason(ex));
             if (envelope.Tcs is not null)
                 envelope.Tcs.TrySetException(failure);
             else
                 UnhandledErrorHandler?.Invoke(failure, envelope.Command);
+            ScheduleStop();
+            return;
         }
         finally
         {
             _inCommandContext = false;
         }
+
+        // Infrastructure failures propagate from here (non-terminal).
+        await FlushEventsAsync().ConfigureAwait(false);
+
+        // Reply only after successful persistence (same contract as EventSourcedActor).
+        envelope.Tcs?.TrySetResult(result);
 
         if (_completed || _failed)
             ScheduleStop();
@@ -195,7 +226,9 @@ public abstract class SagaActor : EventSourcedActor
         _pendingResult = null;
 
         RaiseEvent(new SagaFailed(reason));
-        await FlushEventsAsync().ConfigureAwait(false); // May throw (store down) → propagate the original exception
+        // May throw (store down) — ProcessAsync's catch converts that into "no terminal
+        // state + propagate the ORIGINAL business exception" (spec §5.2).
+        await FlushEventsAsync().ConfigureAwait(false);
     }
 
     private static string MakeReason(Exception ex)

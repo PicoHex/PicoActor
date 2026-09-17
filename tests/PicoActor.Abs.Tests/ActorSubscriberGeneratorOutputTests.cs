@@ -327,4 +327,95 @@ public sealed class ActorSubscriberGeneratorOutputTests
         // with an actionable message instead of passing null into the handler.
         await Assert.That(source).Contains("ICommandSender is not registered");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // Declaration-shape coverage: records are first-class handlers, and
+    // unregistrable shapes must produce a diagnostic instead of broken code
+    // ═══════════════════════════════════════════════════════════
+
+    private const string RecordSubscriberSource = """
+        using PicoActor.Abs;
+        using PicoMediator.Abs;
+        using System.Threading;
+
+        public record Paid(int Id) : IDomainEvent;
+
+        public sealed record PaidHandler : IDomainEventSubscriber<Paid>
+        {
+            public ValueTask Handle(DomainEventEnvelope<Paid> envelope, ICommandSender sender, CancellationToken ct)
+                => ValueTask.CompletedTask;
+        }
+        """;
+
+    [Test]
+    public async Task RecordSubscriber_IsDiscovered()
+    {
+        var driver = RunGenerator("App", RecordSubscriberSource);
+        var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations");
+
+        await Assert.That(source).IsNotNull();
+        await Assert.That(source!).Contains("IDomainEventSubscriber<global::Paid>");
+        await Assert.That(source!).Contains("new global::PaidHandler()");
+    }
+
+    private const string PrivateCtorSubscriberSource = """
+        using PicoActor.Abs;
+        using PicoMediator.Abs;
+        using System.Threading;
+
+        public record Paid(int Id) : IDomainEvent;
+
+        public sealed class PrivateCtorHandler : IDomainEventSubscriber<Paid>
+        {
+            private PrivateCtorHandler() { }
+
+            public ValueTask Handle(DomainEventEnvelope<Paid> envelope, ICommandSender sender, CancellationToken ct)
+                => ValueTask.CompletedTask;
+        }
+        """;
+
+    [Test]
+    public async Task PrivateCtorSubscriber_ReportsDiagnostic_AndIsNotRegistered()
+    {
+        var driver = RunGenerator("App", PrivateCtorSubscriberSource);
+        var result = driver.GetRunResult();
+
+        // PICA001 instead of emitting `new PrivateCtorHandler()` (CS0122 in consumer builds)
+        await Assert.That(result.Diagnostics.Any(d => d.Id == "PICA001")).IsTrue();
+
+        var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations");
+        await Assert.That(source is null || !source.Contains("PrivateCtorHandler")).IsTrue();
+    }
+
+    private const string InternalCtorSubscriberSource = """
+        using PicoActor.Abs;
+        using PicoMediator.Abs;
+        using System.Threading;
+
+        public interface IMyDep { }
+
+        public record Paid(int Id) : IDomainEvent;
+
+        public sealed class InternalDepCtorHandler : IDomainEventSubscriber<Paid>
+        {
+            internal InternalDepCtorHandler(IMyDep dep) { }
+
+            public ValueTask Handle(DomainEventEnvelope<Paid> envelope, ICommandSender sender, CancellationToken ct)
+                => ValueTask.CompletedTask;
+        }
+        """;
+
+    [Test]
+    public async Task InternalCtorSubscriberWithDependency_IsResolvedViaDi()
+    {
+        var driver = RunGenerator("App", InternalCtorSubscriberSource);
+        var source = FindGeneratedSource(driver, "PicoActorSubscriberRegistrations");
+
+        await Assert.That(source).IsNotNull();
+        await Assert
+            .That(source!)
+            .Contains(
+                "new global::InternalDepCtorHandler((global::IMyDep)scope.GetService(typeof(global::IMyDep)))"
+            );
+    }
 }

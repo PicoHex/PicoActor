@@ -149,8 +149,9 @@ public sealed class ActorSystemPublisherTests
         var rebuilt = await system.GetAsync<TestSaga>(sagaId);
         await Assert.That(rebuilt).IsNotNull();
 
-        // GetAsync returns before OnReadyAsync (resume → flush → publish) runs on
-        // the loop thread — wait for the publish (the saga auto-stops right after).
+        // GetAsync awaits InitCompletedTask, which completes after OnReadyAsync
+        // (resume → flush → publish) — the publish has normally already happened.
+        // The bounded poll is a defensive guard, not a timing assumption.
         for (var i = 0; i < 50 && publisher.Published.Count == 0; i++)
             await Task.Delay(20);
 

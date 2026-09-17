@@ -14,6 +14,10 @@ public interface IActorSystem
     /// Both factories should inject the same infrastructure dependencies (ILlmClient, etc.).
     /// Registering the same actor type twice throws — a duplicate registration is a
     /// startup bug, and silently overwriting the first factory would hide it.
+    /// Types the runtime cannot serve are rejected here as well: an implementation that
+    /// does not derive from <see cref="Actor"/>, or an <see cref="IEventSourcedActor"/> that
+    /// does not derive from <see cref="EventSourcedActor"/> (persistence is only wired for
+    /// the concrete bases).
     /// </summary>
     void Register<T>(Func<ICommand, T> createFactory, Func<T>? rebuildFactory = null)
         where T : IActor;
@@ -36,7 +40,12 @@ public interface IActorSystem
     ValueTask<T?> GetAsync<T>(Guid id)
         where T : IActor;
 
-    /// <summary>Send a fire-and-forget command to an actor.</summary>
+    /// <summary>
+    /// Send a fire-and-forget command to an actor.
+    /// Throws <see cref="KeyNotFoundException"/> when the actor is not registered, and
+    /// <see cref="InvalidOperationException"/> when the mailbox is already closed (the
+    /// actor is stopping — the stop-race window); a silently dropped command is worse.
+    /// </summary>
     void Send(Guid id, ICommand command);
 
     /// <summary>Send a command and await the result.</summary>

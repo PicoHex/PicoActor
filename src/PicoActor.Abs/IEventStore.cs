@@ -13,6 +13,13 @@ public interface IEventStore
     /// used for optimistic concurrency control. Implementations should throw
     /// ConcurrencyException if the stream has diverged.
     /// Returns the new version after append.
+    /// <para>
+    /// Version model (required): every event occupies exactly one version and streams are
+    /// numbered sequentially from 1 — i.e. version ≡ event count. The framework derives its
+    /// expected version from the in-memory event count and currently ignores the returned
+    /// value, while <c>ReplayEvents</c> restores Version from the event count; a store that
+    /// numbers events differently silently corrupts recovery.
+    /// </para>
     /// </summary>
     ValueTask<ulong> AppendAsync(
         Guid actorId,

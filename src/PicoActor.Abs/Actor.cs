@@ -74,7 +74,10 @@ public abstract class Actor : IActor, IAsyncDisposable
         }
         catch
         {
-            // Release gate so RunAsync can exit, then clean up.
+            // Release the gate so RunAsync can exit, then clean up.
+            // Mark discarded FIRST: releasing the gate lets the loop resume, and a
+            // failed-construction actor must skip OnReadyAsync (it is dead).
+            MarkDiscarded();
             // Same three signals as SignalStop — reuse it instead of duplicating them.
             SignalStop();
             throw;
@@ -247,9 +250,18 @@ public abstract class Actor : IActor, IAsyncDisposable
         {
             // Abs has no logger dependency: report on stderr (same fallback as
             // MediatorDomainEventPublisher) instead of rethrowing and losing the loop.
-            Console.Error.WriteLine(
-                $"[PicoActor] Error handler failed for {command.GetType().Name} on actor {Id}: {handlerEx.Message}"
-            );
+            // The sink itself may fail (broken pipe, disposed writer) — that must never
+            // kill the loop either, so this write is guarded too.
+            try
+            {
+                Console.Error.WriteLine(
+                    $"[PicoActor] Error handler failed for {command.GetType().Name} on actor {Id}: {handlerEx.Message}"
+                );
+            }
+            catch
+            {
+                // Last-resort diagnostic sink failed — swallow: the loop is the actor's lifeline.
+            }
         }
     }
 

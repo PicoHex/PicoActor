@@ -5,6 +5,11 @@ namespace PicoActor.Abs;
 /// persisted atomically in the same batch as business events.
 /// On replay the framework recognizes this event to restore _completed and does not
 /// deliver it to the subclass Mutate.
+/// <para>
+/// <see cref="Result"/> is typed <c>object?</c> and is persisted with the event — with a
+/// persistent store this requires polymorphic serialization support; keep it a simple
+/// serializable type (record/string) as the design guidance requires.
+/// </para>
 /// </summary>
 public sealed record SagaCompleted(object? Result) : IDomainEvent;
 
@@ -13,6 +18,10 @@ public sealed record SagaCompleted(object? Result) : IDomainEvent;
 /// exception (OnMessageAsync or ResumeAsync).
 /// Reason is "exception type name + truncated message (≤512 chars)"; the exception
 /// object itself is not serialized (AOT-safe).
+/// <para>
+/// Reason is persisted AND published to subscribers — exception messages can carry
+/// sensitive data. Scrub at the raise site if the message is not safe to retain.
+/// </para>
 /// </summary>
 public sealed record SagaFailed(string Reason) : IDomainEvent;
 

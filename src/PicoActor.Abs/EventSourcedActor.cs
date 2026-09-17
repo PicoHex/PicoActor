@@ -63,6 +63,9 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// Mutate in-memory state from a domain event.
     /// Called by FlushEventsAsync (after persistence) and ReplayEvents (recovery).
     /// Must be a pure function — no validation, no side effects.
+    /// Throwing is a FATAL actor fault: the batch is already durable and cannot be
+    /// un-applied, so the actor is stopped (fail loud) instead of continuing with
+    /// untrusted state or retrying the leaked batch on the next flush.
     /// </summary>
     protected abstract void Mutate(IDomainEvent @event);
 
@@ -132,11 +135,24 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
             }
         }
 
-        // Persistence succeeded (or no store) — now safe to mutate state
-        foreach (var e in _events)
+        // Persistence succeeded (or no store) — now safe to mutate state.
+        // Mutate is a pure function that must not throw. If it does, the events are
+        // already durable but in-memory state can no longer be trusted: fail loud by
+        // stopping the actor (registry removal + stop signal). Keeping it alive would
+        // retry the leaked, un-mutated batch on the next flush and fail every later
+        // command with a misleading ConcurrencyException.
+        try
         {
-            if (!TryHandleFrameworkEvent(e))
-                Mutate(e);
+            foreach (var e in _events)
+            {
+                if (!TryHandleFrameworkEvent(e))
+                    Mutate(e);
+            }
+        }
+        catch
+        {
+            StopAfterMutateFailure();
+            throw;
         }
 
         // Publish AFTER state is consistent. Replay never reaches this path
@@ -160,6 +176,21 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         }
 
         ClearEvents();
+    }
+
+    /// <summary>
+    /// Fatal Mutate failure: the batch is durable but state is not. Stop the actor so
+    /// no later command can observe half-applied state or retry the leaked batch.
+    /// <see cref="IActorSystem.RequestStop"/> also removes the registry entry, so later
+    /// messages fail with <see cref="KeyNotFoundException"/> instead of a misleading
+    /// ConcurrencyException.
+    /// </summary>
+    private void StopAfterMutateFailure()
+    {
+        if (System is not null)
+            System.RequestStop(Id);
+        else
+            SignalStop();
     }
 
     /// <summary>

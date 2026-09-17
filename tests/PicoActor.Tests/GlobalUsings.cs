@@ -1,4 +1,5 @@
 global using System.Collections.Concurrent;
+global using System.Text;
 global using System.Threading.Channels;
 global using PicoActor.Abs;
 global using PicoDI;

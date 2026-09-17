@@ -112,7 +112,8 @@ public class ActorLoopResilienceTests
         var probe = system.AskAsync<int>(actor.Id, new ResilientProbe()).AsTask();
         var completed = await Task.WhenAny(probe, Task.Delay(TimeSpan.FromSeconds(3)));
 
-        // RED today: the loop died with the handler's exception, so the Ask never completes
+        // Regression: before error-handler isolation, the loop died with the handler's
+        // exception and this Ask never completed.
         await Assert.That(ReferenceEquals(completed, probe)).IsTrue();
         await Assert.That(probe.Result).IsEqualTo(1);
     }
@@ -152,7 +153,8 @@ public class ActorLoopResilienceTests
 
         var completed = await Task.WhenAny(queued, Task.Delay(TimeSpan.FromSeconds(3)));
 
-        // RED today: the envelope is never read, so the Ask hangs forever
+        // Regression: before FailPendingEnvelopes, the envelope was never read and this
+        // Ask hung forever.
         await Assert.That(ReferenceEquals(completed, queued)).IsTrue();
         await Assert.That(queued.IsFaulted).IsTrue();
     }
