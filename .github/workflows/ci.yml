@@ -106,6 +106,16 @@ jobs:
       # The sample declares AotOptimizationLevel=aggressive (minimal tier +
       # size levers) in its csproj; Abs/Gen guard against inherited PublishAot
       # via the netstandard2.0 guard block and TreatAsLocalProperty.
+      #
+      # The solution restore above is RID-less, so the sample's assets have no
+      # net10.0/<rid> target — the no-restore publish below would fail with
+      # NETSDK1047. Restore the publish graph with the matrix RID first.
+      - name: Restore (AOT RID)
+        run: >
+          dotnet restore samples/PicoActor.Sample/PicoActor.Sample.csproj
+          -r ${{ matrix.rid }}
+          -p:UseProjectReferences=true
+
       - name: AOT publish (Counter sample)
         run: >
           dotnet publish samples/PicoActor.Sample/PicoActor.Sample.csproj
