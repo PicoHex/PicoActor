@@ -19,7 +19,7 @@ M:PicoActor.ActorSystemOptions..ctor() : void
 M:PicoActor.EventStoreConfig..ctor() : void
 M:PicoActor.InMemoryEventStore..ctor() : void
 M:PicoActor.InMemoryEventStore.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> override
-M:PicoActor.InMemoryEventStore.ListAggregateIds(string firstEventType) : System.Collections.Generic.IReadOnlyList`1<System.Guid> override
+M:PicoActor.InMemoryEventStore.ListAggregateIdsAsync(string firstEventType) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<System.Guid>> override
 M:PicoActor.InMemoryEventStore.LoadAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent>> override
 M:PicoActor.InMemoryEventStore.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> override
 M:PicoActor.MediatorDomainEventPublisher..ctor(PicoMediator.Abs.IPublisher publisher, PicoLog.Abs.ILogger logger = null) : void

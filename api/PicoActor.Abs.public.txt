@@ -30,9 +30,15 @@ I:PicoActor.Abs.SagaFailed : System.IEquatable`1<PicoActor.Abs.SagaFailed>
 I:PicoActor.Abs.SagaResumeResult : System.IEquatable`1<PicoActor.Abs.SagaResumeResult>
 M:PicoActor.Abs.Actor..ctor() : void
 M:PicoActor.Abs.Actor..ctor(PicoActor.Abs.ICommand creationCommand) : void
+M:PicoActor.Abs.Actor.AttachToSystem(System.Guid id, PicoActor.Abs.IActorSystem system = null) : void
+M:PicoActor.Abs.Actor.MarkDiscarded() : void
 M:PicoActor.Abs.Actor.OnMessageAsync(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<object> abstract
 M:PicoActor.Abs.Actor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.Actor.Post(PicoActor.Abs.Envelope envelope) : bool
 M:PicoActor.Abs.Actor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.Actor.SignalReady() : void
+M:PicoActor.Abs.Actor.SignalStop() : void
+M:PicoActor.Abs.Actor.StopAsync() : System.Threading.Tasks.ValueTask
 M:PicoActor.Abs.Actor.WriteOutput(string type, string data = null, string turnId = null) : void
 M:PicoActor.Abs.ActorOutputEvent..ctor(string Type, string Data, string TurnId = null) : void
 M:PicoActor.Abs.ConcurrencyException..ctor(System.Guid actorId, ulong expectedVersion, ulong actualVersion) : void
@@ -41,6 +47,7 @@ M:PicoActor.Abs.DomainEventEnvelope`1..ctor(System.Guid ActorId, ulong Version, 
 M:PicoActor.Abs.Envelope..ctor() : void
 M:PicoActor.Abs.EventSourcedActor..ctor() : void
 M:PicoActor.Abs.EventSourcedActor..ctor(PicoActor.Abs.ICommand creationCommand) : void
+M:PicoActor.Abs.EventSourcedActor.AttachPersistence(PicoActor.Abs.IEventStore eventStore, PicoActor.Abs.IDomainEventPublisher publisher) : void
 M:PicoActor.Abs.EventSourcedActor.FlushEventsAsync() : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.EventSourcedActor.Mutate(PicoActor.Abs.IDomainEvent event) : void abstract
 M:PicoActor.Abs.EventSourcedActor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
@@ -69,7 +76,7 @@ M:PicoActor.Abs.IEventSourcedActor.ReplayEvents(System.Collections.Generic.IRead
 M:PicoActor.Abs.IEventStore.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> abstract
 M:PicoActor.Abs.IEventStore.LoadAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent>> abstract
 M:PicoActor.Abs.IEventStore.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> abstract
-M:PicoActor.Abs.IEventStoreEnumerator.ListAggregateIds(string firstEventType) : System.Collections.Generic.IReadOnlyList`1<System.Guid> abstract
+M:PicoActor.Abs.IEventStoreEnumerator.ListAggregateIdsAsync(string firstEventType) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<System.Guid>> abstract
 M:PicoActor.Abs.SagaActor..ctor() : void
 M:PicoActor.Abs.SagaActor.FlushEventsAsync() : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.SagaActor.MarkComplete(object result = null) : void
@@ -83,9 +90,11 @@ M:PicoActor.Abs.SagaExecution`1..ctor(System.Guid Id, TResult Result) : void
 M:PicoActor.Abs.SagaFailed..ctor(string Reason) : void
 M:PicoActor.Abs.SagaResumeResult..ctor(System.Guid Id, PicoActor.Abs.SagaResumeStatus Status, string Reason = null) : void
 P:PicoActor.Abs.Actor.Id : System.Guid { get; }
+P:PicoActor.Abs.Actor.InitCompletedTask : System.Threading.Tasks.Task { get; }
 P:PicoActor.Abs.Actor.OutputWriter : System.Threading.Channels.ChannelWriter`1<PicoActor.Abs.ActorOutputEvent> { get; set; }
 P:PicoActor.Abs.Actor.StopToken : System.Threading.CancellationToken { get; }
-P:PicoActor.Abs.Actor.System : PicoActor.Abs.IActorSystem { get; protected internal set; }
+P:PicoActor.Abs.Actor.System : PicoActor.Abs.IActorSystem { get; }
+P:PicoActor.Abs.Actor.UnhandledErrorHandler : System.Action`2<System.Exception, PicoActor.Abs.ICommand> { get; set; }
 P:PicoActor.Abs.ActorOutputEvent.Data : string { get; init; }
 P:PicoActor.Abs.ActorOutputEvent.TurnId : string { get; init; }
 P:PicoActor.Abs.ActorOutputEvent.Type : string { get; init; }
