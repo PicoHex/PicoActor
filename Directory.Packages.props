@@ -11,12 +11,12 @@
     <!-- PicoHex stack — released together, kept version-aligned (the generated
          bridge code compiles against PicoMediator/PicoDI). Dependabot groups them:
          see .github/dependabot.yml. -->
-    <PackageVersion Include="PicoDI" Version="2026.9.3" />
-    <PackageVersion Include="PicoDI.Abs" Version="2026.9.3" />
-    <PackageVersion Include="PicoLog.Abs" Version="2026.9.3" />
-    <PackageVersion Include="PicoMediator" Version="2026.9.3" />
-    <PackageVersion Include="PicoMediator.Abs" Version="2026.9.3" />
-    <PackageVersion Include="PicoMediator.DI" Version="2026.9.3" />
+    <PackageVersion Include="PicoDI" Version="2026.10.0" />
+    <PackageVersion Include="PicoDI.Abs" Version="2026.10.0" />
+    <PackageVersion Include="PicoLog.Abs" Version="2026.10.0" />
+    <PackageVersion Include="PicoMediator" Version="2026.10.0" />
+    <PackageVersion Include="PicoMediator.Abs" Version="2026.10.0" />
+    <PackageVersion Include="PicoMediator.DI" Version="2026.10.0" />
     <!-- Own packages: consumed by PackageReference when UseProjectReferences=false -->
     <PackageVersion Include="PicoActor" Version="$(Version)" />
     <PackageVersion Include="PicoActor.Abs" Version="$(Version)" />
@@ -26,6 +26,6 @@
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.401" />
     <!-- Tests — TUnit is NOT frozen: it tracks the latest release (a newer major of
          the PicoHex stack must not hold it back), which Dependabot keeps current. -->
-    <PackageVersion Include="TUnit" Version="1.68.0" />
+    <PackageVersion Include="TUnit" Version="1.68.4" />
   </ItemGroup>
 </Project>
