@@ -1,0 +1,3 @@
+# Build output of the api-surface dev tool (built on demand by release.ps1)
+bin/
+obj/

@@ -1,0 +1,142 @@
+B:PicoActor.Abs.ConcurrencyException : System.Exception
+B:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.Actor
+B:PicoActor.Abs.SagaActor : PicoActor.Abs.EventSourcedActor
+B:PicoActor.Abs.SagaExecutionException : System.Exception
+F:PicoActor.Abs.SagaResumeStatus.Completed : PicoActor.Abs.SagaResumeStatus = 0 const
+F:PicoActor.Abs.SagaResumeStatus.Failed : PicoActor.Abs.SagaResumeStatus = 1 const
+F:PicoActor.Abs.SagaResumeStatus.Running : PicoActor.Abs.SagaResumeStatus = 2 const
+F:PicoActor.Abs.SagaResumeStatus.value__ : int
+I:PicoActor.Abs.Actor : PicoActor.Abs.IActor
+I:PicoActor.Abs.Actor : System.IAsyncDisposable
+I:PicoActor.Abs.ActorOutputEvent : System.IEquatable`1<PicoActor.Abs.ActorOutputEvent>
+I:PicoActor.Abs.DomainEventEnvelope : PicoMediator.Abs.IEvent
+I:PicoActor.Abs.DomainEventEnvelope : PicoMediator.Abs.IMessage
+I:PicoActor.Abs.DomainEventEnvelope : System.IEquatable`1<PicoActor.Abs.DomainEventEnvelope>
+I:PicoActor.Abs.DomainEventEnvelope`1 : System.IEquatable`1<PicoActor.Abs.DomainEventEnvelope`1<TEvent>>
+I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.IActor
+I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.IEventSourcedActor
+I:PicoActor.Abs.IDomainEvent : PicoMediator.Abs.IEvent
+I:PicoActor.Abs.IDomainEvent : PicoMediator.Abs.IMessage
+I:PicoActor.Abs.IEventSourcedActor : PicoActor.Abs.IActor
+I:PicoActor.Abs.SagaCompleted : PicoActor.Abs.IDomainEvent
+I:PicoActor.Abs.SagaCompleted : PicoMediator.Abs.IEvent
+I:PicoActor.Abs.SagaCompleted : PicoMediator.Abs.IMessage
+I:PicoActor.Abs.SagaCompleted : System.IEquatable`1<PicoActor.Abs.SagaCompleted>
+I:PicoActor.Abs.SagaExecution`1 : System.IEquatable`1<PicoActor.Abs.SagaExecution`1<TResult>>
+I:PicoActor.Abs.SagaFailed : PicoActor.Abs.IDomainEvent
+I:PicoActor.Abs.SagaFailed : PicoMediator.Abs.IEvent
+I:PicoActor.Abs.SagaFailed : PicoMediator.Abs.IMessage
+I:PicoActor.Abs.SagaFailed : System.IEquatable`1<PicoActor.Abs.SagaFailed>
+I:PicoActor.Abs.SagaResumeResult : System.IEquatable`1<PicoActor.Abs.SagaResumeResult>
+M:PicoActor.Abs.Actor..ctor() : void
+M:PicoActor.Abs.Actor..ctor(PicoActor.Abs.ICommand creationCommand) : void
+M:PicoActor.Abs.Actor.OnMessageAsync(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<object> abstract
+M:PicoActor.Abs.Actor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.Actor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.Actor.WriteOutput(string type, string data = null, string turnId = null) : void
+M:PicoActor.Abs.ActorOutputEvent..ctor(string Type, string Data, string TurnId = null) : void
+M:PicoActor.Abs.ConcurrencyException..ctor(System.Guid actorId, ulong expectedVersion, ulong actualVersion) : void
+M:PicoActor.Abs.DomainEventEnvelope..ctor(System.Guid ActorId, ulong Version, PicoActor.Abs.IDomainEvent Event) : void
+M:PicoActor.Abs.DomainEventEnvelope`1..ctor(System.Guid ActorId, ulong Version, TEvent Event) : void
+M:PicoActor.Abs.Envelope..ctor() : void
+M:PicoActor.Abs.EventSourcedActor..ctor() : void
+M:PicoActor.Abs.EventSourcedActor..ctor(PicoActor.Abs.ICommand creationCommand) : void
+M:PicoActor.Abs.EventSourcedActor.FlushEventsAsync() : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.EventSourcedActor.Mutate(PicoActor.Abs.IDomainEvent event) : void abstract
+M:PicoActor.Abs.EventSourcedActor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.EventSourcedActor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.EventSourcedActor.RaiseEvent``1(T event) : void
+M:PicoActor.Abs.EventSourcedActor.RollbackUncommitted() : void
+M:PicoActor.Abs.EventSourcedActor.TryHandleFrameworkEvent(PicoActor.Abs.IDomainEvent event) : bool virtual
+M:PicoActor.Abs.IActorSystem.AskAsync``1(System.Guid id, PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<TResult> abstract
+M:PicoActor.Abs.IActorSystem.CreateAsync``1(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<T> abstract
+M:PicoActor.Abs.IActorSystem.ExecuteSaga``2(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.SagaExecution`1<TResult>> abstract
+M:PicoActor.Abs.IActorSystem.FindAggregateIds(string firstEventType, System.Func`2<PicoActor.Abs.IDomainEvent, bool> firstEventMatch) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<System.Guid>> abstract
+M:PicoActor.Abs.IActorSystem.GetAsync``1(System.Guid id) : System.Threading.Tasks.ValueTask`1<T> abstract
+M:PicoActor.Abs.IActorSystem.Register``1(System.Func`2<PicoActor.Abs.ICommand, T> createFactory, System.Func`1<T> rebuildFactory = null) : void abstract
+M:PicoActor.Abs.IActorSystem.RequestStop(System.Guid id) : void abstract
+M:PicoActor.Abs.IActorSystem.ResumeInterruptedSagasAsync``1(string firstEventType, System.Func`2<PicoActor.Abs.IDomainEvent, bool> firstEventMatch = null, System.Action`2<System.Exception, System.Guid> onItemError = null) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.SagaResumeResult>> abstract
+M:PicoActor.Abs.IActorSystem.Send(System.Guid id, PicoActor.Abs.ICommand command) : void abstract
+M:PicoActor.Abs.IActorSystem.StopAllAsync() : System.Threading.Tasks.ValueTask abstract
+M:PicoActor.Abs.IActorSystem.StopAsync(System.Guid id) : System.Threading.Tasks.ValueTask abstract
+M:PicoActor.Abs.ICommandSender.AskAsync``1(System.Guid actorId, PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<TResult> abstract
+M:PicoActor.Abs.ICommandSender.ExecuteSaga``2(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.SagaExecution`1<TResult>> abstract
+M:PicoActor.Abs.ICommandSender.Send(System.Guid actorId, PicoActor.Abs.ICommand command) : void abstract
+M:PicoActor.Abs.IDomainEventPublisher.PublishAsync(System.Guid actorId, ulong version, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask abstract
+M:PicoActor.Abs.IDomainEventSubscriber`1.Handle(PicoActor.Abs.DomainEventEnvelope`1<TEvent> envelope, PicoActor.Abs.ICommandSender sender, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask abstract
+M:PicoActor.Abs.IEventSourcedActor.CommitEvents() : void abstract
+M:PicoActor.Abs.IEventSourcedActor.ReplayEvents(System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : void abstract
+M:PicoActor.Abs.IEventStore.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> abstract
+M:PicoActor.Abs.IEventStore.LoadAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent>> abstract
+M:PicoActor.Abs.IEventStore.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> abstract
+M:PicoActor.Abs.IEventStoreEnumerator.ListAggregateIds(string firstEventType) : System.Collections.Generic.IReadOnlyList`1<System.Guid> abstract
+M:PicoActor.Abs.SagaActor..ctor() : void
+M:PicoActor.Abs.SagaActor.FlushEventsAsync() : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.SagaActor.MarkComplete(object result = null) : void
+M:PicoActor.Abs.SagaActor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.SagaActor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask override
+M:PicoActor.Abs.SagaActor.ResumeAsync() : System.Threading.Tasks.ValueTask abstract
+M:PicoActor.Abs.SagaActor.TryHandleFrameworkEvent(PicoActor.Abs.IDomainEvent event) : bool virtual
+M:PicoActor.Abs.SagaCompleted..ctor(object Result) : void
+M:PicoActor.Abs.SagaExecutionException..ctor(System.Guid sagaId, string reason) : void
+M:PicoActor.Abs.SagaExecution`1..ctor(System.Guid Id, TResult Result) : void
+M:PicoActor.Abs.SagaFailed..ctor(string Reason) : void
+M:PicoActor.Abs.SagaResumeResult..ctor(System.Guid Id, PicoActor.Abs.SagaResumeStatus Status, string Reason = null) : void
+P:PicoActor.Abs.Actor.Id : System.Guid { get; }
+P:PicoActor.Abs.Actor.OutputWriter : System.Threading.Channels.ChannelWriter`1<PicoActor.Abs.ActorOutputEvent> { get; set; }
+P:PicoActor.Abs.Actor.StopToken : System.Threading.CancellationToken { get; }
+P:PicoActor.Abs.Actor.System : PicoActor.Abs.IActorSystem { get; protected internal set; }
+P:PicoActor.Abs.ActorOutputEvent.Data : string { get; init; }
+P:PicoActor.Abs.ActorOutputEvent.TurnId : string { get; init; }
+P:PicoActor.Abs.ActorOutputEvent.Type : string { get; init; }
+P:PicoActor.Abs.ConcurrencyException.ActorId : System.Guid { get; }
+P:PicoActor.Abs.ConcurrencyException.ActualVersion : ulong { get; }
+P:PicoActor.Abs.ConcurrencyException.ExpectedVersion : ulong { get; }
+P:PicoActor.Abs.DomainEventEnvelope.ActorId : System.Guid { get; init; }
+P:PicoActor.Abs.DomainEventEnvelope.Event : PicoActor.Abs.IDomainEvent { get; init; }
+P:PicoActor.Abs.DomainEventEnvelope.Version : ulong { get; init; }
+P:PicoActor.Abs.DomainEventEnvelope`1.ActorId : System.Guid { get; init; }
+P:PicoActor.Abs.DomainEventEnvelope`1.Event : TEvent { get; init; }
+P:PicoActor.Abs.DomainEventEnvelope`1.Version : ulong { get; init; }
+P:PicoActor.Abs.Envelope.Command : PicoActor.Abs.ICommand { get; init; }
+P:PicoActor.Abs.Envelope.Tcs : System.Threading.Tasks.TaskCompletionSource`1<object> { get; init; }
+P:PicoActor.Abs.EventSourcedActor.Version : ulong { get; protected set; }
+P:PicoActor.Abs.IActor.Id : System.Guid { get; }
+P:PicoActor.Abs.IEventSourcedActor.Version : ulong { get; }
+P:PicoActor.Abs.SagaActor.FailedReason : string { get; }
+P:PicoActor.Abs.SagaActor.IsCompleted : bool { get; }
+P:PicoActor.Abs.SagaActor.IsFailed : bool { get; }
+P:PicoActor.Abs.SagaCompleted.Result : object { get; init; }
+P:PicoActor.Abs.SagaExecutionException.Reason : string { get; }
+P:PicoActor.Abs.SagaExecutionException.SagaId : System.Guid { get; }
+P:PicoActor.Abs.SagaExecution`1.Id : System.Guid { get; init; }
+P:PicoActor.Abs.SagaExecution`1.Result : TResult { get; init; }
+P:PicoActor.Abs.SagaFailed.Reason : string { get; init; }
+P:PicoActor.Abs.SagaResumeResult.Id : System.Guid { get; init; }
+P:PicoActor.Abs.SagaResumeResult.Reason : string { get; init; }
+P:PicoActor.Abs.SagaResumeResult.Status : PicoActor.Abs.SagaResumeStatus { get; init; }
+T:class PicoActor.Abs.Actor
+T:class PicoActor.Abs.ActorOutputEvent
+T:class PicoActor.Abs.ConcurrencyException
+T:class PicoActor.Abs.DomainEventEnvelope
+T:class PicoActor.Abs.DomainEventEnvelope`1
+T:class PicoActor.Abs.Envelope
+T:class PicoActor.Abs.EventSourcedActor
+T:class PicoActor.Abs.SagaActor
+T:class PicoActor.Abs.SagaCompleted
+T:class PicoActor.Abs.SagaExecutionException
+T:class PicoActor.Abs.SagaExecution`1
+T:class PicoActor.Abs.SagaFailed
+T:class PicoActor.Abs.SagaResumeResult
+T:class PicoMediator.Generated.MediatorEventDispatchers_PicoActor_Abs
+T:enum PicoActor.Abs.SagaResumeStatus
+T:interface PicoActor.Abs.IActor
+T:interface PicoActor.Abs.IActorSystem
+T:interface PicoActor.Abs.ICommand
+T:interface PicoActor.Abs.ICommandSender
+T:interface PicoActor.Abs.IDomainEvent
+T:interface PicoActor.Abs.IDomainEventPublisher
+T:interface PicoActor.Abs.IDomainEventSubscriber`1
+T:interface PicoActor.Abs.IEventSourcedActor
+T:interface PicoActor.Abs.IEventStore
+T:interface PicoActor.Abs.IEventStoreEnumerator

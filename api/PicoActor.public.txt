@@ -1,0 +1,42 @@
+I:PicoActor.ActorSystem : PicoActor.Abs.IActorSystem
+I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStore
+I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStoreEnumerator
+I:PicoActor.MediatorDomainEventPublisher : PicoActor.Abs.IDomainEventPublisher
+M:PicoActor.ActorConfig..ctor() : void
+M:PicoActor.ActorSystem..ctor(PicoActor.ActorSystemOptions options) : void
+M:PicoActor.ActorSystem.AskAsync``1(System.Guid id, PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<TResult> override
+M:PicoActor.ActorSystem.CreateAsync``1(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<T> override
+M:PicoActor.ActorSystem.ExecuteSaga``2(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.SagaExecution`1<TResult>> override
+M:PicoActor.ActorSystem.FindAggregateIds(string firstEventType, System.Func`2<PicoActor.Abs.IDomainEvent, bool> firstEventMatch) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<System.Guid>> override
+M:PicoActor.ActorSystem.GetAsync``1(System.Guid id) : System.Threading.Tasks.ValueTask`1<T> override
+M:PicoActor.ActorSystem.Register``1(System.Func`2<PicoActor.Abs.ICommand, T> createFactory, System.Func`1<T> rebuildFactory = null) : void override
+M:PicoActor.ActorSystem.RequestStop(System.Guid id) : void override
+M:PicoActor.ActorSystem.ResumeInterruptedSagasAsync``1(string firstEventType, System.Func`2<PicoActor.Abs.IDomainEvent, bool> firstEventMatch = null, System.Action`2<System.Exception, System.Guid> onItemError = null) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.SagaResumeResult>> override
+M:PicoActor.ActorSystem.Send(System.Guid id, PicoActor.Abs.ICommand command) : void override
+M:PicoActor.ActorSystem.StopAllAsync() : System.Threading.Tasks.ValueTask override
+M:PicoActor.ActorSystem.StopAsync(System.Guid id) : System.Threading.Tasks.ValueTask override
+M:PicoActor.ActorSystemOptions..ctor() : void
+M:PicoActor.EventStoreConfig..ctor() : void
+M:PicoActor.InMemoryEventStore..ctor() : void
+M:PicoActor.InMemoryEventStore.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> override
+M:PicoActor.InMemoryEventStore.ListAggregateIds(string firstEventType) : System.Collections.Generic.IReadOnlyList`1<System.Guid> override
+M:PicoActor.InMemoryEventStore.LoadAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent>> override
+M:PicoActor.InMemoryEventStore.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> override
+M:PicoActor.MediatorDomainEventPublisher..ctor(PicoMediator.Abs.IPublisher publisher, PicoLog.Abs.ILogger logger = null) : void
+M:PicoActor.MediatorDomainEventPublisher.PublishAsync(System.Guid actorId, ulong version, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask override
+M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container) : PicoDI.Abs.ISvcContainer static
+M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoActor.Abs.IEventStore eventStore) : PicoDI.Abs.ISvcContainer static
+M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoActor.ActorConfig config) : PicoDI.Abs.ISvcContainer static
+M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoMediator.Abs.IPublisher publisher) : PicoDI.Abs.ISvcContainer static
+P:PicoActor.ActorConfig.EventStore : PicoActor.EventStoreConfig { get; set; }
+P:PicoActor.ActorSystemOptions.DomainEventPublisher : PicoActor.Abs.IDomainEventPublisher { get; set; }
+P:PicoActor.ActorSystemOptions.EventStore : PicoActor.Abs.IEventStore { get; set; }
+P:PicoActor.ActorSystemOptions.Logger : PicoLog.Abs.ILogger { get; set; }
+P:PicoActor.EventStoreConfig.Type : string { get; set; }
+T:class PicoActor.ActorConfig
+T:class PicoActor.ActorSystem
+T:class PicoActor.ActorSystemOptions
+T:class PicoActor.EventStoreConfig
+T:class PicoActor.InMemoryEventStore
+T:class PicoActor.MediatorDomainEventPublisher
+T:class PicoActor.PicoActorDiExtensions
