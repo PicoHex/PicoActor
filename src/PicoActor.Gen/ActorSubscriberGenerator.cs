@@ -79,6 +79,11 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
     /// as long as a pipeline node caches it, i.e. for the whole session. The identity is
     /// therefore a string, and the diagnostic position is three plain values that are turned
     /// back into a Location only at output time.
+    /// <para>
+    /// One exception, and only one: normal subscribers keep the pipeline symbol-free, while
+    /// the rare diagnosable shape (PICA001/PICA002) retains a source location
+    /// (<see cref="DiagnosticLocation"/>) so pragma/editorconfig suppression keeps working.
+    /// </para>
     /// </summary>
     private sealed class SubscriberInfo
     {
@@ -91,7 +96,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             string? skipReason,
             string? diagnosticFilePath,
             TextSpan diagnosticSpan,
-            LinePositionSpan diagnosticLineSpan
+            LinePositionSpan diagnosticLineSpan,
+            Location? diagnosticLocation
         )
         {
             RegistrationKey = registrationKey;
@@ -103,6 +109,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             DiagnosticFilePath = diagnosticFilePath;
             DiagnosticSpan = diagnosticSpan;
             DiagnosticLineSpan = diagnosticLineSpan;
+            DiagnosticLocation = diagnosticLocation;
         }
 
         /// <summary>One registration: <paramref name="implementationType"/> for one event type.</summary>
@@ -114,7 +121,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             bool hasAccessibleConstructor,
             string? diagnosticFilePath,
             TextSpan diagnosticSpan,
-            LinePositionSpan diagnosticLineSpan
+            LinePositionSpan diagnosticLineSpan,
+            Location? diagnosticLocation
         ) =>
             new(
                 registrationKey,
@@ -125,7 +133,12 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 skipReason: null,
                 diagnosticFilePath,
                 diagnosticSpan,
-                diagnosticLineSpan
+                diagnosticLineSpan,
+                // Discussed at the property: only a shape that will actually REPORT retains
+                // a source location. Dropping it here — and not merely at the call site —
+                // makes "a registrable subscriber can never root a SyntaxTree through the
+                // pipeline" a property of the state type itself.
+                diagnosticLocation: hasAccessibleConstructor ? null : diagnosticLocation
             );
 
         /// <summary>A subscriber declaration the generator must skip and report (PICA002).</summary>
@@ -135,7 +148,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             string reason,
             string? diagnosticFilePath,
             TextSpan diagnosticSpan,
-            LinePositionSpan diagnosticLineSpan
+            LinePositionSpan diagnosticLineSpan,
+            Location? diagnosticLocation
         ) =>
             new(
                 registrationKey,
@@ -146,7 +160,9 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 skipReason: reason,
                 diagnosticFilePath,
                 diagnosticSpan,
-                diagnosticLineSpan
+                diagnosticLineSpan,
+                // Always diagnosable (PICA002), so the source location is always kept.
+                diagnosticLocation
             );
 
         /// <summary>
@@ -184,6 +200,27 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
         public TextSpan DiagnosticSpan { get; }
         public LinePositionSpan DiagnosticLineSpan { get; }
+
+        /// <summary>
+        /// The declaration's REAL source location, kept ONLY for shapes that report a
+        /// diagnostic (PICA001: <see cref="HasAccessibleConstructor"/> is false, PICA002:
+        /// <see cref="SkipReason"/> is non-null); null for every healthy subscriber.
+        /// <para>
+        /// This is a deliberate, bounded exception to the value-only rule above. Roslyn
+        /// resolves <c>#pragma warning disable PICA00X</c> and a per-file
+        /// <c>.editorconfig</c> severity THROUGH the diagnostic's SyntaxTree: a Location
+        /// rebuilt from (path, span, lineSpan) is an ExternalFile location with no tree, so
+        /// both silently stop working and a user who knows better cannot silence a false
+        /// positive. So the shapes that are about to be reported — rare, and exactly the ones
+        /// the user needs silencable — carry the location with them, while the hot path
+        /// (every successfully registered subscriber) stays symbol-free.
+        /// </para>
+        /// <para>
+        /// Not part of <see cref="HasSameShapeAs"/> / <see cref="ShapeHashCode"/>: it is
+        /// derived from the position values, which are excluded for the same reason.
+        /// </para>
+        /// </summary>
+        public Location? DiagnosticLocation { get; }
 
         /// <summary>
         /// Structural comparison over the fields that affect generated code — and only those.
@@ -278,6 +315,13 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         var location = typeSymbol.Locations.Length > 0 ? typeSymbol.Locations[0] : null;
         var (diagnosticFilePath, diagnosticSpan, diagnosticLineSpan) = PositionOf(location);
 
+        // The ONE Roslyn object allowed to travel through the pipeline, and only towards a
+        // shape that reports a diagnostic (see SubscriberInfo.DiagnosticLocation): Roslyn
+        // resolves `#pragma warning disable PICA00X` and per-file .editorconfig severities
+        // through the diagnostic's SyntaxTree, so those shapes must keep a source-bound
+        // location. Healthy subscribers get null and stay symbol-free.
+        var diagnosticLocation = location is { IsInSource: true } ? location : null;
+
         // Shapes whose registration cannot be emitted. Returning [] silently — the previous
         // behavior — made declare-and-subscribe a no-op with nothing in the build log.
         var skipReason = SkipReasonFor(typeSymbol);
@@ -294,7 +338,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     skipReason,
                     diagnosticFilePath,
                     diagnosticSpan,
-                    diagnosticLineSpan
+                    diagnosticLineSpan,
+                    diagnosticLocation
                 ),
             ];
 
@@ -333,7 +378,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     hasAccessibleConstructor: ctor is not null,
                     diagnosticFilePath,
                     diagnosticSpan,
-                    diagnosticLineSpan
+                    diagnosticLineSpan,
+                    diagnosticLocation
                 )
             );
         }
@@ -597,18 +643,24 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Materializes the stored position as a Location — at OUTPUT time only. No pipeline
-    /// state is a Location: a source Location keeps its SyntaxTree, and through it the whole
-    /// Compilation, alive for as long as the cached node lives.
+    /// The Location a diagnostic is reported at. A diagnosable shape kept its real source
+    /// location, which is what makes `#pragma warning disable` and a per-file .editorconfig
+    /// severity apply. Nothing else is materialized into pipeline state: the fallback rebuilds
+    /// an ExternalFile location from the stored values at OUTPUT time only.
     /// </summary>
-    private static Location DiagnosticLocation(SubscriberInfo subscriber) =>
-        subscriber.DiagnosticFilePath is null
+    private static Location DiagnosticLocation(SubscriberInfo subscriber)
+    {
+        if (subscriber.DiagnosticLocation is { } sourceLocation)
+            return sourceLocation;
+
+        return subscriber.DiagnosticFilePath is null
             ? Location.None
             : Location.Create(
                 subscriber.DiagnosticFilePath,
                 subscriber.DiagnosticSpan,
                 subscriber.DiagnosticLineSpan
             );
+    }
 
     private static string EmitFactory(SubscriberInfo s)
     {
