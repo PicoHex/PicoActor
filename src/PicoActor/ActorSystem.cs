@@ -296,22 +296,26 @@ public sealed class ActorSystem : IActorSystem
         if (registered is not T typed)
             return default;
 
-        if (!registered.InitCompletedTask.IsCompleted)
-        {
-            try
-            {
-                await registered.InitCompletedTask.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Init failed: the instance is gone (or about to be) and a replacement may
-                // already own the id - resolve instead of returning a dead handle.
-            }
+        // IsCompletedSuccessfully, not IsCompleted: a FAULTED (or canceled) init task is
+        // "completed" too, so the old fast path handed out a handle whose initialization
+        // never finished. Only a successful init is a safe fast path; anything else goes
+        // through the same resolve-after-initialization step (which awaits the outcome and
+        // answers from the CURRENT registry state, so a dead or replaced instance is never
+        // returned).
+        if (registered.InitCompletedTask.IsCompletedSuccessfully)
+            return typed;
 
-            return ResolveAfterInitialization<T>(id, registered);
+        try
+        {
+            await registered.InitCompletedTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Init failed: the instance is gone (or about to be) and a replacement may
+            // already own the id - resolve instead of returning a dead handle.
         }
 
-        return typed;
+        return ResolveAfterInitialization<T>(id, registered);
     }
 
     /// <summary>
