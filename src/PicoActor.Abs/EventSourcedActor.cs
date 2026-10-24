@@ -93,14 +93,47 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// </summary>
     protected override async ValueTask ProcessAsync(Envelope envelope)
     {
+        // Snapshot BEFORE dispatch: a throwing handler must not leak the events it
+        // already raised into the next command's flush. Those events were never
+        // persisted, so keeping them would append a failed command's events as part
+        // of the next successful batch (stream corruption) and inflate Version.
+        var eventCount = _events.Count;
+
         // 1. Dispatch to subclass — RaiseEvent records events without mutating state
-        var result = await OnMessageAsync(envelope.Command).ConfigureAwait(false);
+        object? result;
+        try
+        {
+            result = await OnMessageAsync(envelope.Command).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Only the dispatch is rolled back here — FlushEventsAsync owns its own
+            // rollback (doubling it would underflow Version).
+            RollbackDispatchEvents(eventCount);
+            throw;
+        }
 
         // 2. Persist → Mutate → Commit
         await FlushEventsAsync().ConfigureAwait(false);
 
         // 3. Reply only after successful persistence
         envelope.Tcs?.TrySetResult(result);
+    }
+
+    /// <summary>
+    /// Drop the events raised by a dispatch that threw (the batch was never
+    /// persisted) and roll Version back by the same count. The lower bound keeps an
+    /// inconsistent Version from underflowing into a huge expectedVersion.
+    /// </summary>
+    private void RollbackDispatchEvents(int eventCount)
+    {
+        var added = _events.Count - eventCount;
+        if (added <= 0)
+            return;
+
+        _events.RemoveRange(eventCount, added);
+        var delta = (ulong)added;
+        Version = Version >= delta ? Version - delta : 0UL;
     }
 
     /// <summary>
