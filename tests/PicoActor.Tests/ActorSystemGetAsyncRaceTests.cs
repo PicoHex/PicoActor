@@ -57,10 +57,15 @@ public sealed class ActorSystemGetAsyncRaceTests
 
         public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
         {
+            // n == 1 / n == 2 are the two PRE-gate prefetches of the two concurrent callers
+            // (the ordering this store manufactures). Every later load is GetAsync's
+            // unconditional re-read under the per-id gate, which must never park: the
+            // ordering it exists to create is already established by then, and parking
+            // there would deadlock the very callers this store lines up.
             var n = Interlocked.Increment(ref _enteredCount);
             if (n == 1)
                 await _bothEntered.Task.ConfigureAwait(false);
-            else
+            else if (n == 2)
             {
                 _bothEntered.TrySetResult(true);
                 await _releaseLoser.Task.ConfigureAwait(false);

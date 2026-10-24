@@ -174,10 +174,11 @@ public sealed class ActorSystem : IActorSystem
         if (!typeof(IEventSourcedActor).IsAssignableFrom(typeof(T)))
             return default;
 
-        // Prefetch the stream the rebuild replays. Read BEFORE taking the per-id gate: it
-        // is only the snapshot the common (single-caller) path uses, and reading outside
-        // the gate keeps lookups of different ids fully parallel. It is re-read under the
-        // gate whenever it can be stale (see below).
+        // Prefetch the stream the rebuild replays. Read BEFORE taking the per-id gate: an
+        // id with no stream at all must not take the gate, and reading outside the gate
+        // keeps lookups of different ids fully parallel.
+        // This snapshot is NEVER trusted for the rebuild itself: it can already be stale
+        // by the time the gate is acquired (it is always re-read below).
         var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
         if (events.Count == 0)
             return default;
@@ -195,24 +196,25 @@ public sealed class ActorSystem : IActorSystem
         await gate.Semaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            // Entries is only mutated while the gate is held, so this is exact.
-            var entry = ++gate.Entries;
-
             // Another caller may have completed the rebuild while we waited.
             if (_registry.TryGetValue(id, out var winner))
                 return await ResolveRegisteredAsync<T>(id, winner).ConfigureAwait(false);
 
-            // A previous caller entered this gate and left nothing registered: the copy it
-            // built either removed itself (a terminal saga) or was taken out (stopped, or
-            // its init failed). Our prefetched snapshot predates that attempt and can
-            // therefore be missing the events it flushed - replaying it would resume a
-            // saga that has already completed. Re-read under the gate.
-            if (entry > 1)
-            {
-                events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
-                if (events.Count == 0)
-                    return default;
-            }
+            // Re-read UNCONDITIONALLY under the gate - the prefetch above is never the
+            // baseline we replay. Two independent writes can land between the prefetch and
+            // this line:
+            //   - a previous caller's rebuild (it left nothing registered: a terminal saga
+            //     that unregistered itself, a stopped copy, a failed init), and
+            //   - the SHUTDOWN side: StopAsync removes the registry entry first and only
+            //     then lets the draining loop flush its terminal event - that write is
+            //     invisible to the registry, and the first caller into the gate ("entry 1")
+            //     is exactly the caller that can be holding the pre-shutdown snapshot.
+            // Replaying a stale snapshot resumes a saga that has already completed and dies
+            // with ConcurrencyException (or appends a second terminal batch). Reads are
+            // idempotent and cheap; correctness wins over saving one read.
+            events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
+            if (events.Count == 0)
+                return default;
 
             var actor = (ActorBase)(IActor)rebuildFactory();
             WireActor(actor, id);
@@ -673,15 +675,12 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <summary>
-    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>. <see cref="Entries"/> counts
-    /// the callers that held the gate, which is how a caller tells "I am the first rebuild of
-    /// this id" from "a previous rebuild left nothing registered" (see GetAsync).
+    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>: rebuild + initialization of
+    /// one id run one caller at a time. The gate carries no state — every caller re-reads
+    /// the stream under it (see GetAsync), so "who went first" never has to be inferred.
     /// </summary>
     private sealed class RebuildGate
     {
         public SemaphoreSlim Semaphore { get; } = new(1, 1);
-
-        /// <summary>Entry count; only mutated while <see cref="Semaphore"/> is held.</summary>
-        public int Entries { get; set; }
     }
 }
