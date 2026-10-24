@@ -313,8 +313,12 @@ public sealed class ActorSystem : IActorSystem
         // "completed" too, so the old fast path handed out a handle whose initialization
         // never finished. Only a successful init is a safe fast path; anything else goes
         // through the same resolve-after-initialization step (which awaits the outcome and
-        // answers from the CURRENT registry state, so a dead or replaced instance is never
-        // returned).
+        // answers from the CURRENT registry state).
+        // BEST EFFORT, not a guarantee: a failed instance is not handed out once its
+        // cleanup has removed it from the registry, but "resolve" and "remove" are two
+        // separate steps — a lookup that resolves inside that narrow window still finds the
+        // failed instance as the registry's owner and returns it. The window closes when
+        // CompleteInitializationAsync's ownership-checked removal lands.
         if (registered.InitCompletedTask.IsCompletedSuccessfully)
             return typed;
 

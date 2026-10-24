@@ -29,12 +29,20 @@ public interface IActorSystem
     /// 3. Registers in the system.
     /// 4. Calls SignalReady() to release the consumption loop.
     /// Returns only after the actor finished initializing (construction events persisted).
-    /// Throws <see cref="InvalidOperationException"/> when the factory is not registered,
-    /// when initialization fails (the original exception), and while the system is
-    /// stopping — creating an actor during <see cref="StopAllAsync"/> is refused, because it
-    /// would outlive the shutdown. Also throws when the new actor is stopped DURING its
-    /// initialization (a concurrent <see cref="StopAsync"/>/<see cref="RequestStop"/>): a
-    /// handle to an actor that is already gone is never returned.
+    /// Two failure classes, told apart by the exception type:
+    /// <para>
+    /// - <see cref="InvalidOperationException"/> — lifecycle refusal: no factory registered
+    ///   for T, creation while the system is stopping (creating an actor during
+    ///   <see cref="StopAllAsync"/> is refused, because it would outlive the shutdown), and
+    ///   an actor stopped DURING its initialization by a concurrent
+    ///   <see cref="StopAsync"/>/<see cref="RequestStop"/> — a handle to an actor that is
+    ///   already gone is never returned.
+    /// </para>
+    /// <para>
+    /// - The ORIGINAL exception, rethrown unchanged (not wrapped in
+    ///   <see cref="InvalidOperationException"/>), when initialization itself fails — a
+    ///   store failure surfaces as the store's own exception type.
+    /// </para>
     /// </summary>
     ValueTask<T> CreateAsync<T>(ICommand command)
         where T : IActor;
@@ -55,8 +63,10 @@ public interface IActorSystem
     ///   system by design — <see cref="Send"/> and <see cref="AskAsync{TResult}"/> on it
     ///   throw <see cref="KeyNotFoundException"/>. Never a live handle to a non-terminal
     ///   actor that stopped during initialization.
-    /// - An instance whose initialization FAILED is never returned, even though its
-    ///   init-completion signal has already fired.
+    /// - An instance whose initialization FAILED is not returned once its cleanup has
+    ///   removed it from the registry. BEST EFFORT, not a guarantee: "resolve" and "remove"
+    ///   are separate steps, so a lookup that completes inside that narrow window can still
+    ///   see the failed instance (its init-completion signal has already fired either way).
     /// - Concurrent calls for the same id are single-flight: one rebuild, one
     ///   initialization, one resume — the other callers resolve to that instance.
     /// </para>
