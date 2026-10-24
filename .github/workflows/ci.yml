@@ -138,6 +138,10 @@ jobs:
       - name: Run AOT sample (native binary)
         shell: bash
         run: |
+          # pipefail: without it the pipeline's status is `grep`'s, so a binary that
+          # crashes AFTER printing the Done marker would still pass this gate.
+          set -euo pipefail
+
           dir="publish/${{ matrix.rid }}"
           exe="$dir/PicoActor.Sample"
           case "${{ matrix.rid }}" in
