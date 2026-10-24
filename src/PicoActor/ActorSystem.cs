@@ -245,8 +245,21 @@ public sealed class ActorSystem : IActorSystem
         }
         catch
         {
-            _registry.TryRemove(id, out _);
-            _logger?.Error($"Actor {actor.GetType().Name} {id} initialization failed, removed");
+            // Ownership-checked removal: a blind TryRemove(id) deletes whatever currently
+            // owns that id. By the time this failure surfaces, the failed instance may
+            // already have been stopped and replaced in the registry by a concurrent
+            // rebuild of the SAME id — deleting that entry would orphan a live actor
+            // (registry-less, unreachable, never stopped). Remove only if the registered
+            // instance is still THE failed one.
+            if (RemoveIfSame(id, actor))
+                _logger?.Error(
+                    $"Actor {actor.GetType().Name} {id} initialization failed, removed"
+                );
+            else
+                _logger?.Warning(
+                    $"Actor {actor.GetType().Name} {id} initialization failed; the registry "
+                        + "entry belongs to another instance now, left untouched"
+                );
             // Stop the failed actor so its loop task terminates and is observed
             // (RunAsync faults with the init exception) and its CTS is disposed.
             // Swallow: the original exception must reach the caller.
@@ -261,6 +274,17 @@ public sealed class ActorSystem : IActorSystem
             throw;
         }
     }
+
+    /// <summary>
+    /// Remove <paramref name="actor"/> from the registry only if it is still the
+    /// registered instance for <paramref name="id"/>. Atomic: the key and the value are
+    /// compared under the dictionary's own lock, so a concurrent replacement cannot slip
+    /// between the check and the removal (a TryGetValue + TryRemove pair could).
+    /// </summary>
+    private bool RemoveIfSame(Guid id, ActorBase actor) =>
+        ((ICollection<KeyValuePair<Guid, ActorBase>>)_registry).Remove(
+            new KeyValuePair<Guid, ActorBase>(id, actor)
+        );
 
     /// <summary>
     /// Route unhandled fire-and-forget message errors to the logger so they are
