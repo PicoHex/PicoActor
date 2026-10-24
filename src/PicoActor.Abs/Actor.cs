@@ -17,6 +17,11 @@ public abstract class Actor : IActor, IAsyncDisposable
     private readonly Channel<Envelope> _mailbox;
     private readonly CancellationTokenSource _cts = new();
 
+    // Cached at construction: the CTS is disposed by the loop's exit path, and reading
+    // CancellationTokenSource.Token after disposal throws ObjectDisposedException. The
+    // token itself stays usable (and observable as cancelled) after disposal.
+    private readonly CancellationToken _stopToken;
+
     // RunContinuationsAsynchronously: the completing thread is the actor's own
     // loop — continuations must never run inline on it.
     private readonly TaskCompletionSource<bool> _ready = new(
@@ -66,11 +71,21 @@ public abstract class Actor : IActor, IAsyncDisposable
         try
         {
             var task = OnMessageAsync(creationCommand);
-            if (!task.IsCompleted)
+            // IsCompletedSuccessfully, not IsCompleted: a faulted or canceled ValueTask
+            // is "completed" too, and treating it as success swallowed the creation
+            // failure (CreateAsync returned a half-initialized actor whose
+            // construction events still flushed). Re-raise the ORIGINAL exception so
+            // the caller sees why creation failed.
+            if (!task.IsCompletedSuccessfully)
+            {
+                if (task.IsCompleted)
+                    task.GetAwaiter().GetResult();
+
                 throw new InvalidOperationException(
                     "OnMessageAsync must complete synchronously for creation commands. "
                         + "Use RaiseEvent or return a value directly; do not await."
                 );
+            }
         }
         catch
         {
@@ -93,7 +108,8 @@ public abstract class Actor : IActor, IAsyncDisposable
     protected Actor()
     {
         _mailbox = Channel.CreateUnbounded<Envelope>();
-        _loopTask = RunAsync(_cts.Token);
+        _stopToken = _cts.Token;
+        _loopTask = RunAsync(_stopToken);
     }
 
     /// <summary>
@@ -108,7 +124,7 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// The actor's cancellation token. Canceled when StopAsync is called.
     /// Subclasses pass this to async operations so Stop can interrupt long-running work.
     /// </summary>
-    protected CancellationToken StopToken => _cts.Token;
+    protected CancellationToken StopToken => _stopToken;
 
     /// <summary>
     /// Reference to the owning IActorSystem (set by <see cref="AttachToSystem"/>).
@@ -205,6 +221,15 @@ public abstract class Actor : IActor, IAsyncDisposable
             }
             _initCompleted.TrySetResult(true);
 
+            // Initialization is complete and already observable by the caller: let
+            // subclasses react (SagaActor auto-stops when the state it reached during
+            // replay/resume is terminal). Running it AFTER the init signal — and before
+            // the first mailbox message — keeps the actor registered for the whole
+            // initialization, so a concurrent GetAsync can observe this instance instead
+            // of racing a rebuild. Discarded copies run no lifecycle hooks.
+            if (!IsDiscarded)
+                OnInitialized();
+
             try
             {
                 await foreach (
@@ -231,6 +256,10 @@ public abstract class Actor : IActor, IAsyncDisposable
         }
         finally
         {
+            // Close the write end on EVERY exit path (including a loop that dies on its
+            // own, e.g. an init failure): otherwise Post keeps returning true with no
+            // reader left and an Ask queued afterwards hangs forever.
+            _mailbox.Writer.TryComplete();
             FailPendingEnvelopes();
         }
     }
@@ -303,6 +332,15 @@ public abstract class Actor : IActor, IAsyncDisposable
     protected virtual ValueTask OnReadyAsync() => default;
 
     /// <summary>
+    /// Lifecycle hook called once initialization has completed and been published to the
+    /// caller (<see cref="InitCompletedTask"/>), immediately before the mailbox loop
+    /// starts dispatching. Subclasses react to the state init produced — SagaActor
+    /// auto-stops when it is already terminal. Discarded copies (losing duplicates) skip it.
+    /// Overrides must call the base implementation.
+    /// </summary>
+    internal virtual void OnInitialized() { }
+
+    /// <summary>
     /// Signal the consumption loop to stop: release the ready gate (in case it
     /// was never signaled — e.g., discarded after failed creation or duplicate
     /// GetAsync rebuild), cancel the stop token, and complete the mailbox.
@@ -315,12 +353,26 @@ public abstract class Actor : IActor, IAsyncDisposable
         if (Interlocked.Exchange(ref _stopped, 1) != 0)
             return;
 
+        // Order matters: close the mailbox BEFORE cancelling. The loop disposes its CTS
+        // on exit, so Cancel() can throw ObjectDisposedException — running it last keeps
+        // the writer closure (and therefore the stop) effective even then.
         _ready.TrySetResult(true);
-        _cts.Cancel();
-        _mailbox.Writer.Complete();
+        _mailbox.Writer.TryComplete();
+        try
+        {
+            _cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The loop already exited and disposed its CTS: the stop is a no-op.
+        }
     }
 
-    /// <summary>Signal the loop to stop, wait for it to finish. The loop's finally disposes the CTS.</summary>
+    /// <summary>
+    /// Signal the loop to stop and wait for it to finish. Idempotent; safe after the
+    /// loop already exited. If the loop faulted (e.g. an initialization failure), the
+    /// fault is rethrown here — callers decide whether to propagate it.
+    /// </summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public async ValueTask StopAsync()
     {
