@@ -17,6 +17,9 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     private readonly ConcurrentDictionary<Guid, RebuildGate> _rebuildGates = new();
 
+    /// <summary>1 while <see cref="StopAllAsync"/> runs: new work is refused, lookups miss.</summary>
+    private int _stopping;
+
     /// <summary>
     /// Per-id single-flight gate for <see cref="GetAsync{T}"/>. <see cref="Entries"/> counts
     /// the callers that held the gate, which is how a caller tells "I am the first rebuild of
@@ -97,6 +100,12 @@ public sealed class ActorSystem : IActorSystem
     public async ValueTask<T> CreateAsync<T>(ICommand command)
         where T : IActor
     {
+        // Refuse new actors while the system is shutting down: one registered after the
+        // mass stop's snapshot would outlive the shutdown (and be handed to a caller that
+        // is about to be disposed). Checked before anything is constructed.
+        if (Volatile.Read(ref _stopping) != 0)
+            throw new InvalidOperationException("Actor system is stopping.");
+
         var id = Guid.CreateVersion7();
         if (!_factories.TryGetValue(typeof(T), out var factory))
             throw new InvalidOperationException(
@@ -163,6 +172,11 @@ public sealed class ActorSystem : IActorSystem
     public async ValueTask<T?> GetAsync<T>(Guid id)
         where T : IActor
     {
+        // A lookup during shutdown must not resurrect or hand out an actor that the mass
+        // stop is about to terminate (or has just terminated).
+        if (Volatile.Read(ref _stopping) != 0)
+            return default;
+
         if (_registry.TryGetValue(id, out var existing))
             return await ResolveRegisteredAsync<T>(id, existing).ConfigureAwait(false);
 
@@ -211,7 +225,6 @@ public sealed class ActorSystem : IActorSystem
                 if (events.Count == 0)
                     return default;
             }
-
 
             var actor = (ActorBase)(IActor)rebuildFactory();
             WireActor(actor, id);
@@ -510,14 +523,74 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <summary>
-    /// Gracefully stop every registered actor (code review #10 — host disposal
-    /// must not leak actor loops/CTSs until process exit).
+    /// Gracefully stop every registered actor (host disposal must not leak actor
+    /// loops/CTSs until process exit). Best effort: this method does NOT throw — a failing
+    /// actor is reported through the logger and the remaining ones are still stopped.
+    /// Drains the registry in rounds (bounded) instead of sweeping one snapshot, so an
+    /// actor that registers while the shutdown runs is stopped too. Creation is refused
+    /// (<see cref="CreateAsync{T}"/>) and lookups return default for the duration of the
+    /// call; the stopping window closes when it returns.
     /// </summary>
     public async ValueTask StopAllAsync()
     {
-        var ids = _registry.Keys.ToList();
-        foreach (var id in ids)
-            await StopAsync(id).ConfigureAwait(false);
+        Interlocked.Exchange(ref _stopping, 1);
+        try
+        {
+            // Bounded: each round stops everything registered at its start, so a registry
+            // that keeps gaining actors (a concurrent CreateAsync that already passed its
+            // check) is retried a few times and then reported instead of spinning forever.
+            for (var round = 0; round < 10; round++)
+            {
+                if (_registry.IsEmpty)
+                    return;
+
+                foreach (var id in _registry.Keys.ToList())
+                {
+                    // Per-actor isolation: one failing stop (a faulted loop, a throwing log
+                    // sink) must not leave every later actor running.
+                    try
+                    {
+                        await StopAsync(id).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        // The report is diagnostics, not control flow: a sink that throws
+                        // must not resurrect the exception this method promises not to throw.
+                        TryLog(l => l.Error($"Stopping actor {id} failed during shutdown: {ex.Message}"));
+                    }
+                }
+            }
+
+            if (!_registry.IsEmpty)
+                TryLog(l =>
+                    l.Warning($"{_registry.Count} actor(s) still registered after shutdown attempts")
+                );
+        }
+        finally
+        {
+            // The window ends with the call: a host (or a test) that keeps the system alive
+            // after a mass stop can create actors again.
+            Volatile.Write(ref _stopping, 0);
+        }
+    }
+
+    /// <summary>
+    /// Best-effort diagnostic: report through the logger without letting a failing sink
+    /// escape (shutdown reporting must never become a shutdown failure).
+    /// </summary>
+    private void TryLog(Action<ILogger> report)
+    {
+        if (_logger is null)
+            return;
+
+        try
+        {
+            report(_logger);
+        }
+        catch
+        {
+            // Diagnostics only: a broken sink is not a reason to fail the caller.
+        }
     }
 
     /// <inheritdoc/>

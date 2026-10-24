@@ -18,6 +18,9 @@ internal sealed class FixBLogSink : ILogger
 
     public IReadOnlyList<string> Messages => _messages.ToArray();
 
+    /// <summary>Record from a wrapper sink (see FixBFailingLogSink).</summary>
+    public void RecordPublic(string message) => Record(message);
+
     private void Record(string message)
     {
         _messages.Enqueue(message);
