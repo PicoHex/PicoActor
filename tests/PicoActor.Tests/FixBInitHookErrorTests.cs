@@ -34,6 +34,44 @@ internal sealed class FixBThrowingHookActor : ActorBase
     }
 }
 
+/// <summary>
+/// Probe for the REGISTERED variant: the hook blocks until the test releases it, so the
+/// creation call has already returned when the hook fails (no create/stop race).
+/// </summary>
+internal sealed class FixBBlockedHookProbe
+{
+    /// <summary>Completes from inside the hook, right before it blocks.</summary>
+    public TaskCompletionSource<bool> HookEntered { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Releases the hook so it proceeds to throw.</summary>
+    public ManualResetEventSlim Release { get; } = new(false);
+}
+
+/// <summary>
+/// Actor whose post-init hook fails only once the test lets it: the failure therefore
+/// happens on an actor that CreateAsync has already returned to the caller.
+/// </summary>
+internal sealed class FixBLateThrowingHookActor : ActorBase
+{
+    private readonly FixBBlockedHookProbe _probe;
+
+    public FixBLateThrowingHookActor(FixBBlockedHookProbe probe) => _probe = probe;
+
+    public bool StopRequested => StopToken.IsCancellationRequested;
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command) => default;
+
+    internal override void OnInitialized()
+    {
+        _probe.HookEntered.TrySetResult(true);
+        // The hook is synchronous by contract (internal virtual void): gate the loop
+        // thread until the test confirms the actor was handed out.
+        _probe.Release.Wait(TimeSpan.FromSeconds(10));
+        throw new InvalidOperationException("hook boom");
+    }
+}
+
 public sealed class FixBInitHookErrorTests
 {
     /// <summary>
@@ -71,5 +109,44 @@ public sealed class FixBInitHookErrorTests
         await actor.StopAsync();
         await Assert.That(actor.Post(new Envelope { Command = new FixBCreateCmd() })).IsFalse();
         await Assert.That(actor.StopRequested).IsTrue();
+    }
+
+    /// <summary>
+    /// The same hook failure on an actor that WAS registered through the system. Stopping
+    /// the loop alone left the dead instance in the registry: Send/Ask then failed with
+    /// InvalidOperationException ("stopping") and GetAsync handed out a dead handle.
+    /// A failed actor must leave the registry, so every lookup misses instead.
+    /// </summary>
+    [Test]
+    [Timeout(30000)]
+    public async Task OnInitializedThrows_RegisteredActor_LeavesTheRegistry(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var probe = new FixBBlockedHookProbe();
+        var system = new ActorSystem(
+            new ActorSystemOptions { EventStore = new InMemoryEventStore() }
+        );
+        system.Register<FixBLateThrowingHookActor>(_ => new FixBLateThrowingHookActor(probe));
+
+        var actor = await system.CreateAsync<FixBLateThrowingHookActor>(new FixBCreateCmd());
+        await probe.HookEntered.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+
+        // Release the hook and wait until the stop reached the actor. The runtime removes
+        // the registry entry BEFORE signalling the stop, so observing the stop means the
+        // registry is already clean (no sleep-and-hope).
+        probe.Release.Set();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!actor.StopRequested && DateTime.UtcNow < deadline)
+            await Task.Delay(5);
+        await Assert.That(actor.StopRequested).IsTrue();
+
+        await Assert
+            .That(() => system.Send(actor.Id, new FixBCreateCmd()))
+            .Throws<KeyNotFoundException>();
+        await Assert
+            .That(async () => await system.AskAsync<object?>(actor.Id, new FixBCreateCmd()))
+            .Throws<KeyNotFoundException>();
+        await Assert.That(await system.GetAsync<FixBLateThrowingHookActor>(actor.Id)).IsNull();
     }
 }

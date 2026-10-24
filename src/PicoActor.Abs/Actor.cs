@@ -241,7 +241,17 @@ public abstract class Actor : IActor, IAsyncDisposable
                     // actor that never dispatches again. Report through the same error seam
                     // as a failed message handler and stop explicitly: dead, and loud.
                     ReportInitializationHookError(ex);
-                    SignalStop();
+                    // The actor is dead, so it must LEAVE the registry, not merely stop its
+                    // loop: SignalStop alone left the dead instance registered, and every
+                    // lookup kept routing to it (Send/Ask threw "is stopping" and GetAsync
+                    // handed out a corpse instead of missing). RequestStop removes the entry
+                    // and signals the stop — the same shape as SagaActor.ScheduleStop.
+                    // Unattached actors (manually driven probes, and discarded copies built
+                    // before wiring) have no system to deregister from: stop directly.
+                    if (System is not null)
+                        System.RequestStop(Id);
+                    else
+                        SignalStop();
                     return;
                 }
             }
