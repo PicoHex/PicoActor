@@ -20,18 +20,6 @@ public sealed class ActorSystem : IActorSystem
     /// <summary>1 while <see cref="StopAllAsync"/> runs: new work is refused, lookups miss.</summary>
     private int _stopping;
 
-    /// <summary>
-    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>. <see cref="Entries"/> counts
-    /// the callers that held the gate, which is how a caller tells "I am the first rebuild of
-    /// this id" from "a previous rebuild left nothing registered" (see GetAsync).
-    /// </summary>
-    private sealed class RebuildGate
-    {
-        public SemaphoreSlim Semaphore { get; } = new(1, 1);
-
-        /// <summary>Entry count; only mutated while <see cref="Semaphore"/> is held.</summary>
-        public int Entries { get; set; }
-    }
     private readonly IEventStore _eventStore;
     private readonly IDomainEventPublisher? _publisher;
     private readonly ILogger? _logger;
@@ -674,5 +662,18 @@ public sealed class ActorSystem : IActorSystem
         return new SagaExecution<TResult>(saga.Id, result);
         // SagaExecutionException propagates through AskAsync after SagaActor.ProcessAsync
         // faults the TCS. Saga auto-stops via SagaActor.ProcessAsync → ScheduleStop.
+    }
+
+    /// <summary>
+    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>. <see cref="Entries"/> counts
+    /// the callers that held the gate, which is how a caller tells "I am the first rebuild of
+    /// this id" from "a previous rebuild left nothing registered" (see GetAsync).
+    /// </summary>
+    private sealed class RebuildGate
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        /// <summary>Entry count; only mutated while <see cref="Semaphore"/> is held.</summary>
+        public int Entries { get; set; }
     }
 }
