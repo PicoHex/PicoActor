@@ -24,6 +24,22 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         isEnabledByDefault: true
     );
 
+    /// <summary>
+    /// A subscriber shape the generator cannot emit — generic (no closed type to
+    /// instantiate) or file-local (unreachable from a generated tree) — used to be dropped
+    /// silently, so declare-and-subscribe just never fired. Warning, not Error: the
+    /// declaration is legal C# and a manual container.Register(...) makes it work, so
+    /// failing the build would break consumers that register by hand.
+    /// </summary>
+    private static readonly DiagnosticDescriptor UnregisterableSubscriberShape = new(
+        id: "PICA002",
+        title: "Domain-event subscriber is not auto-registered",
+        messageFormat: "IDomainEventSubscriber implementation '{0}' will not be auto-registered ({1}); register it manually in the container",
+        category: "PicoActor.Gen",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true
+    );
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         var subscriberDeclarations = context
@@ -58,22 +74,65 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
     private sealed class SubscriberInfo
     {
-        public SubscriberInfo(
+        private SubscriberInfo(
             INamedTypeSymbol implementationSymbol,
-            ITypeSymbol eventTypeSymbol,
+            ITypeSymbol? eventTypeSymbol,
             string eventTypeFqn,
             string implementationType,
+            Location? location,
             ImmutableArray<string> constructorParameterTypes,
-            bool hasAccessibleConstructor
+            bool hasAccessibleConstructor,
+            string? skipReason
         )
         {
             ImplementationSymbol = implementationSymbol;
             EventTypeSymbol = eventTypeSymbol;
             EventTypeFqn = eventTypeFqn;
             ImplementationType = implementationType;
+            Location = location;
             ConstructorParameterTypes = constructorParameterTypes;
             HasAccessibleConstructor = hasAccessibleConstructor;
+            SkipReason = skipReason;
         }
+
+        /// <summary>One registration: <paramref name="implementationSymbol"/> for one event type.</summary>
+        public static SubscriberInfo Registration(
+            INamedTypeSymbol implementationSymbol,
+            ITypeSymbol eventTypeSymbol,
+            string eventTypeFqn,
+            string implementationType,
+            Location? location,
+            ImmutableArray<string> constructorParameterTypes,
+            bool hasAccessibleConstructor
+        ) =>
+            new(
+                implementationSymbol,
+                eventTypeSymbol,
+                eventTypeFqn,
+                implementationType,
+                location,
+                constructorParameterTypes,
+                hasAccessibleConstructor,
+                skipReason: null
+            );
+
+        /// <summary>A subscriber declaration the generator must skip and report (PICA002).</summary>
+        public static SubscriberInfo Skipped(
+            INamedTypeSymbol implementationSymbol,
+            string implementationType,
+            Location? location,
+            string reason
+        ) =>
+            new(
+                implementationSymbol,
+                eventTypeSymbol: null,
+                eventTypeFqn: string.Empty,
+                implementationType,
+                location,
+                [],
+                hasAccessibleConstructor: true,
+                skipReason: reason
+            );
 
         /// <summary>
         /// The merged (partial-collapsed) handler symbol. The scan is syntax-driven, so a
@@ -82,10 +141,14 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         /// </summary>
         public INamedTypeSymbol ImplementationSymbol { get; }
 
-        public ITypeSymbol EventTypeSymbol { get; }
+        public ITypeSymbol? EventTypeSymbol { get; }
         public string EventTypeFqn { get; }
         public string ImplementationType { get; }
+        public Location? Location { get; }
         public ImmutableArray<string> ConstructorParameterTypes { get; }
+
+        /// <summary>Non-null → the shape cannot be emitted at all (PICA002), with the reason.</summary>
+        public string? SkipReason { get; }
 
         /// <summary>False → the declaration cannot be instantiated by generated code (PICA001).</summary>
         public bool HasAccessibleConstructor { get; }
@@ -94,6 +157,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         public bool HasSameShapeAs(SubscriberInfo other) =>
             string.Equals(EventTypeFqn, other.EventTypeFqn, StringComparison.Ordinal)
             && string.Equals(ImplementationType, other.ImplementationType, StringComparison.Ordinal)
+            && string.Equals(SkipReason, other.SkipReason, StringComparison.Ordinal)
             && HasAccessibleConstructor == other.HasAccessibleConstructor
             && ConstructorParameterTypes.SequenceEqual(
                 other.ConstructorParameterTypes,
@@ -108,6 +172,9 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 var hash = 17;
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(EventTypeFqn);
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(ImplementationType);
+                hash =
+                    (hash * 31)
+                    + (SkipReason is null ? 0 : StringComparer.Ordinal.GetHashCode(SkipReason));
                 hash = (hash * 31) + ConstructorParameterTypes.Length;
                 hash = (hash * 31) + (HasAccessibleConstructor ? 1 : 0);
                 return hash;
@@ -123,9 +190,9 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
     private readonly struct RegistrationKey : IEquatable<RegistrationKey>
     {
         private readonly INamedTypeSymbol _implementation;
-        private readonly ITypeSymbol _eventType;
+        private readonly ITypeSymbol? _eventType;
 
-        public RegistrationKey(INamedTypeSymbol implementation, ITypeSymbol eventType)
+        public RegistrationKey(INamedTypeSymbol implementation, ITypeSymbol? eventType)
         {
             _implementation = implementation;
             _eventType = eventType;
@@ -142,7 +209,13 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             unchecked
             {
                 var hash = SymbolEqualityComparer.Default.GetHashCode(_implementation);
-                hash = (hash * 397) ^ SymbolEqualityComparer.Default.GetHashCode(_eventType);
+                hash =
+                    (hash * 397)
+                    ^ (
+                        _eventType is null
+                            ? 0
+                            : SymbolEqualityComparer.Default.GetHashCode(_eventType)
+                    );
                 return hash;
             }
         }
@@ -188,25 +261,32 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             return [];
 
         var typeSymbol = ctx.SemanticModel.GetDeclaredSymbol(typeDecl, ct) as INamedTypeSymbol;
-        var accessibility = typeSymbol?.DeclaredAccessibility;
-        if (
-            typeSymbol is null
-            || typeSymbol.IsAbstract
-            || typeSymbol.IsGenericType
-            || (accessibility != Accessibility.Public && accessibility != Accessibility.Internal)
-        )
+        if (typeSymbol is null || typeSymbol.IsAbstract)
             return [];
+
+        var accessibility = typeSymbol.DeclaredAccessibility;
+        if (accessibility != Accessibility.Public && accessibility != Accessibility.Internal)
+            return [];
+
+        // Cheap probe first: most declarations in a compilation are not subscribers.
+        if (!typeSymbol.AllInterfaces.Any(static i => IsDomainEventSubscriberInterface(i)))
+            return [];
+
+        var implementationType = typeSymbol.ToDisplayString(
+            SymbolDisplayFormat.FullyQualifiedFormat
+        );
+        var location = typeSymbol.Locations.Length > 0 ? typeSymbol.Locations[0] : null;
+
+        // Shapes whose registration cannot be emitted. Returning [] silently — the previous
+        // behavior — made declare-and-subscribe a no-op with nothing in the build log.
+        var skipReason = SkipReasonFor(typeSymbol);
+        if (skipReason is not null)
+            return [SubscriberInfo.Skipped(typeSymbol, implementationType, location, skipReason)];
 
         var results = ImmutableArray.CreateBuilder<SubscriberInfo>();
         foreach (var iface in typeSymbol.AllInterfaces)
         {
-            if (!iface.IsGenericType)
-                continue;
-
-            var constructed = iface.ConstructedFrom;
-            if (constructed.ContainingNamespace.ToDisplayString() != "PicoActor.Abs")
-                continue;
-            if (constructed.MetadataName != "IDomainEventSubscriber`1")
+            if (!IsDomainEventSubscriberInterface(iface))
                 continue;
 
             var ctor = typeSymbol
@@ -228,11 +308,12 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
             var eventTypeSymbol = iface.TypeArguments[0];
             results.Add(
-                new SubscriberInfo(
+                SubscriberInfo.Registration(
                     typeSymbol,
                     eventTypeSymbol,
                     eventTypeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                    typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    implementationType,
+                    location,
                     ctorParams,
                     ctor is not null
                 )
@@ -240,6 +321,35 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         }
 
         return results.ToImmutable();
+    }
+
+    /// <summary>
+    /// Namespace-locked scan: only PicoActor.Abs.IDomainEventSubscriber&lt;TEvent&gt; counts —
+    /// a PicoMediator ISubscriber&lt;TEvent&gt; is somebody else's registration.
+    /// </summary>
+    private static bool IsDomainEventSubscriberInterface(INamedTypeSymbol iface) =>
+        iface.IsGenericType
+        && iface.ConstructedFrom.ContainingNamespace.ToDisplayString() == "PicoActor.Abs"
+        && iface.ConstructedFrom.MetadataName == "IDomainEventSubscriber`1";
+
+    /// <summary>
+    /// Why this declaration cannot be turned into generated registration code, or null.
+    /// Both reasons are legal C# the generator simply cannot reference from another tree.
+    /// </summary>
+    private static string? SkipReasonFor(INamedTypeSymbol typeSymbol)
+    {
+        if (typeSymbol.IsFileLocal)
+            return "file-local types cannot be referenced from generated code";
+
+        // Nested inside a generic type counts too: the generated new X(...) could only name
+        // an open type, so the registration would not compile.
+        for (var current = typeSymbol; current is not null; current = current.ContainingType)
+        {
+            if (current.IsGenericType)
+                return "generic subscriber types cannot be instantiated by the generated factory";
+        }
+
+        return null;
     }
 
     private static void GenerateRegistrations(
@@ -268,6 +378,19 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         var registrable = ImmutableArray.CreateBuilder<SubscriberInfo>(subscribers.Length);
         foreach (var s in distinct)
         {
+            if (s.SkipReason is { } reason)
+            {
+                context.ReportDiagnostic(
+                    Diagnostic.Create(
+                        UnregisterableSubscriberShape,
+                        s.Location ?? Location.None,
+                        s.ImplementationType,
+                        reason
+                    )
+                );
+                continue;
+            }
+
             if (s.HasAccessibleConstructor)
             {
                 registrable.Add(s);
@@ -275,7 +398,11 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             }
 
             context.ReportDiagnostic(
-                Diagnostic.Create(UnregistrableSubscriber, Location.None, s.ImplementationType)
+                Diagnostic.Create(
+                    UnregistrableSubscriber,
+                    s.Location ?? Location.None,
+                    s.ImplementationType
+                )
             );
         }
 
