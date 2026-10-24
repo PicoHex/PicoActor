@@ -48,11 +48,22 @@ internal sealed class FixAAsyncCreationActor : EventSourcedActor
         }
     }
 
-    private static async ValueTask<object?> CompletesLaterAsync()
-    {
-        await Task.Delay(50).ConfigureAwait(false);
-        return null;
-    }
+    /// <summary>
+    /// A creation handler that NEVER completes. Deterministic by construction: nothing in
+    /// this suite completes the gate, so the ValueTask is incomplete at the instant the
+    /// constructor checks it — no window, no dependency on how loaded the machine is. The
+    /// old <c>await Task.Delay(50)</c> only made it *probable* that the check ran inside
+    /// the delay: a machine that stalls the test thread for 50 ms before the constructor
+    /// reaches the check (GC pause, debugger, CI contention) would see a COMPLETED ValueTask
+    /// and the test would pass/fail on timing instead of on the contract. The actor that
+    /// awaits this gate is discarded and stopped by the failing constructor, so the pending
+    /// continuation is never resumed and leaks nothing.
+    /// </summary>
+    private static readonly TaskCompletionSource<object?> NeverCompletingGate = new(
+        TaskCreationOptions.RunContinuationsAsynchronously
+    );
+
+    private static ValueTask<object?> CompletesLaterAsync() => new(NeverCompletingGate.Task);
 
     protected override void Mutate(IDomainEvent @event) { }
 }
