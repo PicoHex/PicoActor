@@ -72,92 +72,95 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         );
     }
 
+    /// <summary>
+    /// One registration decision, carried through the incremental pipeline as VALUES only.
+    /// It deliberately holds no Roslyn object: a symbol — and a <c>Location</c> just the same
+    /// — keeps the Compilation and every SyntaxTree of the project it was read from alive for
+    /// as long as a pipeline node caches it, i.e. for the whole session. The identity is
+    /// therefore a string, and the diagnostic position is three plain values that are turned
+    /// back into a Location only at output time.
+    /// </summary>
     private sealed class SubscriberInfo
     {
         private SubscriberInfo(
-            INamedTypeSymbol implementationSymbol,
-            ITypeSymbol? eventTypeSymbol,
+            string registrationKey,
             string eventTypeFqn,
             string implementationType,
-            Location? location,
             ImmutableArray<string> constructorParameterTypes,
             bool hasAccessibleConstructor,
-            string? skipReason
+            string? skipReason,
+            string? diagnosticFilePath,
+            TextSpan diagnosticSpan,
+            LinePositionSpan diagnosticLineSpan
         )
         {
-            ImplementationSymbol = implementationSymbol;
-            EventTypeSymbol = eventTypeSymbol;
+            RegistrationKey = registrationKey;
             EventTypeFqn = eventTypeFqn;
             ImplementationType = implementationType;
-            Location = location;
             ConstructorParameterTypes = constructorParameterTypes;
             HasAccessibleConstructor = hasAccessibleConstructor;
             SkipReason = skipReason;
+            DiagnosticFilePath = diagnosticFilePath;
+            DiagnosticSpan = diagnosticSpan;
+            DiagnosticLineSpan = diagnosticLineSpan;
         }
 
-        /// <summary>One registration: <paramref name="implementationSymbol"/> for one event type.</summary>
+        /// <summary>One registration: <paramref name="implementationType"/> for one event type.</summary>
         public static SubscriberInfo Registration(
-            INamedTypeSymbol implementationSymbol,
-            ITypeSymbol eventTypeSymbol,
+            string registrationKey,
             string eventTypeFqn,
             string implementationType,
-            Location? location,
             ImmutableArray<string> constructorParameterTypes,
-            bool hasAccessibleConstructor
+            bool hasAccessibleConstructor,
+            string? diagnosticFilePath,
+            TextSpan diagnosticSpan,
+            LinePositionSpan diagnosticLineSpan
         ) =>
             new(
-                implementationSymbol,
-                eventTypeSymbol,
+                registrationKey,
                 eventTypeFqn,
                 implementationType,
-                location,
                 constructorParameterTypes,
                 hasAccessibleConstructor,
-                skipReason: null
+                skipReason: null,
+                diagnosticFilePath,
+                diagnosticSpan,
+                diagnosticLineSpan
             );
 
         /// <summary>A subscriber declaration the generator must skip and report (PICA002).</summary>
         public static SubscriberInfo Skipped(
-            INamedTypeSymbol implementationSymbol,
+            string registrationKey,
             string implementationType,
-            Location? location,
-            string reason
+            string reason,
+            string? diagnosticFilePath,
+            TextSpan diagnosticSpan,
+            LinePositionSpan diagnosticLineSpan
         ) =>
             new(
-                implementationSymbol,
-                eventTypeSymbol: null,
+                registrationKey,
                 eventTypeFqn: string.Empty,
                 implementationType,
-                location,
                 [],
                 hasAccessibleConstructor: true,
-                skipReason: reason
+                skipReason: reason,
+                diagnosticFilePath,
+                diagnosticSpan,
+                diagnosticLineSpan
             );
 
         /// <summary>
-        /// The merged (partial-collapsed) handler symbol. The scan is syntax-driven, so a
-        /// type whose base list is spread over several partial declarations is visited once
-        /// per declaration while this symbol stays the SAME — it is the identity key.
+        /// Stable identity of one registration: assembly + fully-qualified handler +
+        /// fully-qualified event type. The scan is syntax-driven, so a type whose base list
+        /// is spread over several partial declarations is visited once per declaration while
+        /// every visit produces the SAME key — that is what collapses the registration back
+        /// to one. And because the key is the fully-qualified name (never a short name), two
+        /// handlers from different namespaces stay apart.
         /// </summary>
-        public INamedTypeSymbol ImplementationSymbol { get; }
+        public string RegistrationKey { get; }
 
-        public ITypeSymbol? EventTypeSymbol { get; }
         public string EventTypeFqn { get; }
         public string ImplementationType { get; }
-
-        /// <summary>
-        /// Where the declaration was first seen, used ONLY to place diagnostics (PICA001/
-        /// PICA002). It is deliberately NOT part of <see cref="HasSameShapeAs"/> /
-        /// <see cref="ShapeHashCode"/>: including a line/column would make every edit above a
-        /// declaration — a comment, a using, a blank line — look like a new shape and
-        /// invalidate the incremental cache for the whole compilation. The trade-off is that
-        /// a reported location can be slightly stale (it points at where the declaration was
-        /// when the cached shape was produced) until the next real shape change; a stale
-        /// line number in a build diagnostic is cheaper than losing incrementality on every
-        /// keystroke.
-        /// </summary>
-        public Location? Location { get; }
-
         public ImmutableArray<string> ConstructorParameterTypes { get; }
 
         /// <summary>Non-null → the shape cannot be emitted at all (PICA002), with the reason.</summary>
@@ -167,12 +170,29 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         public bool HasAccessibleConstructor { get; }
 
         /// <summary>
+        /// Where the declaration was first seen, used ONLY to place diagnostics (PICA001/
+        /// PICA002). Null when the symbol had no source position. It is deliberately NOT part
+        /// of <see cref="HasSameShapeAs"/> / <see cref="ShapeHashCode"/>: including a
+        /// line/column would make every edit above a declaration — a comment, a using, a
+        /// blank line — look like a new shape and invalidate the incremental cache for the
+        /// whole compilation. The trade-off is that a reported location can be slightly stale
+        /// (it points at where the declaration was when the cached shape was produced) until
+        /// the next real shape change; a stale line number in a build diagnostic is cheaper
+        /// than losing incrementality on every keystroke.
+        /// </summary>
+        public string? DiagnosticFilePath { get; }
+
+        public TextSpan DiagnosticSpan { get; }
+        public LinePositionSpan DiagnosticLineSpan { get; }
+
+        /// <summary>
         /// Structural comparison over the fields that affect generated code — and only those.
-        /// <see cref="Location"/> is excluded on purpose (see its remarks), so a pure line
+        /// The diagnostic position is excluded on purpose (see its remarks), so a pure line
         /// shift reuses the cached output instead of regenerating it.
         /// </summary>
         public bool HasSameShapeAs(SubscriberInfo other) =>
-            string.Equals(EventTypeFqn, other.EventTypeFqn, StringComparison.Ordinal)
+            string.Equals(RegistrationKey, other.RegistrationKey, StringComparison.Ordinal)
+            && string.Equals(EventTypeFqn, other.EventTypeFqn, StringComparison.Ordinal)
             && string.Equals(ImplementationType, other.ImplementationType, StringComparison.Ordinal)
             && string.Equals(SkipReason, other.SkipReason, StringComparison.Ordinal)
             && HasAccessibleConstructor == other.HasAccessibleConstructor
@@ -187,6 +207,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             unchecked
             {
                 var hash = 17;
+                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(RegistrationKey);
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(EventTypeFqn);
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(ImplementationType);
                 hash =
@@ -194,45 +215,6 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     + (SkipReason is null ? 0 : StringComparer.Ordinal.GetHashCode(SkipReason));
                 hash = (hash * 31) + ConstructorParameterTypes.Length;
                 hash = (hash * 31) + (HasAccessibleConstructor ? 1 : 0);
-                return hash;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Identity of one registration: (handler type, event type). Roslyn symbols compare
-    /// with <see cref="SymbolEqualityComparer"/>, which is exact — two distinct types that
-    /// happen to share a display name (or a sanitized identifier) never collapse.
-    /// </summary>
-    private readonly struct RegistrationKey : IEquatable<RegistrationKey>
-    {
-        private readonly INamedTypeSymbol _implementation;
-        private readonly ITypeSymbol? _eventType;
-
-        public RegistrationKey(INamedTypeSymbol implementation, ITypeSymbol? eventType)
-        {
-            _implementation = implementation;
-            _eventType = eventType;
-        }
-
-        public bool Equals(RegistrationKey other) =>
-            SymbolEqualityComparer.Default.Equals(_implementation, other._implementation)
-            && SymbolEqualityComparer.Default.Equals(_eventType, other._eventType);
-
-        public override bool Equals(object? obj) => obj is RegistrationKey other && Equals(other);
-
-        public override int GetHashCode()
-        {
-            unchecked
-            {
-                var hash = SymbolEqualityComparer.Default.GetHashCode(_implementation);
-                hash =
-                    (hash * 397)
-                    ^ (
-                        _eventType is null
-                            ? 0
-                            : SymbolEqualityComparer.Default.GetHashCode(_eventType)
-                    );
                 return hash;
             }
         }
@@ -292,13 +274,29 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         var implementationType = typeSymbol.ToDisplayString(
             SymbolDisplayFormat.FullyQualifiedFormat
         );
+        var assemblyName = typeSymbol.ContainingAssembly?.Name ?? string.Empty;
         var location = typeSymbol.Locations.Length > 0 ? typeSymbol.Locations[0] : null;
+        var (diagnosticFilePath, diagnosticSpan, diagnosticLineSpan) = PositionOf(location);
 
         // Shapes whose registration cannot be emitted. Returning [] silently — the previous
         // behavior — made declare-and-subscribe a no-op with nothing in the build log.
         var skipReason = SkipReasonFor(typeSymbol);
         if (skipReason is not null)
-            return [SubscriberInfo.Skipped(typeSymbol, implementationType, location, skipReason)];
+            return
+            [
+                SubscriberInfo.Skipped(
+                    RegistrationKeyFor(
+                        assemblyName,
+                        implementationType,
+                        eventTypeFqn: string.Empty
+                    ),
+                    implementationType,
+                    skipReason,
+                    diagnosticFilePath,
+                    diagnosticSpan,
+                    diagnosticLineSpan
+                ),
+            ];
 
         var results = ImmutableArray.CreateBuilder<SubscriberInfo>();
         foreach (var iface in typeSymbol.AllInterfaces)
@@ -323,21 +321,51 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     )
                     .ToImmutableArray();
 
-            var eventTypeSymbol = iface.TypeArguments[0];
+            var eventTypeFqn = iface
+                .TypeArguments[0]
+                .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
             results.Add(
                 SubscriberInfo.Registration(
-                    typeSymbol,
-                    eventTypeSymbol,
-                    eventTypeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    RegistrationKeyFor(assemblyName, implementationType, eventTypeFqn),
+                    eventTypeFqn,
                     implementationType,
-                    location,
                     ctorParams,
-                    ctor is not null
+                    hasAccessibleConstructor: ctor is not null,
+                    diagnosticFilePath,
+                    diagnosticSpan,
+                    diagnosticLineSpan
                 )
             );
         }
 
         return results.ToImmutable();
+    }
+
+    /// <summary>
+    /// Identity of one registration as a plain string: assembly, fully-qualified handler and
+    /// fully-qualified event type. Being strings, two visits of the same partial declaration
+    /// agree, while two types that merely share a short name never do.
+    /// </summary>
+    private static string RegistrationKeyFor(
+        string assemblyName,
+        string implementationType,
+        string eventTypeFqn
+    ) => $"{assemblyName}::{implementationType}::{eventTypeFqn}";
+
+    /// <summary>
+    /// A declaration position reduced to plain values. The Location object is dropped on
+    /// purpose: it keeps its SyntaxTree — and through it the whole Compilation — alive for as
+    /// long as the pipeline caches the value.
+    /// </summary>
+    private static (string? FilePath, TextSpan Span, LinePositionSpan LineSpan) PositionOf(
+        Location? location
+    )
+    {
+        if (location is null || location.Kind == LocationKind.None)
+            return (null, default, default);
+
+        var lineSpan = location.GetLineSpan();
+        return (lineSpan.Path, location.SourceSpan, lineSpan.Span);
     }
 
     /// <summary>
@@ -379,14 +407,15 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             return;
 
         // The scan is syntax-driven: a partial type with a base list in more than one
-        // declaration is visited once per declaration, while GetDeclaredSymbol returns the
-        // same MERGED symbol each time. Without this, one handler would be registered twice
-        // for the same event type. Dedupe on the symbols themselves, never on strings.
-        var seen = new HashSet<RegistrationKey>();
+        // declaration is visited once per declaration, and each visit produces the same
+        // registration key. Without this, one handler would be registered twice for the same
+        // event type. Dedupe on that VALUE key, never on a Roslyn symbol: a symbol kept in
+        // the pipeline roots the Compilation it came from.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         var distinct = ImmutableArray.CreateBuilder<SubscriberInfo>(subscribers.Length);
         foreach (var s in subscribers)
         {
-            if (seen.Add(new RegistrationKey(s.ImplementationSymbol, s.EventTypeSymbol)))
+            if (seen.Add(s.RegistrationKey))
                 distinct.Add(s);
         }
 
@@ -400,7 +429,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         UnregisterableSubscriberShape,
-                        s.Location ?? Location.None,
+                        DiagnosticLocation(s),
                         s.ImplementationType,
                         reason
                     )
@@ -417,7 +446,7 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             context.ReportDiagnostic(
                 Diagnostic.Create(
                     UnregistrableSubscriber,
-                    s.Location ?? Location.None,
+                    DiagnosticLocation(s),
                     s.ImplementationType
                 )
             );
@@ -566,6 +595,20 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             sb.ToString()
         );
     }
+
+    /// <summary>
+    /// Materializes the stored position as a Location — at OUTPUT time only. No pipeline
+    /// state is a Location: a source Location keeps its SyntaxTree, and through it the whole
+    /// Compilation, alive for as long as the cached node lives.
+    /// </summary>
+    private static Location DiagnosticLocation(SubscriberInfo subscriber) =>
+        subscriber.DiagnosticFilePath is null
+            ? Location.None
+            : Location.Create(
+                subscriber.DiagnosticFilePath,
+                subscriber.DiagnosticSpan,
+                subscriber.DiagnosticLineSpan
+            );
 
     private static string EmitFactory(SubscriberInfo s)
     {
