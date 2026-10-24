@@ -20,8 +20,7 @@ internal sealed class FixAInitThrowActor : Actor
 
     protected override ValueTask<object?> OnMessageAsync(ICommand command) => default;
 
-    protected override ValueTask OnReadyAsync() =>
-        throw new InvalidOperationException("init boom");
+    protected override ValueTask OnReadyAsync() => throw new InvalidOperationException("init boom");
 }
 
 public sealed class FixAStopLifecycleTests
@@ -125,7 +124,9 @@ public sealed class FixAStopLifecycleTests
             await Task.Delay(10);
         }
 
-        await Assert.That(actor.Post(new Envelope { Command = new FixALifecycleProbe() })).IsFalse();
+        await Assert
+            .That(actor.Post(new Envelope { Command = new FixALifecycleProbe() }))
+            .IsFalse();
     }
 
     /// <summary>
@@ -142,9 +143,7 @@ public sealed class FixAStopLifecycleTests
             (FixALifecycleProbe)cmd
         ));
 
-        var actor = await system.CreateAsync<FixALifecycleProbeActor>(
-            new FixALifecycleProbe()
-        );
+        var actor = await system.CreateAsync<FixALifecycleProbeActor>(new FixALifecycleProbe());
 
         // Occupy the loop, buffer work behind it, then stop while it is queued.
         var blocking = system.AskAsync<int>(actor.Id, new FixAProbeBlock(actor)).AsTask();

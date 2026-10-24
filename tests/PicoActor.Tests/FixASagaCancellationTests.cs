@@ -55,7 +55,11 @@ internal sealed class FixACancelSaga : SagaActor
 
 public sealed class FixASagaCancellationTests
 {
-    private static async Task<(ActorSystem System, InMemoryEventStore Store, FixACancelSaga Saga)> NewSaga()
+    private static async Task<(
+        ActorSystem System,
+        InMemoryEventStore Store,
+        FixACancelSaga Saga
+    )> NewSaga()
     {
         var store = new InMemoryEventStore();
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });

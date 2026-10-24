@@ -20,10 +20,7 @@ internal static class FixCGeneratorHarness
     )
     {
         var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(languageVersion);
-        var trees = new List<SyntaxTree>
-        {
-            CSharpSyntaxTree.ParseText(source, parseOptions),
-        };
+        var trees = new List<SyntaxTree> { CSharpSyntaxTree.ParseText(source, parseOptions) };
         foreach (var extra in extraSources ?? [])
             trees.Add(CSharpSyntaxTree.ParseText(extra, parseOptions));
 
@@ -44,7 +41,10 @@ internal static class FixCGeneratorHarness
         var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(languageVersion);
         var compilation = CreateCompilation(assemblyName, source, languageVersion);
         return CSharpGeneratorDriver
-            .Create([new ActorSubscriberGenerator().AsSourceGenerator()], parseOptions: parseOptions)
+            .Create(
+                [new ActorSubscriberGenerator().AsSourceGenerator()],
+                parseOptions: parseOptions
+            )
             .RunGeneratorsAndUpdateCompilation(compilation, out _, out _);
     }
 
@@ -61,7 +61,10 @@ internal static class FixCGeneratorHarness
         var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(languageVersion);
         var compilation = CreateCompilation(assemblyName, source, languageVersion);
         var driver = CSharpGeneratorDriver
-            .Create([new ActorSubscriberGenerator().AsSourceGenerator()], parseOptions: parseOptions)
+            .Create(
+                [new ActorSubscriberGenerator().AsSourceGenerator()],
+                parseOptions: parseOptions
+            )
             .RunGeneratorsAndUpdateCompilation(compilation, out var output, out _);
 
         // Keep the driver alive: without a reference to it the generated trees of
@@ -83,8 +86,12 @@ internal static class FixCGeneratorHarness
 
         // AppContext.BaseDirectory, not Assembly.Location: the latter is empty under
         // single-file/AOT packaging and trips IL3000 once the AOT analyzer is on.
-        foreach (var name in (string[])["PicoActor.Abs.dll", "PicoMediator.Abs.dll", "PicoDI.Abs.dll"])
-            refs.Add(MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, name)));
+        foreach (
+            var name in (string[])["PicoActor.Abs.dll", "PicoMediator.Abs.dll", "PicoDI.Abs.dll"]
+        )
+            refs.Add(
+                MetadataReference.CreateFromFile(Path.Combine(AppContext.BaseDirectory, name))
+            );
 
         return [.. refs];
     }

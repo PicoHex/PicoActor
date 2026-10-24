@@ -324,6 +324,7 @@ public sealed class FixBGetAsyncSingleFlightTests
         await Assert.That(await first).IsNull();
         await stopTask;
     }
+
     /// <summary>
     /// The core duplicate-resume race: two callers hold the same pre-flush snapshot; the
     /// winner rebuilds, resumes and completes the saga, which unregisters itself during

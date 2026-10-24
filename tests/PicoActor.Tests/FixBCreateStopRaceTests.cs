@@ -96,7 +96,12 @@ public sealed class FixBCreateStopRaceTests
         await Assert.That(failure).IsNotNull();
         await Assert.That(failure).IsTypeOf<InvalidOperationException>();
         await Assert
-            .That(failure!.Message.Contains("was stopped during initialization", StringComparison.Ordinal))
+            .That(
+                failure!.Message.Contains(
+                    "was stopped during initialization",
+                    StringComparison.Ordinal
+                )
+            )
             .IsTrue();
 
         await stopTask;

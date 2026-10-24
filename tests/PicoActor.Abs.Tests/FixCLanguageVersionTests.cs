@@ -32,7 +32,9 @@ public sealed class FixCLanguageVersionTests
             LanguageVersion.CSharp11
         );
 
-        await Assert.That(string.Join(Environment.NewLine, errors.Select(static e => e.ToString()))).IsEmpty();
+        await Assert
+            .That(string.Join(Environment.NewLine, errors.Select(static e => e.ToString())))
+            .IsEmpty();
     }
 
     [Test]

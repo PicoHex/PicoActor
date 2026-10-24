@@ -399,9 +399,7 @@ public sealed class ActorSystem : IActorSystem
             // (registry-less, unreachable, never stopped). Remove only if the registered
             // instance is still THE failed one.
             if (RemoveIfSame(id, actor))
-                _logger?.Error(
-                    $"Actor {actor.GetType().Name} {id} initialization failed, removed"
-                );
+                _logger?.Error($"Actor {actor.GetType().Name} {id} initialization failed, removed");
             else
                 _logger?.Warning(
                     $"Actor {actor.GetType().Name} {id} initialization failed; the registry "
@@ -573,14 +571,18 @@ public sealed class ActorSystem : IActorSystem
                     {
                         // The report is diagnostics, not control flow: a sink that throws
                         // must not resurrect the exception this method promises not to throw.
-                        TryLog(l => l.Error($"Stopping actor {id} failed during shutdown: {ex.Message}"));
+                        TryLog(l =>
+                            l.Error($"Stopping actor {id} failed during shutdown: {ex.Message}")
+                        );
                     }
                 }
             }
 
             if (!_registry.IsEmpty)
                 TryLog(l =>
-                    l.Warning($"{_registry.Count} actor(s) still registered after shutdown attempts")
+                    l.Warning(
+                        $"{_registry.Count} actor(s) still registered after shutdown attempts"
+                    )
                 );
         }
         finally

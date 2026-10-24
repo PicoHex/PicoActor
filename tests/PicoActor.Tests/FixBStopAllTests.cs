@@ -298,6 +298,7 @@ public sealed class FixBStopAllTests
             .That(() => system.Send(blocked.Id, new FixBCreateCmd()))
             .Throws<KeyNotFoundException>();
     }
+
     /// <summary>
     /// A log sink that throws on EVERY shutdown report must not break the "StopAllAsync
     /// never throws" contract: the diagnostics are best-effort like the shutdown itself.
