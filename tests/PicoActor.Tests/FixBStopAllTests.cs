@@ -326,3 +326,185 @@ public sealed class FixBStopAllTests
                 .Throws<KeyNotFoundException>();
     }
 }
+
+/// <summary>
+/// Log sink that throws on EVERY report, whatever its text (P1). A throwing diagnostic
+/// channel must never be able to keep an actor loop alive: the registry entry is already
+/// gone by then, so a surviving loop is unreachable — no later sweep can find it.
+/// Counts the calls so a test can prove the sink was really consulted.
+/// </summary>
+internal sealed class FixBPoisonLogSink : ILogger
+{
+    private int _calls;
+    private int _armed;
+
+    public int Calls => Volatile.Read(ref _calls);
+
+    /// <summary>Start throwing. Before this the sink only records — the scenario under test is the STOP, not creation.</summary>
+    public void Arm() => Volatile.Write(ref _armed, 1);
+
+    private void Throw(string message)
+    {
+        Interlocked.Increment(ref _calls);
+        if (Volatile.Read(ref _armed) != 0)
+            throw new IOException($"log sink down: {message}");
+    }
+
+    public IDisposable BeginScope<TState>(TState state)
+        where TState : notnull => new NullScope();
+
+    public void Log(
+        LogLevel logLevel,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Throw(message);
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Throw(message);
+        return Task.CompletedTask;
+    }
+
+    public void Log(
+        LogLevel logLevel,
+        EventId eventId,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Throw(message);
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        EventId eventId,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Throw(message);
+        return Task.CompletedTask;
+    }
+
+    public void Log(
+        LogLevel logLevel,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Throw(message.ToString());
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Throw(message.ToString());
+        return Task.CompletedTask;
+    }
+
+    public void Log(
+        LogLevel logLevel,
+        EventId eventId,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => Throw(message.ToString());
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        EventId eventId,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    )
+    {
+        Throw(message.ToString());
+        return Task.CompletedTask;
+    }
+
+    private sealed class NullScope : IDisposable
+    {
+        public void Dispose() { }
+    }
+}
+
+public sealed class FixBPoisonSinkStopTests
+{
+    /// <summary>
+    /// P1 — StopAllAsync: every loop must really exit even when the log sink throws on
+    /// every report. The proof is <c>Post</c> returning false (the mailbox write end is
+    /// closed by the loop's exit path); <c>Send</c> throwing KeyNotFoundException proves
+    /// nothing, because the registry entry is removed BEFORE the stop is signalled.
+    /// </summary>
+    [Test]
+    [Timeout(15000)]
+    public async Task StopAllAsync_PoisonLogSink_StillStopsEveryLoop(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var log = new FixBPoisonLogSink();
+        var system = new ActorSystem(
+            new ActorSystemOptions { EventStore = new InMemoryEventStore(), Logger = log }
+        );
+        system.Register<FixBStopAllActor>(cmd => new FixBStopAllActor((FixBCreateCmd)cmd));
+
+        var actors = new List<FixBStopAllActor>();
+        for (var i = 0; i < 3; i++)
+            actors.Add(await system.CreateAsync<FixBStopAllActor>(new FixBCreateCmd()));
+
+        log.Arm();
+        await system.StopAllAsync(); // must not throw despite the sink
+
+        foreach (var actor in actors)
+        {
+            await Assert
+                .That(actor.Post(new Envelope { Command = new FixBCreateCmd() }))
+                .IsFalse();
+            await Assert
+                .That(() => system.Send(actor.Id, new FixBCreateCmd()))
+                .Throws<KeyNotFoundException>();
+        }
+
+        // The sink was really consulted: the loops above were stopped DESPITE it throwing.
+        await Assert.That(log.Calls).IsGreaterThan(0);
+    }
+
+    /// <summary>
+    /// P1 — single-actor StopAsync(id): the same invariant, per actor. The sink throwing
+    /// must not leave a registry-less loop running, and must not escape as an exception.
+    /// </summary>
+    [Test]
+    [Timeout(15000)]
+    public async Task StopAsync_PoisonLogSink_StillStopsLoop(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var log = new FixBPoisonLogSink();
+        var system = new ActorSystem(
+            new ActorSystemOptions { EventStore = new InMemoryEventStore(), Logger = log }
+        );
+        system.Register<FixBStopAllActor>(cmd => new FixBStopAllActor((FixBCreateCmd)cmd));
+
+        var actor = await system.CreateAsync<FixBStopAllActor>(new FixBCreateCmd());
+
+        log.Arm();
+        await system.StopAsync(actor.Id); // must not throw despite the sink
+
+        await Assert.That(actor.Post(new Envelope { Command = new FixBCreateCmd() })).IsFalse();
+        await Assert
+            .That(() => system.Send(actor.Id, new FixBCreateCmd()))
+            .Throws<KeyNotFoundException>();
+        await Assert.That(log.Calls).IsGreaterThan(0);
+    }
+}

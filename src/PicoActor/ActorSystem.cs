@@ -495,9 +495,16 @@ public sealed class ActorSystem : IActorSystem
         if (!_registry.TryRemove(id, out var actor))
             return; // Idempotent: already stopped or never existed
 
-        _logger?.Info($"Stopping actor {id}");
+        // Signal the stop BEFORE anything else. The registry entry is already gone, so a
+        // loop kept alive by a report that throws (or hangs) is unreachable for the rest
+        // of the process lifetime — no later sweep, StopAllAsync included, could ever find
+        // it again. The diagnostics are therefore best effort (TryLog swallows a broken
+        // sink) and come after the signal.
+        actor.SignalStop();
+        TryLog(l => l.Info($"Stopping actor {id}"));
+
         await actor.StopAsync().ConfigureAwait(false);
-        _logger?.Info($"Actor {id} stopped");
+        TryLog(l => l.Info($"Actor {id} stopped"));
     }
 
     /// <inheritdoc/>
@@ -506,8 +513,9 @@ public sealed class ActorSystem : IActorSystem
         if (!_registry.TryRemove(id, out var actor))
             return; // Idempotent: already stopped or never existed
 
-        _logger?.Info($"Stopping actor {id} (requested)");
+        // Same ordering as StopAsync: signal first, report afterwards (best effort).
         actor.SignalStop();
+        TryLog(l => l.Info($"Stopping actor {id} (requested)"));
     }
 
     /// <summary>
