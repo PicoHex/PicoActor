@@ -130,6 +130,26 @@ public sealed class ActorSystem : IActorSystem
         //    If persistence fails, remove from registry and propagate exception.
         await CompleteInitializationAsync(actor, id);
 
+        // Initialization can finish AFTER the actor was taken out of the system (a
+        // concurrent StopAsync/RequestStop, or the actor removing itself). Its init still
+        // succeeds, so returning it would hand the caller a live-looking handle to a dead
+        // actor - fail loudly and clean the loop up instead.
+        if (!_registry.TryGetValue(id, out var registered) || !ReferenceEquals(registered, actor))
+        {
+            try
+            {
+                await actor.StopAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Cleanup only: the documented exception must be the one the caller sees.
+            }
+
+            throw new InvalidOperationException(
+                $"Actor {id} was stopped during initialization; it is not registered."
+            );
+        }
+
         _logger?.Info($"Actor {typeof(T).Name} created: {id}");
 
         return (T)(IActor)actor;
