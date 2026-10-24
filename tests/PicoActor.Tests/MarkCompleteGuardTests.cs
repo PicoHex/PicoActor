@@ -122,6 +122,12 @@ public sealed class MarkCompleteGuardTests
         actor.AttachToSystem(Guid.CreateVersion7());
         actor.SignalReady();
 
+        // Let the actor's own init finish before replaying: initialization reads
+        // EventSourcedActor.IsReplaying, and replaying concurrently could make the loop
+        // enter its recovery branch — where MarkComplete is legitimately allowed. That
+        // race made this test fail intermittently for reasons unrelated to the guard here.
+        await actor.InitCompletedTask;
+
         try
         {
             var ex = await Assert
