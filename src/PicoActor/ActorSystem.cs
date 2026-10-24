@@ -159,7 +159,10 @@ public sealed class ActorSystem : IActorSystem
             );
         }
 
-        _logger?.Info($"Actor {typeof(T).Name} created: {id}");
+        // Best effort: the actor is created and registered at this point, so a throwing
+        // sink must not turn a SUCCESSFUL creation into an exception (the caller would get
+        // no handle while the registry keeps the actor). Same shape as StopAsync.
+        TryLog(l => l.Info($"Actor {typeof(T).Name} created: {id}"));
 
         return (T)(IActor)actor;
     }
@@ -265,8 +268,10 @@ public sealed class ActorSystem : IActorSystem
             // the owner.
             if (!_registry.TryAdd(id, actor))
             {
-                _logger?.Warning(
-                    $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
+                TryLog(l =>
+                    l.Warning(
+                        $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
+                    )
                 );
                 await DiscardDuplicateAsync(actor);
 
@@ -289,7 +294,10 @@ public sealed class ActorSystem : IActorSystem
             // Init can end with the instance no longer registered: a terminal saga removes
             // itself, and a concurrent stop can take it out. Resolve against the CURRENT
             // registry state instead of returning a dead handle.
-            _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
+            // Best effort: the rebuild succeeded, so a broken sink must not fail the lookup.
+            TryLog(l =>
+                l.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})")
+            );
 
             return ResolveAfterInitialization<T>(id, actor);
         }
@@ -409,12 +417,19 @@ public sealed class ActorSystem : IActorSystem
             // rebuild of the SAME id — deleting that entry would orphan a live actor
             // (registry-less, unreachable, never stopped). Remove only if the registered
             // instance is still THE failed one.
+            // Best effort: this runs INSIDE the catch that rethrows the initialization
+            // failure. A throwing sink here used to replace the original exception and skip
+            // the cleanup below (a failed, never-stopped actor left registered).
             if (RemoveIfSame(id, actor))
-                _logger?.Error($"Actor {actor.GetType().Name} {id} initialization failed, removed");
+                TryLog(l =>
+                    l.Error($"Actor {actor.GetType().Name} {id} initialization failed, removed")
+                );
             else
-                _logger?.Warning(
-                    $"Actor {actor.GetType().Name} {id} initialization failed; the registry "
-                        + "entry belongs to another instance now, left untouched"
+                TryLog(l =>
+                    l.Warning(
+                        $"Actor {actor.GetType().Name} {id} initialization failed; the registry "
+                            + "entry belongs to another instance now, left untouched"
+                    )
                 );
             // Stop the failed actor so its loop task terminates and is observed
             // (RunAsync faults with the init exception) and its CTS is disposed.
