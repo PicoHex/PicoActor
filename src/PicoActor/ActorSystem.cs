@@ -17,7 +17,12 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     private readonly ConcurrentDictionary<Guid, RebuildGate> _rebuildGates = new();
 
-    /// <summary>1 while <see cref="StopAllAsync"/> runs: new work is refused, lookups miss.</summary>
+    /// <summary>
+    /// Number of <see cref="StopAllAsync"/> calls currently running: while it is above zero,
+    /// new work is refused and lookups miss. A counter, not a flag — concurrent mass stops
+    /// overlap, and the window must stay open until the LAST one returns (the first returning
+    /// call used to close it while another shutdown was still stopping actors).
+    /// </summary>
     private int _stopping;
 
     private readonly IEventStore _eventStore;
@@ -91,7 +96,7 @@ public sealed class ActorSystem : IActorSystem
         // Refuse new actors while the system is shutting down: one registered after the
         // mass stop's snapshot would outlive the shutdown (and be handed to a caller that
         // is about to be disposed). Checked before anything is constructed.
-        if (Volatile.Read(ref _stopping) != 0)
+        if (Volatile.Read(ref _stopping) > 0)
             throw new InvalidOperationException("Actor system is stopping.");
 
         var id = Guid.CreateVersion7();
@@ -162,7 +167,7 @@ public sealed class ActorSystem : IActorSystem
     {
         // A lookup during shutdown must not resurrect or hand out an actor that the mass
         // stop is about to terminate (or has just terminated).
-        if (Volatile.Read(ref _stopping) != 0)
+        if (Volatile.Read(ref _stopping) > 0)
             return default;
 
         if (_registry.TryGetValue(id, out var existing))
@@ -535,7 +540,9 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     public async ValueTask StopAllAsync()
     {
-        Interlocked.Exchange(ref _stopping, 1);
+        // Count, do not flag: a concurrent mass stop must not be able to close the window
+        // by returning first — the window closes when the last call returns.
+        Interlocked.Increment(ref _stopping);
         try
         {
             // Bounded: each round stops everything registered at its start, so a registry
@@ -570,9 +577,9 @@ public sealed class ActorSystem : IActorSystem
         }
         finally
         {
-            // The window ends with the call: a host (or a test) that keeps the system alive
-            // after a mass stop can create actors again.
-            Volatile.Write(ref _stopping, 0);
+            // The window ends with the LAST call: a host (or a test) that keeps the system
+            // alive after a mass stop can create actors again.
+            Interlocked.Decrement(ref _stopping);
         }
     }
 
