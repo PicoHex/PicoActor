@@ -123,6 +123,36 @@ jobs:
           --self-contained
           -o publish/${{ matrix.rid }}
 
+      # The managed test runs above never touch the AOT artifact: `dotnet test` is a JIT
+      # run, so a source-generated registration that ILC trimmed away is invisible to
+      # them. Running the native binary is the only check that sees it — the sample walks
+      # the whole stack (DI registration, actor loop, event-sourced rebuild, saga, mediator
+      # outflow), so a trimmed registration fails here instead of in a consumer app.
+      # Cheap: the run itself is ~1 s (measured locally on win-x64).
+      #
+      # Cross-RID name: the Windows RIDs append `.exe`, the other RIDs publish an
+      # extensionless ELF/Mach-O. `publish/<rid>/` holds PicoActor.Sample[.exe] plus
+      # symbols only — no companion DLL to stage, so the binary is runnable as published.
+      # A failing run (non-zero exit) or a truncated flow (missing "=== Done ===") fails
+      # the job: this is a gate, not a demo.
+      - name: Run AOT sample (native binary)
+        shell: bash
+        run: |
+          dir="publish/${{ matrix.rid }}"
+          exe="$dir/PicoActor.Sample"
+          case "${{ matrix.rid }}" in
+            win-*) exe="$exe.exe" ;;
+          esac
+
+          if [ ! -f "$exe" ]; then
+            echo "::error::native AOT binary not found: $exe"
+            ls -la "$dir" || true
+            exit 1
+          fi
+
+          "$exe" | tee aot-sample.log
+          grep -q "=== Done ===" aot-sample.log
+
   # ---------------------------------------------------------------------------
   # Package smoke — the PACKAGED surface must be consumable with PicoActor alone
   # (C1 regression guard: scripts/verify-package.sh). Independent of the unit-test
