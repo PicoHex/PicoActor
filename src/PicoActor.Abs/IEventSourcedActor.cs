@@ -24,6 +24,10 @@ public interface IEventSourcedActor : IActor
     /// Rebuild in-memory state from persisted events.
     /// Called once before the first message is dispatched. Messages queue but don't dispatch during replay.
     /// Does NOT touch the mailbox queue.
+    /// The persisted stream is authoritative: whatever the (rebuild-path) constructor staged
+    /// as uncommitted events is DISCARDED first, so a constructor-seeded instance cannot
+    /// append its seeds on top of the replayed history. Version is set from the replayed
+    /// event count.
     /// </summary>
     void ReplayEvents(IReadOnlyList<IDomainEvent> events);
 }

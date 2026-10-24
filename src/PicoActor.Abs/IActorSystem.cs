@@ -28,6 +28,13 @@ public interface IActorSystem
     /// 2. Assigns a UUID v7 Id.
     /// 3. Registers in the system.
     /// 4. Calls SignalReady() to release the consumption loop.
+    /// Returns only after the actor finished initializing (construction events persisted).
+    /// Throws <see cref="InvalidOperationException"/> when the factory is not registered,
+    /// when initialization fails (the original exception), and while the system is
+    /// stopping — creating an actor during <see cref="StopAllAsync"/> is refused, because it
+    /// would outlive the shutdown. Also throws when the new actor is stopped DURING its
+    /// initialization (a concurrent <see cref="StopAsync"/>/<see cref="RequestStop"/>): a
+    /// handle to an actor that is already gone is never returned.
     /// </summary>
     ValueTask<T> CreateAsync<T>(ICommand command)
         where T : IActor;
@@ -36,6 +43,28 @@ public interface IActorSystem
     /// Get an actor by UUID v7. Returns from memory if active;
     /// otherwise rebuilds from persisted events using the registered rebuildFactory.
     /// Returns null if not found or no rebuildFactory was registered.
+    /// <para>
+    /// Contract details callers can rely on:
+    /// - Returns <c>default</c> for the whole duration of <see cref="StopAllAsync"/>. The
+    ///   stopping window is not a moment to resurrect or hand out an actor that the mass
+    ///   stop is terminating.
+    /// - A registry hit WAITS for that instance's initialization to finish; an instance
+    ///   that is registered but still initializing is never handed out early.
+    /// - MAY return an already-unregistered TERMINAL saga instance (completed/failed):
+    ///   its state (IsCompleted / IsFailed / FailedReason) is readable, but it is out of the
+    ///   system by design — <see cref="Send"/> and <see cref="AskAsync{TResult}"/> on it
+    ///   throw <see cref="KeyNotFoundException"/>. Never a live handle to a non-terminal
+    ///   actor that stopped during initialization.
+    /// - An instance whose initialization FAILED is never returned, even though its
+    ///   init-completion signal has already fired.
+    /// - Concurrent calls for the same id are single-flight: one rebuild, one
+    ///   initialization, one resume — the other callers resolve to that instance.
+    /// </para>
+    /// <para>
+    /// Do NOT call this from inside your own initialization (or from initializations that
+    /// reference each other in a cycle) for your own id: the per-id gate is held through
+    /// initialization, so the nested call waits for an initialization that cannot finish.
+    /// </para>
     /// </summary>
     ValueTask<T?> GetAsync<T>(Guid id)
         where T : IActor;
@@ -72,6 +101,19 @@ public interface IActorSystem
     /// <summary>
     /// Gracefully stop every registered actor (host disposal — actor loops/CTSs
     /// must not leak until process exit). Idempotent per actor.
+    /// <para>
+    /// Best effort: this method does NOT throw — a failing actor (or a throwing log sink) is
+    /// reported and the remaining actors are still stopped. The registry is drained in
+    /// rounds, so an actor that registers while the shutdown runs (a creation that already
+    /// passed its guard) is stopped too. While it runs, <see cref="CreateAsync{T}"/> throws
+    /// and <see cref="GetAsync{T}"/> returns <c>default</c>; the window stays open until the
+    /// last concurrent call returns, so the system is usable again afterwards.
+    /// </para>
+    /// <para>
+    /// KNOWN LIMITATION: a message handler that ignores its actor's stop token (it keeps
+    /// awaiting something else) makes this method block until that handler returns — there
+    /// is no per-actor stop timeout or escalation.
+    /// </para>
     /// </summary>
     ValueTask StopAllAsync();
 
