@@ -30,6 +30,12 @@ public sealed class ActorSystem : IActorSystem
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// Per-actor bound on waiting for a loop to exit (<see langword="null"/> = unbounded,
+    /// the default). Keeps a handler that ignores its stop token from hanging shutdown.
+    /// </summary>
+    private readonly TimeSpan? _stopTimeout;
+
+    /// <summary>
     /// Creates an ActorSystem from <paramref name="options"/>. This is the single
     /// construction path — the event store must be chosen explicitly via
     /// <see cref="ActorSystemOptions.EventStore"/>.
@@ -40,6 +46,7 @@ public sealed class ActorSystem : IActorSystem
         _eventStore = options.EventStore;
         _publisher = options.DomainEventPublisher;
         _logger = options.Logger;
+        _stopTimeout = options.StopTimeout;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -524,7 +531,32 @@ public sealed class ActorSystem : IActorSystem
         actor.SignalStop();
         TryLog(l => l.Info($"Stopping actor {id}"));
 
-        await actor.StopAsync().ConfigureAwait(false);
+        if (_stopTimeout is not { } timeout)
+        {
+            // Default: unbounded — a faulted loop rethrows here, as it always has.
+            await actor.StopAsync().ConfigureAwait(false);
+        }
+        else
+        {
+            // Bounded wait: a handler that does not observe its stop token keeps the loop
+            // alive and used to hang this call (and therefore host shutdown) forever. Give
+            // up waiting instead — the loop cannot be aborted, but it is already unreachable
+            // (registry entry removed above, mailbox closed, token cancelled). Only
+            // TimeoutException is caught: a faulted loop still propagates, as in the
+            // unbounded path.
+            try
+            {
+                await actor.StopAsync().AsTask().WaitAsync(timeout).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                TryLog(l =>
+                    l.Warning($"actor {id} did not stop within {timeout}; abandoning the wait")
+                );
+                return;
+            }
+        }
+
         TryLog(l => l.Info($"Actor {id} stopped"));
     }
 
@@ -543,6 +575,10 @@ public sealed class ActorSystem : IActorSystem
     /// Gracefully stop every registered actor (host disposal must not leak actor
     /// loops/CTSs until process exit). Best effort: this method does NOT throw — a failing
     /// actor is reported through the logger and the remaining ones are still stopped.
+    /// The wait per actor is bounded by <see cref="ActorSystemOptions.StopTimeout"/> when it
+    /// is configured (enforced inside <see cref="StopAsync"/>, which also reports and
+    /// abandons a timed-out actor), so a handler that ignores its stop token cannot hang
+    /// the shutdown.
     /// Drains the registry in rounds (bounded) instead of sweeping one snapshot, so an
     /// actor that registers while the shutdown runs is stopped too. Creation is refused
     /// (<see cref="CreateAsync{T}"/>) and lookups return default for the duration of the
