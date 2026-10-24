@@ -21,6 +21,15 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     public ulong Version { get; protected set; }
 
     /// <summary>
+    /// True while this instance is a rebuild whose state came from the persisted stream
+    /// (<see cref="IEventSourcedActor.ReplayEvents"/>) rather than from a live creation
+    /// command. Set by replay, cleared by <see cref="OnInitialized"/> once initialization
+    /// finishes. "Version &gt; 0" is NOT a rebuild marker: a subclass may raise events in
+    /// its constructor, which is a creation.
+    /// </summary>
+    internal bool IsReplaying { get; private set; }
+
+    /// <summary>
     /// May be null in tests or non-persistent scenarios (pure in-memory mode).
     /// </summary>
     private IEventStore? _eventStore;
@@ -241,10 +250,28 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
 
     private void ClearEvents() => _events.Clear();
 
+    /// <summary>
+    /// Initialization is done: the instance is live, so the replay marker's job is
+    /// over. Subclass overrides must call the base implementation.
+    /// </summary>
+    internal override void OnInitialized()
+    {
+        IsReplaying = false;
+        base.OnInitialized();
+    }
+
     void IEventSourcedActor.CommitEvents() => ClearEvents();
 
     void IEventSourcedActor.ReplayEvents(IReadOnlyList<IDomainEvent> events)
     {
+        IsReplaying = true;
+
+        // A rebuilt instance must drop whatever its constructor staged: the persisted
+        // stream is authoritative. Keeping those events (a constructor-seeded saga is the
+        // real case) would append them again and make every later flush compute
+        // expectedVersion from a phantom baseline — a permanent ConcurrencyException.
+        ClearEvents();
+
         // Replay bypasses persistence — events are already in the store.
         // Mutate directly, then set Version.
         foreach (var e in events)

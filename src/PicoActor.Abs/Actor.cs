@@ -221,6 +221,15 @@ public abstract class Actor : IActor, IAsyncDisposable
             }
             _initCompleted.TrySetResult(true);
 
+            // Initialization is complete and already observable by the caller: let
+            // subclasses react (SagaActor auto-stops when the state it reached during
+            // replay/resume is terminal). Running it AFTER the init signal — and before
+            // the first mailbox message — keeps the actor registered for the whole
+            // initialization, so a concurrent GetAsync can observe this instance instead
+            // of racing a rebuild. Discarded copies run no lifecycle hooks.
+            if (!IsDiscarded)
+                OnInitialized();
+
             try
             {
                 await foreach (
@@ -321,6 +330,15 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// EventSourcedActor overrides this to flush uncommitted construction events.
     /// </summary>
     protected virtual ValueTask OnReadyAsync() => default;
+
+    /// <summary>
+    /// Lifecycle hook called once initialization has completed and been published to the
+    /// caller (<see cref="InitCompletedTask"/>), immediately before the mailbox loop
+    /// starts dispatching. Subclasses react to the state init produced — SagaActor
+    /// auto-stops when it is already terminal. Discarded copies (losing duplicates) skip it.
+    /// Overrides must call the base implementation.
+    /// </summary>
+    internal virtual void OnInitialized() { }
 
     /// <summary>
     /// Signal the consumption loop to stop: release the ready gate (in case it

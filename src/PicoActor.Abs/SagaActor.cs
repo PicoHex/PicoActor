@@ -20,11 +20,11 @@ namespace PicoActor.Abs;
 /// Crash recovery:
 ///   GetAsync rebuild → ReplayEvents (framework restores terminal-state flags) →
 ///   if no terminal event, OnReadyAsync automatically calls ResumeAsync()
-///   (when Version > 0; this is the mechanism behind "background recovery" —
-///   ResumeInterruptedSagasAsync is just its batched, state-classifying entry
-///   point) — the framework's flush wrapper consumes pending events raised during
-///   resume (SagaCompleted is persisted in the same batch when the saga reaches
-///   completion) → auto-stop once terminal.
+///   (only when the instance is a rebuild — see EventSourcedActor.IsReplaying; this is
+///   the mechanism behind "background recovery" — ResumeInterruptedSagasAsync is just
+///   its batched, state-classifying entry point) — the framework's flush wrapper
+///   consumes pending events raised during resume (SagaCompleted is persisted in the
+///   same batch when the saga reaches completion) → auto-stop once terminal.
 /// </summary>
 public abstract class SagaActor : EventSourcedActor
 {
@@ -111,9 +111,11 @@ public abstract class SagaActor : EventSourcedActor
     {
         await base.OnReadyAsync().ConfigureAwait(false);
 
-        // Recovery: no terminal event and Version > 0 (the SagaActor constructor takes
-        // no command, so no construction-time events → Version > 0 ⟺ replay)
-        if (!_completed && !_failed && Version > 0)
+        // Recovery only: an instance rebuilt from the persisted stream resumes. "Version > 0"
+        // was the old proxy for this and is wrong for a saga that raises events in its own
+        // constructor — that is a creation (and already ran no resume), so it must not
+        // resume again here.
+        if (!_completed && !_failed && IsReplaying)
         {
             _inCommandContext = true;
             try
@@ -151,6 +153,17 @@ public abstract class SagaActor : EventSourcedActor
             }
             await FlushEventsAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Terminal-state auto-stop. Runs after initialization completed (not from inside
+    /// <see cref="OnReadyAsync"/>), so the runtime never drops the registry entry while a
+    /// caller is still initializing this saga — a concurrent GetAsync observes this
+    /// instance instead of racing a rebuild.
+    /// </summary>
+    internal override void OnInitialized()
+    {
+        base.OnInitialized();
 
         if (_completed || _failed)
             ScheduleStop();
