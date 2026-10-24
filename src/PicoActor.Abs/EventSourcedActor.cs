@@ -141,6 +141,16 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// <see cref="IEventSourcedActor.CommitEvents"/> before throwing: the list is then empty
     /// while the Version is already inflated, and a count-based rollback would leave the
     /// phantom baseline behind for the next flush (permanent ConcurrencyException).
+    /// <para>
+    /// HANDLERS MUST NOT CALL <see cref="FlushEventsAsync"/> FROM INSIDE A DISPATCH. The
+    /// rollback restores <c>Version</c> to the value captured before the dispatch, so an
+    /// inner flush that SUCCEEDED (events persisted, Version advanced) followed by a throw
+    /// out of the handler would push <c>Version</c> back BELOW the freshly persisted
+    /// baseline. The next flush would then compute <c>expectedVersion = Version - count</c>
+    /// from that regressed value and either re-append events the store already holds or die
+    /// with ConcurrencyException, permanently. Persist after the dispatch returns, or
+    /// return normally so the outer flush runs.
+    /// </para>
     /// </summary>
     private void RollbackDispatchEvents(int eventCount, ulong versionSnapshot)
     {
