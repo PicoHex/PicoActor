@@ -10,6 +10,25 @@ public sealed class ActorSystem : IActorSystem
     private readonly ConcurrentDictionary<Guid, ActorBase> _registry = new();
     private readonly ConcurrentDictionary<Type, Func<ICommand, object>> _factories = new();
     private readonly ConcurrentDictionary<Type, Func<object>> _rebuildFactories = new();
+
+    /// <summary>
+    /// Per-id single-flight gates for <see cref="GetAsync{T}"/> (rebuild + initialization).
+    /// Entries are never reclaimed — see the gate comment in <see cref="GetAsync{T}"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, RebuildGate> _rebuildGates = new();
+
+    /// <summary>
+    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>. <see cref="Entries"/> counts
+    /// the callers that held the gate, which is how a caller tells "I am the first rebuild of
+    /// this id" from "a previous rebuild left nothing registered" (see GetAsync).
+    /// </summary>
+    private sealed class RebuildGate
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        /// <summary>Entry count; only mutated while <see cref="Semaphore"/> is held.</summary>
+        public int Entries { get; set; }
+    }
     private readonly IEventStore _eventStore;
     private readonly IDomainEventPublisher? _publisher;
     private readonly ILogger? _logger;
@@ -125,17 +144,7 @@ public sealed class ActorSystem : IActorSystem
         where T : IActor
     {
         if (_registry.TryGetValue(id, out var existing))
-        {
-            // Type guard: an id is framework-owned per-actor; a registry hit on a
-            // DIFFERENT aggregate type means the caller asked for the wrong T
-            // (e.g. querying ChatActor with a SessionActor id). Return default
-            // instead of throwing InvalidCastException so callers can fall back /
-            // degrade gracefully (regression: create_subagent's session-liveness
-            // probe died with "Specified cast is not valid").
-            if (existing is not T typed)
-                return default;
-            return typed;
-        }
+            return await ResolveRegisteredAsync<T>(id, existing).ConfigureAwait(false);
 
         if (!_rebuildFactories.TryGetValue(typeof(T), out var rebuildFactory))
             return default;
@@ -143,63 +152,161 @@ public sealed class ActorSystem : IActorSystem
         if (!typeof(IEventSourcedActor).IsAssignableFrom(typeof(T)))
             return default;
 
+        // Prefetch the stream the rebuild replays. Read BEFORE taking the per-id gate: it
+        // is only the snapshot the common (single-caller) path uses, and reading outside
+        // the gate keeps lookups of different ids fully parallel. It is re-read under the
+        // gate whenever it can be stale (see below).
         var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
         if (events.Count == 0)
             return default;
 
-        var actor = (ActorBase)(IActor)rebuildFactory();
-        WireActor(actor, id);
-
-        var es = (IEventSourcedActor)actor;
-
-        // Full-path resource cleanup: any failure point after the rebuild (replay/init)
-        // marks the actor discarded + StopAsync + rethrow.
-        // The actor is already constructed (_loopTask started, gate not released) —
-        // without cleanup it leaks; without the discarded marker, StopAsync releasing
-        // the gate would let partially replayed state run OnReadyAsync (including saga resume).
+        // Single-flight per id: callers that miss the registry must not each build and
+        // initialize their own copy of the same aggregate. A duplicate copy replays the
+        // stream twice and, for a saga, resumes twice - so the second resume flushes on
+        // top of the first and dies with ConcurrencyException. The gate is held THROUGH
+        // initialization: that is what makes the re-check below meaningful (a registered
+        // but still initializing instance must not be handed out).
+        // Gates are NOT reclaimed for the process lifetime - the same trade-off
+        // InMemoryEventStore._locks makes for its per-aggregate append locks (one
+        // SemaphoreSlim per id, bounded by the number of aggregates this process touches).
+        var gate = _rebuildGates.GetOrAdd(id, static _ => new RebuildGate());
+        await gate.Semaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            es.ReplayEvents(events);
-        }
-        catch
-        {
-            await DiscardDuplicateAsync(actor);
-            throw;
-        }
+            // Entries is only mutated while the gate is held, so this is exact.
+            var entry = ++gate.Entries;
 
-        // Terminal events that already existed before the rebuild (Completed/Failed) → do not resurrect
-        if (actor is SagaActor saga && (saga.IsCompleted || saga.IsFailed))
-        {
-            await actor.StopAsync().ConfigureAwait(false);
-            return default;
-        }
-
-        if (!_registry.TryAdd(id, actor))
-        {
-            _logger?.Warning(
-                $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
-            );
-            await DiscardDuplicateAsync(actor);
-
+            // Another caller may have completed the rebuild while we waited.
             if (_registry.TryGetValue(id, out var winner))
+                return await ResolveRegisteredAsync<T>(id, winner).ConfigureAwait(false);
+
+            // A previous caller entered this gate and left nothing registered: the copy it
+            // built either removed itself (a terminal saga) or was taken out (stopped, or
+            // its init failed). Our prefetched snapshot predates that attempt and can
+            // therefore be missing the events it flushed - replaying it would resume a
+            // saga that has already completed. Re-read under the gate.
+            if (entry > 1)
             {
-                // Same type guard as the registry-hit path above: if another thread won
-                // the rebuild with a DIFFERENT aggregate type, degrade to default instead
-                // of throwing InvalidCastException from the cast.
-                return winner is T typedWinner ? typedWinner : default;
+                events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
+                if (events.Count == 0)
+                    return default;
             }
 
+
+            var actor = (ActorBase)(IActor)rebuildFactory();
+            WireActor(actor, id);
+
+            var es = (IEventSourcedActor)actor;
+
+            // Full-path resource cleanup: any failure point after the rebuild (replay/init)
+            // marks the actor discarded + StopAsync + rethrow.
+            // The actor is already constructed (_loopTask started, gate not released) —
+            // without cleanup it leaks; without the discarded marker, StopAsync releasing
+            // the gate would let partially replayed state run OnReadyAsync (including saga resume).
+            try
+            {
+                es.ReplayEvents(events);
+            }
+            catch
+            {
+                await DiscardDuplicateAsync(actor);
+                throw;
+            }
+
+            // Terminal events that already existed before the rebuild (Completed/Failed) → do not resurrect
+            if (actor is SagaActor saga && (saga.IsCompleted || saga.IsFailed))
+            {
+                await actor.StopAsync().ConfigureAwait(false);
+                return default;
+            }
+
+            if (!_registry.TryAdd(id, actor))
+            {
+                _logger?.Warning(
+                    $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
+                );
+                await DiscardDuplicateAsync(actor);
+
+                if (_registry.TryGetValue(id, out var owner))
+                {
+                    // Same type guard as the registry-hit path above: if another thread won
+                    // the rebuild with a DIFFERENT aggregate type, degrade to default instead
+                    // of throwing InvalidCastException from the cast.
+                    return owner is T typedOwner ? typedOwner : default;
+                }
+
+                return default;
+            }
+
+            // Release the consumption loop gate and wait for initialization
+            // (OnReadyAsync: persist + mutate). The helper removes the actor from the
+            // registry and stops it on failure, then rethrows the original exception.
+            await CompleteInitializationAsync(actor, id);
+
+            // Init can end with the instance no longer registered: a terminal saga removes
+            // itself, and a concurrent stop can take it out. Resolve against the CURRENT
+            // registry state instead of returning a dead handle.
+            _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
+
+            return ResolveAfterInitialization<T>(id, actor);
+        }
+        finally
+        {
+            gate.Semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Resolve a REGISTRY HIT. A registered instance appears before its initialization
+    /// finishes, so a hit can hand out an actor that is still initializing - and therefore
+    /// still able to remove itself (a terminal saga) or to be removed by its own init
+    /// failure. Wait for init, then resolve against the CURRENT registry state.
+    /// The type guard: an id is framework-owned per-actor, so a registry hit on a
+    /// DIFFERENT aggregate type means the caller asked for the wrong T (e.g. querying
+    /// ChatActor with a SessionActor id). Return default instead of throwing
+    /// InvalidCastException so callers can fall back / degrade gracefully (regression:
+    /// create_subagent's session-liveness probe died with "Specified cast is not valid").
+    /// </summary>
+    private async ValueTask<T?> ResolveRegisteredAsync<T>(Guid id, ActorBase registered)
+        where T : IActor
+    {
+        if (registered is not T typed)
             return default;
+
+        if (!registered.InitCompletedTask.IsCompleted)
+        {
+            try
+            {
+                await registered.InitCompletedTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Init failed: the instance is gone (or about to be) and a replacement may
+                // already own the id - resolve instead of returning a dead handle.
+            }
+
+            return ResolveAfterInitialization<T>(id, registered);
         }
 
-        // Release the consumption loop gate and wait for initialization
-        // (OnReadyAsync: persist + mutate). The helper removes the actor from the
-        // registry and stops it on failure, then rethrows the original exception.
-        await CompleteInitializationAsync(actor, id);
+        return typed;
+    }
 
-        _logger?.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})");
+    /// <summary>
+    /// Resolve what the caller should receive after <paramref name="actor"/> finished
+    /// initializing: the instance currently owning <paramref name="id"/>; else
+    /// <paramref name="actor"/> itself when it is a terminal saga (its final state is
+    /// readable and it is unregistered BY DESIGN); else <c>default</c> — an unregistered
+    /// non-terminal actor is dead (stopped during init) and must not be handed out.
+    /// </summary>
+    private T? ResolveAfterInitialization<T>(Guid id, ActorBase actor)
+        where T : IActor
+    {
+        if (_registry.TryGetValue(id, out var current))
+            return current is T typed ? typed : default;
 
-        return (T)(IActor)actor;
+        return actor is SagaActor { IsCompleted: true } or SagaActor { IsFailed: true }
+            ? (T)(IActor)actor
+            : default;
     }
 
     /// <summary>
