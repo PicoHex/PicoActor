@@ -122,6 +122,15 @@ public abstract class SagaActor : EventSourcedActor
             }
             catch (Exception ex)
             {
+                if (IsStopInterrupted(ex))
+                {
+                    // Shutdown interrupt (not a business failure): drop the in-flight
+                    // batch and pending completion, record no terminal event — the saga
+                    // stays resumable. Propagate as-is.
+                    DiscardPendingWork();
+                    throw;
+                }
+
                 // Business failure on the recovery path = terminal: record SagaFailed.
                 try
                 {
@@ -177,6 +186,17 @@ public abstract class SagaActor : EventSourcedActor
         }
         catch (Exception ex)
         {
+            if (IsStopInterrupted(ex))
+            {
+                // Shutdown interrupt (not a business failure): the command was aborted
+                // by the stop, not refused by business logic. Drop the in-flight batch
+                // and any pending completion, record NO terminal event, and propagate
+                // as-is (the caller observes cancellation, and the saga remains
+                // resumable instead of being permanently buried as Failed).
+                DiscardPendingWork();
+                throw;
+            }
+
             try
             {
                 await FailAsync(ex).ConfigureAwait(false);
@@ -210,6 +230,28 @@ public abstract class SagaActor : EventSourcedActor
 
         if (_completed || _failed)
             ScheduleStop();
+    }
+
+    /// <summary>
+    /// True when <paramref name="ex"/> is cancellation raised by this actor being
+    /// stopped — a shutdown interrupt rather than a business failure. Only the actor's
+    /// own <see cref="Actor.StopToken"/> counts: a caller-owned token (timeout, request
+    /// abort) stays on the business-failure path, which keeps the documented
+    /// "business failure = terminal" semantics.
+    /// </summary>
+    private bool IsStopInterrupted(Exception ex) =>
+        ex is OperationCanceledException && StopToken.IsCancellationRequested;
+
+    /// <summary>
+    /// Drop everything the interrupted turn staged: uncommitted business events (Version
+    /// rolled back with them) and any pending completion, so no half-finished work and
+    /// no fake success can reach the event stream.
+    /// </summary>
+    private void DiscardPendingWork()
+    {
+        _pendingComplete = false;
+        _pendingResult = null;
+        RollbackUncommitted();
     }
 
     private async ValueTask FailAsync(Exception ex)
