@@ -248,6 +248,14 @@ public sealed class ActorSystem : IActorSystem
                 return default;
             }
 
+            // DEFENSIVE, and unreachable in a correct process: the per-id gate above is held
+            // through registration, so no second rebuild of this id can be racing this
+            // TryAdd — every concurrent caller either waited on the gate (and found this
+            // instance as a registry hit) or is behind us. The branch is kept because the
+            // registry is only private by accident of assembly boundaries, not by contract:
+            // if anything ever adds an entry for this id out of band, the loser must still be
+            // discarded (no second copy resuming/flushing) instead of silently overwriting
+            // the owner.
             if (!_registry.TryAdd(id, actor))
             {
                 _logger?.Warning(
