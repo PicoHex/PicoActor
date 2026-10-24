@@ -66,11 +66,21 @@ public abstract class Actor : IActor, IAsyncDisposable
         try
         {
             var task = OnMessageAsync(creationCommand);
-            if (!task.IsCompleted)
+            // IsCompletedSuccessfully, not IsCompleted: a faulted or canceled ValueTask
+            // is "completed" too, and treating it as success swallowed the creation
+            // failure (CreateAsync returned a half-initialized actor whose
+            // construction events still flushed). Re-raise the ORIGINAL exception so
+            // the caller sees why creation failed.
+            if (!task.IsCompletedSuccessfully)
+            {
+                if (task.IsCompleted)
+                    task.GetAwaiter().GetResult();
+
                 throw new InvalidOperationException(
                     "OnMessageAsync must complete synchronously for creation commands. "
                         + "Use RaiseEvent or return a value directly; do not await."
                 );
+            }
         }
         catch
         {
