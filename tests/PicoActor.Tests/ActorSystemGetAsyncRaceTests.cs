@@ -1,10 +1,18 @@
 namespace PicoActor.Tests;
 
 /// <summary>
-/// Regression tests for the GetAsync rebuild race: when two concurrent
-/// GetAsync calls rebuild the same id, one wins the TryAdd; the loser is
-/// marked discarded and its duplicate is stopped WITHOUT running OnReadyAsync
-/// (no business logic, no saga resume, no event-stream writes).
+/// Regression tests for the GetAsync rebuild race: two concurrent GetAsync calls
+/// for an unregistered id must still produce ONE instance and ONE initialization
+/// (no business logic, no saga resume, no event-stream write runs twice).
+/// <para>
+/// Scope note (I-4): with the per-id single-flight gate in place these tests no
+/// longer exercise the <c>TryAdd</c> duplicate branch in GetAsync — that branch is
+/// kept as defence and is unreachable while the gate holds. What they verify is the
+/// observable contract: both callers miss the registry, only one rebuild runs
+/// (OnReadyAsync once), and both resolve to the same instance (the second one as a
+/// registry hit after the gate is released). The assertions are unchanged; they
+/// simply no longer take the path through the discarded-duplicate cleanup.
+/// </para>
 /// </summary>
 public sealed class ActorSystemGetAsyncRaceTests
 {
@@ -29,41 +37,48 @@ public sealed class ActorSystemGetAsyncRaceTests
     }
 
     /// <summary>
-    /// Store that forces a deterministic winner-then-loser ordering while
-    /// guaranteeing BOTH callers have passed the in-memory registry check (so
-    /// both take the rebuild path):
-    ///   - first LoadAsync entry waits for the second to enter, then returns
-    ///     (this caller rebuilds first and wins the TryAdd).
-    ///   - second entry signals the first, then waits for the test to release it
-    ///     (this caller rebuilds second and loses TryAdd).
+    /// Store that forces a deterministic ordering while guaranteeing BOTH callers
+    /// have passed the in-memory registry check, so both take the rebuild path:
+    ///   - first LoadAsync entry (the pre-gate prefetch) waits for the second to
+    ///     enter, then returns — this caller rebuilds and registers.
+    ///   - second entry signals the first, then waits for the test to release it —
+    ///     this caller is then resolved against the freshly registered instance
+    ///     instead of rebuilding a copy.
+    /// The later loads are GetAsync's unconditional re-read under the per-id gate and
+    /// must never park (see LoadAsync).
     /// </summary>
     private sealed class RaceEventStore : IEventStore
     {
         private readonly IReadOnlyList<IDomainEvent> _events;
         private readonly TaskCompletionSource<bool> _bothEntered;
-        private readonly TaskCompletionSource<bool> _releaseLoser;
+        private readonly TaskCompletionSource<bool> _releaseSecond;
         private int _enteredCount;
 
         public RaceEventStore(
             IReadOnlyList<IDomainEvent> events,
             TaskCompletionSource<bool> bothEntered,
-            TaskCompletionSource<bool> releaseLoser
+            TaskCompletionSource<bool> releaseSecond
         )
         {
             _events = events;
             _bothEntered = bothEntered;
-            _releaseLoser = releaseLoser;
+            _releaseSecond = releaseSecond;
         }
 
         public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
         {
+            // n == 1 / n == 2 are the two PRE-gate prefetches of the two concurrent callers
+            // (the ordering this store manufactures). Every later load is GetAsync's
+            // unconditional re-read under the per-id gate, which must never park: the
+            // ordering it exists to create is already established by then, and parking
+            // there would deadlock the very callers this store lines up.
             var n = Interlocked.Increment(ref _enteredCount);
             if (n == 1)
                 await _bothEntered.Task.ConfigureAwait(false);
-            else
+            else if (n == 2)
             {
                 _bothEntered.TrySetResult(true);
-                await _releaseLoser.Task.ConfigureAwait(false);
+                await _releaseSecond.Task.ConfigureAwait(false);
             }
             return _events;
         }
@@ -98,10 +113,9 @@ public sealed class ActorSystemGetAsyncRaceTests
     }
 
     /// <summary>
-    /// Two concurrent GetAsync calls rebuild the same id: single-flight semantics —
-    /// one wins the rebuild, the loser is marked discarded and skips OnReadyAsync
-    /// (no recovery/replay path logic runs). Both calls return the same instance
-    /// successfully, and OnReadyAsync runs exactly once.
+    /// Two concurrent GetAsync calls for the same unregistered id: single-flight — one
+    /// instance is built and initialized, OnReadyAsync (the recovery/replay path) runs
+    /// exactly once, and both calls return that same instance.
     /// </summary>
     [Test]
     [Timeout(15000)]
@@ -113,8 +127,8 @@ public sealed class ActorSystemGetAsyncRaceTests
         var id = Guid.CreateVersion7();
         var events = (IReadOnlyList<IDomainEvent>)new IDomainEvent[] { new RaceCreated() };
         var bothEntered = new TaskCompletionSource<bool>();
-        var releaseLoser = new TaskCompletionSource<bool>();
-        var store = new RaceEventStore(events, bothEntered, releaseLoser);
+        var releaseSecond = new TaskCompletionSource<bool>();
+        var store = new RaceEventStore(events, bothEntered, releaseSecond);
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<CountingReadyActor>(
@@ -126,41 +140,43 @@ public sealed class ActorSystemGetAsyncRaceTests
         var taskB = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
 
         // The first caller into LoadAsync (n==1) waits on bothEntered; the second
-        // (n==2) sets bothEntered and waits on releaseLoser — so the caller that
-        // finishes LoadAsync first always wins TryAdd (independent of Task.Run scheduling).
+        // (n==2) sets bothEntered and waits on releaseSecond — so both callers have
+        // provably passed the empty-registry check before either rebuilds, independent of
+        // Task.Run scheduling.
         var firstCompleted = await Task.WhenAny(taskA, taskB);
-        var winner = await firstCompleted;
-        var loserTask = ReferenceEquals(firstCompleted, taskA) ? taskB : taskA;
+        var registered = await firstCompleted;
+        var secondTask = ReferenceEquals(firstCompleted, taskA) ? taskB : taskA;
 
-        // Release the loser → its rebuild fails TryAdd → marked discarded → cleaned up → returns the winner
-        releaseLoser.TrySetResult(true);
-        var loserResult = await loserTask;
+        // Release the second caller: it takes the gate, finds the registered instance and
+        // resolves to it instead of rebuilding (and re-initializing) a copy.
+        releaseSecond.TrySetResult(true);
+        var secondResult = await secondTask;
 
-        await Assert.That(winner).IsNotNull();
-        await Assert.That(loserResult).IsNotNull();
+        await Assert.That(registered).IsNotNull();
+        await Assert.That(secondResult).IsNotNull();
 
-        // Single-flight: only the winning copy runs OnReadyAsync (recovery/replay path); the loser is skipped as discarded
+        // Single-flight: exactly one instance runs OnReadyAsync (recovery/replay path).
         await Task.Delay(200);
         await Assert.That(CountingReadyActor.ReadyCount).IsEqualTo(1);
     }
 
     /// <summary>
-    /// Cross-type concurrent rebuild of the same id (two different aggregates asking
-    /// for the same framework-owned id — the scenario behind the registry-hit type
-    /// guard): the loser of TryAdd must degrade to `default` like the registry-hit
-    /// path does, NOT throw InvalidCastException from the winner cast.
+    /// Cross-type concurrent lookup of the same id (two different aggregates asking for
+    /// the same framework-owned id — the scenario behind the type guard): exactly one
+    /// caller gets an instance, the other degrades to `default` instead of throwing
+    /// InvalidCastException from the cast.
     /// </summary>
     [Test]
     [Timeout(15000)]
-    public async Task GetAsync_ConcurrentCrossTypeRebuilds_LoserReturnsDefault(
+    public async Task GetAsync_ConcurrentCrossTypeLookups_OnlyOneCallerGetsInstance(
         CancellationToken cancellationToken = default
     )
     {
         var id = Guid.CreateVersion7();
         var events = (IReadOnlyList<IDomainEvent>)new IDomainEvent[] { new RaceCreated() };
         var bothEntered = new TaskCompletionSource<bool>();
-        var releaseLoser = new TaskCompletionSource<bool>();
-        var store = new RaceEventStore(events, bothEntered, releaseLoser);
+        var releaseSecond = new TaskCompletionSource<bool>();
+        var store = new RaceEventStore(events, bothEntered, releaseSecond);
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 
         system.Register<CrossTypeActorOne>(
@@ -200,10 +216,10 @@ public sealed class ActorSystemGetAsyncRaceTests
         });
 
         await Task.WhenAny(taskA, taskB);
-        releaseLoser.TrySetResult(true);
+        releaseSecond.TrySetResult(true);
         await Task.WhenAll(taskA, taskB);
 
-        // No exception: the loser degrades to default instead of throwing
+        // No exception: the caller that found the other aggregate type degrades to default
         await Assert.That(failure).IsNull();
 
         // Exactly one caller won the rebuild; the other got default (wrong aggregate type for that id)

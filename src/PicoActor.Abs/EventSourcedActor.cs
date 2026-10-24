@@ -107,6 +107,10 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         // persisted, so keeping them would append a failed command's events as part
         // of the next successful batch (stream corruption) and inflate Version.
         var eventCount = _events.Count;
+        // Version is snapshotted too: the count alone is not a reliable rollback baseline
+        // (a handler can call CommitEvents() mid-dispatch, which empties the list while
+        // Version stays inflated). Restoring the snapshot is exact in every case.
+        var versionSnapshot = Version;
 
         // 1. Dispatch to subclass — RaiseEvent records events without mutating state
         object? result;
@@ -118,7 +122,7 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         {
             // Only the dispatch is rolled back here — FlushEventsAsync owns its own
             // rollback (doubling it would underflow Version).
-            RollbackDispatchEvents(eventCount);
+            RollbackDispatchEvents(eventCount, versionSnapshot);
             throw;
         }
 
@@ -130,19 +134,21 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     }
 
     /// <summary>
-    /// Drop the events raised by a dispatch that threw (the batch was never
-    /// persisted) and roll Version back by the same count. The lower bound keeps an
-    /// inconsistent Version from underflowing into a huge expectedVersion.
+    /// Drop the events raised by a dispatch that threw (the batch was never persisted) and
+    /// restore <c>Version</c> to <paramref name="versionSnapshot"/> — the value captured
+    /// before the dispatch. Restoring (instead of subtracting a count) is exact even when
+    /// the handler cleared its own staged events with
+    /// <see cref="IEventSourcedActor.CommitEvents"/> before throwing: the list is then empty
+    /// while the Version is already inflated, and a count-based rollback would leave the
+    /// phantom baseline behind for the next flush (permanent ConcurrencyException).
     /// </summary>
-    private void RollbackDispatchEvents(int eventCount)
+    private void RollbackDispatchEvents(int eventCount, ulong versionSnapshot)
     {
         var added = _events.Count - eventCount;
-        if (added <= 0)
-            return;
+        if (added > 0)
+            _events.RemoveRange(eventCount, added);
 
-        _events.RemoveRange(eventCount, added);
-        var delta = (ulong)added;
-        Version = Version >= delta ? Version - delta : 0UL;
+        Version = versionSnapshot;
     }
 
     /// <summary>
@@ -241,10 +247,13 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// business failure makes the current batch non-atomic (<c>SagaActor.FailAsync</c>):
     /// the next append must compute expectedVersion from the last persisted baseline,
     /// otherwise the discarded events would leak into the next batch permanently.
+    /// The lower bound matches <see cref="RollbackDispatchEvents"/>: an inconsistent
+    /// Version must never underflow into a huge expectedVersion.
     /// </summary>
     protected void RollbackUncommitted()
     {
-        Version -= (ulong)_events.Count;
+        var delta = (ulong)_events.Count;
+        Version = Version >= delta ? Version - delta : 0UL;
         ClearEvents();
     }
 

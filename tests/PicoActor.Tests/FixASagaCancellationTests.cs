@@ -21,8 +21,6 @@ internal sealed class FixACancelSaga : SagaActor
         TaskCreationOptions.RunContinuationsAsynchronously
     );
 
-    private int _step;
-
     public FixACancelSaga() { }
 
     protected override async ValueTask<object?> OnMessageAsync(ICommand command)
@@ -30,7 +28,6 @@ internal sealed class FixACancelSaga : SagaActor
         switch (command)
         {
             case FixASagaCreate:
-                _step = 1;
                 return null;
             case FixAWaitForStop:
                 Entered.TrySetResult(true);

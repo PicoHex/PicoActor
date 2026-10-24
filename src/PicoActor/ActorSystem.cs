@@ -17,7 +17,12 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     private readonly ConcurrentDictionary<Guid, RebuildGate> _rebuildGates = new();
 
-    /// <summary>1 while <see cref="StopAllAsync"/> runs: new work is refused, lookups miss.</summary>
+    /// <summary>
+    /// Number of <see cref="StopAllAsync"/> calls currently running: while it is above zero,
+    /// new work is refused and lookups miss. A counter, not a flag — concurrent mass stops
+    /// overlap, and the window must stay open until the LAST one returns (the first returning
+    /// call used to close it while another shutdown was still stopping actors).
+    /// </summary>
     private int _stopping;
 
     private readonly IEventStore _eventStore;
@@ -91,7 +96,7 @@ public sealed class ActorSystem : IActorSystem
         // Refuse new actors while the system is shutting down: one registered after the
         // mass stop's snapshot would outlive the shutdown (and be handed to a caller that
         // is about to be disposed). Checked before anything is constructed.
-        if (Volatile.Read(ref _stopping) != 0)
+        if (Volatile.Read(ref _stopping) > 0)
             throw new InvalidOperationException("Actor system is stopping.");
 
         var id = Guid.CreateVersion7();
@@ -162,7 +167,7 @@ public sealed class ActorSystem : IActorSystem
     {
         // A lookup during shutdown must not resurrect or hand out an actor that the mass
         // stop is about to terminate (or has just terminated).
-        if (Volatile.Read(ref _stopping) != 0)
+        if (Volatile.Read(ref _stopping) > 0)
             return default;
 
         if (_registry.TryGetValue(id, out var existing))
@@ -174,10 +179,11 @@ public sealed class ActorSystem : IActorSystem
         if (!typeof(IEventSourcedActor).IsAssignableFrom(typeof(T)))
             return default;
 
-        // Prefetch the stream the rebuild replays. Read BEFORE taking the per-id gate: it
-        // is only the snapshot the common (single-caller) path uses, and reading outside
-        // the gate keeps lookups of different ids fully parallel. It is re-read under the
-        // gate whenever it can be stale (see below).
+        // Prefetch the stream the rebuild replays. Read BEFORE taking the per-id gate: an
+        // id with no stream at all must not take the gate, and reading outside the gate
+        // keeps lookups of different ids fully parallel.
+        // This snapshot is NEVER trusted for the rebuild itself: it can already be stale
+        // by the time the gate is acquired (it is always re-read below).
         var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
         if (events.Count == 0)
             return default;
@@ -195,24 +201,25 @@ public sealed class ActorSystem : IActorSystem
         await gate.Semaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            // Entries is only mutated while the gate is held, so this is exact.
-            var entry = ++gate.Entries;
-
             // Another caller may have completed the rebuild while we waited.
             if (_registry.TryGetValue(id, out var winner))
                 return await ResolveRegisteredAsync<T>(id, winner).ConfigureAwait(false);
 
-            // A previous caller entered this gate and left nothing registered: the copy it
-            // built either removed itself (a terminal saga) or was taken out (stopped, or
-            // its init failed). Our prefetched snapshot predates that attempt and can
-            // therefore be missing the events it flushed - replaying it would resume a
-            // saga that has already completed. Re-read under the gate.
-            if (entry > 1)
-            {
-                events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
-                if (events.Count == 0)
-                    return default;
-            }
+            // Re-read UNCONDITIONALLY under the gate - the prefetch above is never the
+            // baseline we replay. Two independent writes can land between the prefetch and
+            // this line:
+            //   - a previous caller's rebuild (it left nothing registered: a terminal saga
+            //     that unregistered itself, a stopped copy, a failed init), and
+            //   - the SHUTDOWN side: StopAsync removes the registry entry first and only
+            //     then lets the draining loop flush its terminal event - that write is
+            //     invisible to the registry, and the first caller into the gate ("entry 1")
+            //     is exactly the caller that can be holding the pre-shutdown snapshot.
+            // Replaying a stale snapshot resumes a saga that has already completed and dies
+            // with ConcurrencyException (or appends a second terminal batch). Reads are
+            // idempotent and cheap; correctness wins over saving one read.
+            events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
+            if (events.Count == 0)
+                return default;
 
             var actor = (ActorBase)(IActor)rebuildFactory();
             WireActor(actor, id);
@@ -241,6 +248,14 @@ public sealed class ActorSystem : IActorSystem
                 return default;
             }
 
+            // DEFENSIVE, and unreachable in a correct process: the per-id gate above is held
+            // through registration, so no second rebuild of this id can be racing this
+            // TryAdd — every concurrent caller either waited on the gate (and found this
+            // instance as a registry hit) or is behind us. The branch is kept because the
+            // registry is only private by accident of assembly boundaries, not by contract:
+            // if anything ever adds an entry for this id out of band, the loser must still be
+            // discarded (no second copy resuming/flushing) instead of silently overwriting
+            // the owner.
             if (!_registry.TryAdd(id, actor))
             {
                 _logger?.Warning(
@@ -294,22 +309,26 @@ public sealed class ActorSystem : IActorSystem
         if (registered is not T typed)
             return default;
 
-        if (!registered.InitCompletedTask.IsCompleted)
-        {
-            try
-            {
-                await registered.InitCompletedTask.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Init failed: the instance is gone (or about to be) and a replacement may
-                // already own the id - resolve instead of returning a dead handle.
-            }
+        // IsCompletedSuccessfully, not IsCompleted: a FAULTED (or canceled) init task is
+        // "completed" too, so the old fast path handed out a handle whose initialization
+        // never finished. Only a successful init is a safe fast path; anything else goes
+        // through the same resolve-after-initialization step (which awaits the outcome and
+        // answers from the CURRENT registry state, so a dead or replaced instance is never
+        // returned).
+        if (registered.InitCompletedTask.IsCompletedSuccessfully)
+            return typed;
 
-            return ResolveAfterInitialization<T>(id, registered);
+        try
+        {
+            await registered.InitCompletedTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Init failed: the instance is gone (or about to be) and a replacement may
+            // already own the id - resolve instead of returning a dead handle.
         }
 
-        return typed;
+        return ResolveAfterInitialization<T>(id, registered);
     }
 
     /// <summary>
@@ -495,9 +514,16 @@ public sealed class ActorSystem : IActorSystem
         if (!_registry.TryRemove(id, out var actor))
             return; // Idempotent: already stopped or never existed
 
-        _logger?.Info($"Stopping actor {id}");
+        // Signal the stop BEFORE anything else. The registry entry is already gone, so a
+        // loop kept alive by a report that throws (or hangs) is unreachable for the rest
+        // of the process lifetime — no later sweep, StopAllAsync included, could ever find
+        // it again. The diagnostics are therefore best effort (TryLog swallows a broken
+        // sink) and come after the signal.
+        actor.SignalStop();
+        TryLog(l => l.Info($"Stopping actor {id}"));
+
         await actor.StopAsync().ConfigureAwait(false);
-        _logger?.Info($"Actor {id} stopped");
+        TryLog(l => l.Info($"Actor {id} stopped"));
     }
 
     /// <inheritdoc/>
@@ -506,8 +532,9 @@ public sealed class ActorSystem : IActorSystem
         if (!_registry.TryRemove(id, out var actor))
             return; // Idempotent: already stopped or never existed
 
-        _logger?.Info($"Stopping actor {id} (requested)");
+        // Same ordering as StopAsync: signal first, report afterwards (best effort).
         actor.SignalStop();
+        TryLog(l => l.Info($"Stopping actor {id} (requested)"));
     }
 
     /// <summary>
@@ -521,7 +548,9 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     public async ValueTask StopAllAsync()
     {
-        Interlocked.Exchange(ref _stopping, 1);
+        // Count, do not flag: a concurrent mass stop must not be able to close the window
+        // by returning first — the window closes when the last call returns.
+        Interlocked.Increment(ref _stopping);
         try
         {
             // Bounded: each round stops everything registered at its start, so a registry
@@ -556,9 +585,9 @@ public sealed class ActorSystem : IActorSystem
         }
         finally
         {
-            // The window ends with the call: a host (or a test) that keeps the system alive
-            // after a mass stop can create actors again.
-            Volatile.Write(ref _stopping, 0);
+            // The window ends with the LAST call: a host (or a test) that keeps the system
+            // alive after a mass stop can create actors again.
+            Interlocked.Decrement(ref _stopping);
         }
     }
 
@@ -665,15 +694,12 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <summary>
-    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>. <see cref="Entries"/> counts
-    /// the callers that held the gate, which is how a caller tells "I am the first rebuild of
-    /// this id" from "a previous rebuild left nothing registered" (see GetAsync).
+    /// Per-id single-flight gate for <see cref="GetAsync{T}"/>: rebuild + initialization of
+    /// one id run one caller at a time. The gate carries no state — every caller re-reads
+    /// the stream under it (see GetAsync), so "who went first" never has to be inferred.
     /// </summary>
     private sealed class RebuildGate
     {
         public SemaphoreSlim Semaphore { get; } = new(1, 1);
-
-        /// <summary>Entry count; only mutated while <see cref="Semaphore"/> is held.</summary>
-        public int Entries { get; set; }
     }
 }

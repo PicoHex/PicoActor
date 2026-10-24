@@ -144,7 +144,20 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         public ITypeSymbol? EventTypeSymbol { get; }
         public string EventTypeFqn { get; }
         public string ImplementationType { get; }
+
+        /// <summary>
+        /// Where the declaration was first seen, used ONLY to place diagnostics (PICA001/
+        /// PICA002). It is deliberately NOT part of <see cref="HasSameShapeAs"/> /
+        /// <see cref="ShapeHashCode"/>: including a line/column would make every edit above a
+        /// declaration — a comment, a using, a blank line — look like a new shape and
+        /// invalidate the incremental cache for the whole compilation. The trade-off is that
+        /// a reported location can be slightly stale (it points at where the declaration was
+        /// when the cached shape was produced) until the next real shape change; a stale
+        /// line number in a build diagnostic is cheaper than losing incrementality on every
+        /// keystroke.
+        /// </summary>
         public Location? Location { get; }
+
         public ImmutableArray<string> ConstructorParameterTypes { get; }
 
         /// <summary>Non-null → the shape cannot be emitted at all (PICA002), with the reason.</summary>
@@ -153,7 +166,11 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         /// <summary>False → the declaration cannot be instantiated by generated code (PICA001).</summary>
         public bool HasAccessibleConstructor { get; }
 
-        /// <summary>Structural comparison over the fields that affect generated code.</summary>
+        /// <summary>
+        /// Structural comparison over the fields that affect generated code — and only those.
+        /// <see cref="Location"/> is excluded on purpose (see its remarks), so a pure line
+        /// shift reuses the cached output instead of regenerating it.
+        /// </summary>
         public bool HasSameShapeAs(SubscriberInfo other) =>
             string.Equals(EventTypeFqn, other.EventTypeFqn, StringComparison.Ordinal)
             && string.Equals(ImplementationType, other.ImplementationType, StringComparison.Ordinal)

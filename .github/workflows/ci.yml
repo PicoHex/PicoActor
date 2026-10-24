@@ -122,3 +122,25 @@ jobs:
           --no-restore -c Release -r ${{ matrix.rid }}
           --self-contained
           -o publish/${{ matrix.rid }}
+
+  # ---------------------------------------------------------------------------
+  # Package smoke — the PACKAGED surface must be consumable with PicoActor alone
+  # (C1 regression guard: scripts/verify-package.sh). Independent of the unit-test
+  # matrix on purpose: it packs both packages in Release and restores two throwaway
+  # probe projects, which is minutes the per-RID build job should not pay.
+  # Needs `unzip` (the script unpacks the nuspec; preinstalled on ubuntu-latest).
+  # ---------------------------------------------------------------------------
+  package-smoke:
+    name: Package smoke (packaged surface)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Verify packaged surface (PicoActor alone)
+        run: bash scripts/verify-package.sh
