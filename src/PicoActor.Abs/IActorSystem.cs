@@ -96,6 +96,13 @@ public interface IActorSystem
     /// dispatched before the loop exits (a graceful stop drains the queue — nothing is
     /// silently dropped); messages sent after the stop fail with KeyNotFoundException
     /// because the registry entry is removed first. Idempotent.
+    /// <para>
+    /// The wait is bounded by <c>ActorSystemOptions.StopTimeout</c> when that is configured:
+    /// a handler that does not observe its stop token then no longer parks this call — the
+    /// wait is abandoned (with a warning) and this method returns. The loop itself cannot be
+    /// aborted, so treat that actor as untrusted. A faulted loop's exception is rethrown
+    /// either way.
+    /// </para>
     /// </summary>
     ValueTask StopAsync(Guid id);
 
@@ -120,9 +127,12 @@ public interface IActorSystem
     /// last concurrent call returns, so the system is usable again afterwards.
     /// </para>
     /// <para>
-    /// KNOWN LIMITATION: a message handler that ignores its actor's stop token (it keeps
-    /// awaiting something else) makes this method block until that handler returns — there
-    /// is no per-actor stop timeout or escalation.
+    /// By default every actor is awaited WITHOUT a bound, so a message handler that ignores
+    /// its actor's stop token (it keeps awaiting something else) blocks this method until
+    /// that handler returns. Configure <c>ActorSystemOptions.StopTimeout</c> to make the
+    /// shutdown bounded: each actor then gets that budget, an actor that misses it is
+    /// reported as a warning and abandoned, and the remaining actors are still stopped. The
+    /// abandoned loop cannot be aborted by the framework — treat that actor as untrusted.
     /// </para>
     /// </summary>
     ValueTask StopAllAsync();
