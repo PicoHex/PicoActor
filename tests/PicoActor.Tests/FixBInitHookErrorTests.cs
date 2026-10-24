@@ -11,9 +11,8 @@ namespace PicoActor.Tests;
 internal sealed class FixBInitHookProbe
 {
     /// <summary>Completes from inside the hook, right before it throws.</summary>
-    public TaskCompletionSource<bool> HookEntered { get; } = new(
-        TaskCreationOptions.RunContinuationsAsynchronously
-    );
+    public TaskCompletionSource<bool> HookEntered { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
 
 /// <summary>Actor whose post-init lifecycle hook throws (a subclass bug).</summary>

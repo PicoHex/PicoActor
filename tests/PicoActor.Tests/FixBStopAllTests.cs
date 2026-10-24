@@ -468,9 +468,7 @@ public sealed class FixBPoisonSinkStopTests
 
         foreach (var actor in actors)
         {
-            await Assert
-                .That(actor.Post(new Envelope { Command = new FixBCreateCmd() }))
-                .IsFalse();
+            await Assert.That(actor.Post(new Envelope { Command = new FixBCreateCmd() })).IsFalse();
             await Assert
                 .That(() => system.Send(actor.Id, new FixBCreateCmd()))
                 .Throws<KeyNotFoundException>();

@@ -30,7 +30,9 @@ internal sealed class FixBWindowActor : ActorBase
         if (command is FixBWindowBlock block)
         {
             // Registered BEFORE entering: a token that is already cancelled fires inline.
-            using var registration = StopToken.Register(() => block.StopSignaled.TrySetResult(true));
+            using var registration = StopToken.Register(() =>
+                block.StopSignaled.TrySetResult(true)
+            );
             block.Entered.TrySetResult(true);
             await block.Release.Task.ConfigureAwait(false);
         }
@@ -90,10 +92,13 @@ public sealed class FixBStopWindowTests
         var stopAll1 = system.StopAllAsync().AsTask();
 
         var parked1 = await Task.WhenAny(firstStop.Task, secondStop.Task);
-        var parked2 =
-            ReferenceEquals(parked1, firstStop.Task) ? secondStop.Task : firstStop.Task;
-        var parked1Release = ReferenceEquals(parked1, firstStop.Task) ? firstRelease : secondRelease;
-        var parked2Release = ReferenceEquals(parked2, firstStop.Task) ? firstRelease : secondRelease;
+        var parked2 = ReferenceEquals(parked1, firstStop.Task) ? secondStop.Task : firstStop.Task;
+        var parked1Release = ReferenceEquals(parked1, firstStop.Task)
+            ? firstRelease
+            : secondRelease;
+        var parked2Release = ReferenceEquals(parked2, firstStop.Task)
+            ? firstRelease
+            : secondRelease;
 
         // Mass stop #2: the first actor is already out of the registry, so it parks on the
         // other one. Both calls are now in flight, each waiting for a different loop.
