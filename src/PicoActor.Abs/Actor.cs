@@ -228,7 +228,23 @@ public abstract class Actor : IActor, IAsyncDisposable
             // initialization, so a concurrent GetAsync can observe this instance instead
             // of racing a rebuild. Discarded copies run no lifecycle hooks.
             if (!IsDiscarded)
-                OnInitialized();
+            {
+                try
+                {
+                    OnInitialized();
+                }
+                catch (Exception ex)
+                {
+                    // The hook runs OUTSIDE any message turn, so a throwing override has no
+                    // caller to surface to: the loop task would fault silently (unobserved
+                    // exception) while the actor still looked alive — a half-initialized
+                    // actor that never dispatches again. Report through the same error seam
+                    // as a failed message handler and stop explicitly: dead, and loud.
+                    ReportInitializationHookError(ex);
+                    SignalStop();
+                    return;
+                }
+            }
 
             try
             {
@@ -337,8 +353,43 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// starts dispatching. Subclasses react to the state init produced — SagaActor
     /// auto-stops when it is already terminal. Discarded copies (losing duplicates) skip it.
     /// Overrides must call the base implementation.
+    /// MUST NOT THROW: there is no caller to propagate to (initialization has already been
+    /// reported as successful). A throwing override is reported through
+    /// <see cref="UnhandledErrorHandler"/> (stderr when no host wired one) and the actor is
+    /// stopped — it does not keep running half-initialized.
     /// </summary>
     internal virtual void OnInitialized() { }
+
+    /// <summary>
+    /// Report a throwing <see cref="OnInitialized"/> override without letting the report
+    /// itself escape: the loop is already unwinding and a broken diagnostic channel must not
+    /// turn a hook bug into an unobserved task fault.
+    /// </summary>
+    private void ReportInitializationHookError(Exception ex)
+    {
+        if (UnhandledErrorHandler is null)
+        {
+            // No host wired an error handler (manually driven actor): same stderr fallback
+            // as InvokeErrorHandler.
+            try
+            {
+                Console.Error.WriteLine(
+                    $"[PicoActor] OnInitialized threw on actor {Id}: {ex.Message}"
+                );
+            }
+            catch
+            {
+                // Last-resort diagnostic sink failed — swallow: the stop below is the point.
+            }
+
+            return;
+        }
+
+        // The error seam is typed on a command (it exists for message dispatch). The hook
+        // runs outside one, so hand it an explicit token instead of passing null or an
+        // unrelated command: the report reads "on InitializationHookCommand".
+        InvokeErrorHandler(ex, InitializationHookCommand.Instance);
+    }
 
     /// <summary>
     /// Signal the consumption loop to stop: release the ready gate (in case it
