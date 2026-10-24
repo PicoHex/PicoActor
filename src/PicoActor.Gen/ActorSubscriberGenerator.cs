@@ -449,7 +449,10 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             );
             sb.AppendLine();
             sb.AppendLine(
-                "    public async ValueTask Handle(global::PicoActor.Abs.DomainEventEnvelope envelope, global::System.Threading.CancellationToken ct)"
+                // Fully qualified: the generated file is compiled in the consumer project,
+                // so it must not depend on that project's using directives (a consumer with
+                // ImplicitUsings disabled has no ambient System.Threading.Tasks).
+                "    public async global::System.Threading.Tasks.ValueTask Handle(global::PicoActor.Abs.DomainEventEnvelope envelope, global::System.Threading.CancellationToken ct)"
             );
             sb.AppendLine("    {");
             sb.AppendLine($"        if (envelope.Event is {eventType} e)");
@@ -482,7 +485,12 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             sb.AppendLine("                }");
             sb.AppendLine("                catch (global::System.Exception ex)");
             sb.AppendLine("                {");
-            sb.AppendLine("                    exceptions ??= [];");
+            // Explicit construction, not a collection expression: this file is compiled
+            // with the CONSUMER's LangVersion, and `exceptions ??= []` needs C# 12 (CS9058
+            // on a consumer pinned to 11). Keep generated code at the C# 11 floor.
+            sb.AppendLine(
+                "                    exceptions = new global::System.Collections.Generic.List<global::System.Exception>();"
+            );
             sb.AppendLine("                    exceptions.Add(ex);");
             sb.AppendLine("                }");
             sb.AppendLine("            }");
@@ -496,7 +504,9 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             sb.AppendLine();
         }
 
-        sb.AppendLine($"public static class {className}");
+        // internal, not public: [ModuleInitializer] must be reachable from the module that
+        // hosts it, nothing else — no reason to widen the consumer's public surface.
+        sb.AppendLine($"internal static class {className}");
         sb.AppendLine("{");
         sb.AppendLine("    [ModuleInitializer]");
         sb.AppendLine("    internal static void AutoRegister()");
