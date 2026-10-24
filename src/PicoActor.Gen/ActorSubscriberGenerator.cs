@@ -59,18 +59,30 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
     private sealed class SubscriberInfo
     {
         public SubscriberInfo(
+            INamedTypeSymbol implementationSymbol,
+            ITypeSymbol eventTypeSymbol,
             string eventTypeFqn,
             string implementationType,
             ImmutableArray<string> constructorParameterTypes,
             bool hasAccessibleConstructor
         )
         {
+            ImplementationSymbol = implementationSymbol;
+            EventTypeSymbol = eventTypeSymbol;
             EventTypeFqn = eventTypeFqn;
             ImplementationType = implementationType;
             ConstructorParameterTypes = constructorParameterTypes;
             HasAccessibleConstructor = hasAccessibleConstructor;
         }
 
+        /// <summary>
+        /// The merged (partial-collapsed) handler symbol. The scan is syntax-driven, so a
+        /// type whose base list is spread over several partial declarations is visited once
+        /// per declaration while this symbol stays the SAME — it is the identity key.
+        /// </summary>
+        public INamedTypeSymbol ImplementationSymbol { get; }
+
+        public ITypeSymbol EventTypeSymbol { get; }
         public string EventTypeFqn { get; }
         public string ImplementationType { get; }
         public ImmutableArray<string> ConstructorParameterTypes { get; }
@@ -98,6 +110,39 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(ImplementationType);
                 hash = (hash * 31) + ConstructorParameterTypes.Length;
                 hash = (hash * 31) + (HasAccessibleConstructor ? 1 : 0);
+                return hash;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Identity of one registration: (handler type, event type). Roslyn symbols compare
+    /// with <see cref="SymbolEqualityComparer"/>, which is exact — two distinct types that
+    /// happen to share a display name (or a sanitized identifier) never collapse.
+    /// </summary>
+    private readonly struct RegistrationKey : IEquatable<RegistrationKey>
+    {
+        private readonly INamedTypeSymbol _implementation;
+        private readonly ITypeSymbol _eventType;
+
+        public RegistrationKey(INamedTypeSymbol implementation, ITypeSymbol eventType)
+        {
+            _implementation = implementation;
+            _eventType = eventType;
+        }
+
+        public bool Equals(RegistrationKey other) =>
+            SymbolEqualityComparer.Default.Equals(_implementation, other._implementation)
+            && SymbolEqualityComparer.Default.Equals(_eventType, other._eventType);
+
+        public override bool Equals(object? obj) => obj is RegistrationKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                var hash = SymbolEqualityComparer.Default.GetHashCode(_implementation);
+                hash = (hash * 397) ^ SymbolEqualityComparer.Default.GetHashCode(_eventType);
                 return hash;
             }
         }
@@ -181,11 +226,12 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     )
                     .ToImmutableArray();
 
+            var eventTypeSymbol = iface.TypeArguments[0];
             results.Add(
                 new SubscriberInfo(
-                    iface
-                        .TypeArguments[0]
-                        .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    typeSymbol,
+                    eventTypeSymbol,
+                    eventTypeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                     typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
                     ctorParams,
                     ctor is not null
@@ -205,10 +251,22 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         if (subscribers.IsDefaultOrEmpty)
             return;
 
+        // The scan is syntax-driven: a partial type with a base list in more than one
+        // declaration is visited once per declaration, while GetDeclaredSymbol returns the
+        // same MERGED symbol each time. Without this, one handler would be registered twice
+        // for the same event type. Dedupe on the symbols themselves, never on strings.
+        var seen = new HashSet<RegistrationKey>();
+        var distinct = ImmutableArray.CreateBuilder<SubscriberInfo>(subscribers.Length);
+        foreach (var s in subscribers)
+        {
+            if (seen.Add(new RegistrationKey(s.ImplementationSymbol, s.EventTypeSymbol)))
+                distinct.Add(s);
+        }
+
         // Unregistrable shapes (no accessible instance constructor) get a loud build-time
         // diagnostic instead of an uncompilable `new T()` factory in consumer builds.
         var registrable = ImmutableArray.CreateBuilder<SubscriberInfo>(subscribers.Length);
-        foreach (var s in subscribers)
+        foreach (var s in distinct)
         {
             if (s.HasAccessibleConstructor)
             {
