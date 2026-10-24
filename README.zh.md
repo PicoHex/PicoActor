@@ -376,7 +376,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 自定义 publisher 显式接线:AddPicoActor(IPublisher)(实例需在 Build() 前可用)。
 ```
 
-> **必需包:** 需要添加的只有 `PicoActor`(自带 `PicoActor.Abs` 与 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs` 抽象)。声明 `IDomainEventSubscriber<TEvent>` 处理器时需再加 `PicoMediator`(生成的桥代码调用该包的 `MediatorAutoSubscriptionRegistry`);使用容器接线(`SvcContainer`、`AddPicoMediator`)时需再加 `PicoDI` 与 `PicoMediator.DI`。
+> **必需包:** 需要添加的只有 `PicoActor`(自带 `PicoActor.Abs` 与 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator` 抽象)。声明 `IDomainEventSubscriber<TEvent>` 处理器无需额外加包——`PicoMediator` 本身就是 `PicoActor` 的依赖(生成的桥代码调用它的 `MediatorAutoSubscriptionRegistry`);使用容器接线(`SvcContainer`、`AddPicoMediator`)时需再加 `PicoDI` 与 `PicoMediator.DI`。
 
 > **本地开发(ProjectReference):** analyzer 不随 ProjectReference 链传递——工程消费者需直接引用 `PicoActor.Gen`(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`,镜像 `tests/PicoActor.Tests`)。NuGet 消费者经 `PicoActor.Abs` 包的 `buildTransitive` props 自动注入生成器,无需额外引用。
 

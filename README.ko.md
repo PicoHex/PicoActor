@@ -379,7 +379,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 사용자 지정 publisher 명시적 배선:AddPicoActor(IPublisher)(인스턴스는 Build() 전에 필요).
 ```
 
-> **필수 패키지:** 추가해야 하는 패키지는 `PicoActor` 하나입니다(`PicoActor.Abs`와 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs` 포함). `IDomainEventSubscriber<TEvent>`를 선언할 때는 `PicoMediator`를 추가하세요(생성된 브리지가 해당 패키지의 `MediatorAutoSubscriptionRegistry`를 호출합니다). 컨테이너 배선(`SvcContainer`, `AddPicoMediator`)을 사용할 때는 `PicoDI`와 `PicoMediator.DI`를 추가합니다.
+> **필수 패키지:** 추가해야 하는 패키지는 `PicoActor` 하나입니다(`PicoActor.Abs`와 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator` 포함). `IDomainEventSubscriber<TEvent>`를 선언할 때 추가로 필요한 패키지는 없습니다. `PicoMediator`는 `PicoActor`의 종속성으로 함께 제공됩니다(생성된 브리지가 해당 패키지의 `MediatorAutoSubscriptionRegistry`를 호출합니다). 컨테이너 배선(`SvcContainer`, `AddPicoMediator`)을 사용할 때는 `PicoDI`와 `PicoMediator.DI`를 추가합니다.
 
 > **로컬 개발(ProjectReference):** analyzer는 ProjectReference 체인을 통해 전파되지 않습니다——프로젝트 소비자는 `PicoActor.Gen`을 직접 참조해야 합니다(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, `tests/PicoActor.Tests` 미러). NuGet 소비자는 `PicoActor.Abs` 패키지의 `buildTransitive` props를 통해 생성기를 자동으로 받습니다——추가 참조 불필요.
 
