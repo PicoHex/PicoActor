@@ -2,7 +2,7 @@ namespace PicoActor.Tests;
 
 // ═══════════════════════════════════════════════════════════
 // A4 — stop signalling must survive a loop that already exited.
-// SignalStop cancelled the CTS AFTER......the loop's finally had disposed it, so Cancel()
+// SignalStop cancelled the CTS AFTER the loop's finally had disposed it, so Cancel()
 // threw ObjectDisposedException, the mailbox writer was never completed (Post kept
 // returning true with no reader alive → Ask hangs forever) and the stop was not
 // retryable. StopToken had the same ObjectDisposedException exposure.
