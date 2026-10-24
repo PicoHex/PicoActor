@@ -68,17 +68,39 @@ internal sealed class FixATerminalOnInitSaga : SagaActor
 /// <summary>
 /// Records RequestStop and whether initialization had already completed when it was
 /// called. Everything else is out of scope for this probe.
+/// <para>
+/// The two observations are PUBLISHED ATOMICALLY: the flag is computed and written
+/// first, the counter is incremented after it, and <see cref="StopPublished"/> completes
+/// last. A reader that waits for the publication therefore sees both fields final —
+/// polling the counter and then reading the flag (the original shape) could observe the
+/// counter of one call against the flag of a call that had not written it yet.
+/// </para>
 /// </summary>
 internal sealed class FixARecordingSystem : IActorSystem
 {
+    private int _stopRequests;
+
     public Task? InitTask { get; set; }
-    public int StopRequests { get; private set; }
+    public int StopRequests => Volatile.Read(ref _stopRequests);
+
+    /// <summary>Was initialization complete when <see cref="RequestStop"/> ran?</summary>
     public bool StopRequestedAfterInit { get; private set; }
+
+    /// <summary>
+    /// Completes once <see cref="RequestStop"/> has published BOTH fields. The probe's
+    /// only race-free way to observe the pair.
+    /// </summary>
+    public TaskCompletionSource<bool> StopPublished { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public void RequestStop(Guid id)
     {
-        StopRequests++;
-        StopRequestedAfterInit = InitTask?.IsCompleted == true;
+        // Order matters: value, then flag, then counter, then publication. Everything a
+        // reader needs is written before the publication it can observe.
+        var afterInit = InitTask?.IsCompleted == true;
+        StopRequestedAfterInit = afterInit;
+        Interlocked.Increment(ref _stopRequests);
+        StopPublished.TrySetResult(true);
     }
 
     public ValueTask StopAsync(Guid id) => default;
@@ -200,9 +222,12 @@ public sealed class FixAReplayMarkerTests
 
         await saga.InitCompletedTask;
 
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (system.StopRequests == 0 && DateTime.UtcNow < deadline)
-            await Task.Delay(5);
+        // Wait for the PUBLICATION, not for the counter: the probe writes the flag before
+        // the counter and completes StopPublished last, so this observation sees both
+        // fields final. Polling StopRequests and then reading StopRequestedAfterInit is
+        // exactly the race this test used to lose (~5%: the flag is written a few
+        // instructions after the counter).
+        await system.StopPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         await Assert.That(saga.IsCompleted).IsTrue();
         await Assert.That(system.StopRequests).IsEqualTo(1);
