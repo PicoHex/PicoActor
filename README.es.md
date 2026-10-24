@@ -382,7 +382,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (la instancia debe estar disponible antes de Build()).
 ```
 
-> **Paquetes requeridos:** solo hay que añadir `PicoActor` (incluye `PicoActor.Abs` y las abstracciones `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`). Añada `PicoMediator` cuando declare manejadores `IDomainEventSubscriber<TEvent>` (el bridge generado llama a `MediatorAutoSubscriptionRegistry` de ese paquete), y `PicoDI` + `PicoMediator.DI` cuando use el contenedor (`SvcContainer`, `AddPicoMediator`).
+> **Paquetes requeridos:** solo hay que añadir `PicoActor` (incluye `PicoActor.Abs` y las abstracciones `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator`). Para declarar manejadores `IDomainEventSubscriber<TEvent>` no hace falta ningún paquete extra: `PicoMediator` ya es una dependencia de `PicoActor` (el bridge generado llama a su `MediatorAutoSubscriptionRegistry`). Añada `PicoDI` + `PicoMediator.DI` solo cuando use el contenedor (`SvcContainer`, `AddPicoMediator`).
 
 > **Desarrollo local (ProjectReference):** los analyzers no se propagan a través de cadenas `ProjectReference` — los consumidores por proyecto deben añadir una referencia directa a `PicoActor.Gen` (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, espejo de `tests/PicoActor.Tests`). Los consumidores NuGet reciben el generador automáticamente vía los props `buildTransitive` de `PicoActor.Abs` — sin referencia adicional.
 

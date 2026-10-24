@@ -55,7 +55,7 @@ is always consistent with the event stream.
 |---------|:----------------:|:--------------:|
 | AOT / Trimming | ❌ Akka.NET, Proto.Actor, Orleans all require reflection | ✅ Full NativeAOT support |
 | Event Sourcing | ❌ Proto.Actor, Orleans lack built-in ES | ✅ Persist-then-Mutate, automatic rollback |
-| Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 1 package — PicoActor (brings PicoActor.Abs plus the PicoDI/PicoLog/PicoMediator abstractions); add PicoMediator for domain-event subscribers and PicoDI for container wiring |
+| Dependency Size | ❌ Akka.NET (8+ packages), Orleans (10+ packages) | ✅ 1 package — PicoActor (brings PicoActor.Abs plus the PicoDI/PicoLog/PicoMediator abstractions, including the PicoMediator runtime the generated bridge code needs); add PicoDI + PicoMediator.DI only for container wiring |
 | DI Integration | ❌ Tied to Microsoft.Extensions.DI | ✅ Native PicoDI, zero-reflection resolution |
 | netstandard2.0 | ⚠️ Akka.NET / Proto.Actor only | ❌ net10.0-only (PicoMediator runtime requires net10.0+) |
 | Learning Curve | ❌ Steep — supervision trees, clustering, remoting | ✅ Minimal — actors + events + mailbox |
@@ -504,8 +504,8 @@ Notes:
 
 | Need | Packages to add |
 |------|-----------------|
-| Actors + event sourcing only | `PicoActor` (`PicoActor.Abs`, `PicoDI.Abs`, `PicoLog.Abs`, `PicoMediator.Abs` come with it) |
-| Declaring `IDomainEventSubscriber<TEvent>` handlers | + `PicoMediator` (the generated bridge calls `MediatorAutoSubscriptionRegistry`) |
+| Actors + event sourcing only | `PicoActor` (`PicoActor.Abs`, `PicoDI.Abs`, `PicoLog.Abs`, `PicoMediator.Abs`, `PicoMediator` come with it) |
+| Declaring `IDomainEventSubscriber<TEvent>` handlers | nothing extra — `PicoMediator` is a dependency of `PicoActor` (the generated bridge calls its `MediatorAutoSubscriptionRegistry`) |
 | PicoDI wiring / event outflow (`SvcContainer`, `AddPicoMediator`) | + `PicoDI`, `PicoMediator.DI` |
 
 ---

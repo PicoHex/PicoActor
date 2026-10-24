@@ -15,10 +15,17 @@
   <ItemGroup>
     <!-- IDomainEvent : IEvent 的基接口需传递(消费者编译时解析) -->
     <PackageReference Include="PicoMediator.Abs" />
-    <!-- 2026.8.1+ 的 bridge 生成代码引用主包 MediatorAutoSubscriptionRegistry + PicoDI.Abs——
-         仅生成代码内部使用,不进入公共 API,PrivateAssets=all 保持包面干净 -->
-    <PackageReference Include="PicoMediator" PrivateAssets="all" />
-    <PackageReference Include="PicoDI.Abs" PrivateAssets="all" />
+    <!-- These two are NOT private: the shipped DLL needs them at consumer compile AND
+         run time, so the package must declare them as dependencies.
+         · PicoMediator — the [ModuleInitializer] emitted by PicoMediator.Gen into
+           PicoActor.Abs calls MediatorEventDispatchers_PicoActor_Abs.AutoRegister(),
+           which resolves PicoMediator.MediatorAutoSubscriptionRegistry. Hiding it
+           produced TypeInitializationException -> FileNotFoundException: PicoMediator
+           on the first touch of any Abs type (fixed in C1).
+         · PicoDI.Abs — ISvcContainer appears in shipped generated code (and in the
+           public AddPicoActor(...) signature), so consumers must resolve it too. -->
+    <PackageReference Include="PicoMediator" />
+    <PackageReference Include="PicoDI.Abs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
