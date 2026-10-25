@@ -32,6 +32,7 @@ P:PicoActor.ActorConfig.EventStore : PicoActor.EventStoreConfig { get; set; }
 P:PicoActor.ActorSystemOptions.DomainEventPublisher : PicoActor.Abs.IDomainEventPublisher { get; set; }
 P:PicoActor.ActorSystemOptions.EventStore : PicoActor.Abs.IEventStore { get; set; }
 P:PicoActor.ActorSystemOptions.Logger : PicoLog.Abs.ILogger { get; set; }
+P:PicoActor.ActorSystemOptions.StopTimeout : System.Nullable`1<System.TimeSpan> { get; set; }
 P:PicoActor.EventStoreConfig.Type : string { get; set; }
 T:class PicoActor.ActorConfig
 T:class PicoActor.ActorSystem
