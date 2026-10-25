@@ -220,6 +220,10 @@ public sealed class FixIGeneratorSuppressionTests
             {
                 ["constructorParameterTypes"] = ImmutableArray<string>.Empty,
                 ["diagnosticLineSpan"] = location.GetLineSpan().Span,
+                // Task J1: the state also carries the `#line`-mapped position, so a rebuilt
+                // location reports the same file/line the compiler would.
+                ["diagnosticMappedFilePath"] = location.GetMappedLineSpan().Path,
+                ["diagnosticMappedLineSpan"] = location.GetMappedLineSpan().Span,
                 ["diagnosticLocation"] = location,
                 ["diagnosticFilePath"] = "Input.cs",
                 ["diagnosticSpan"] = location.SourceSpan,

@@ -97,6 +97,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             string? diagnosticFilePath,
             TextSpan diagnosticSpan,
             LinePositionSpan diagnosticLineSpan,
+            string? diagnosticMappedFilePath,
+            LinePositionSpan diagnosticMappedLineSpan,
             Location? diagnosticLocation
         )
         {
@@ -109,6 +111,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             DiagnosticFilePath = diagnosticFilePath;
             DiagnosticSpan = diagnosticSpan;
             DiagnosticLineSpan = diagnosticLineSpan;
+            DiagnosticMappedFilePath = diagnosticMappedFilePath;
+            DiagnosticMappedLineSpan = diagnosticMappedLineSpan;
             DiagnosticLocation = diagnosticLocation;
         }
 
@@ -122,6 +126,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             string? diagnosticFilePath,
             TextSpan diagnosticSpan,
             LinePositionSpan diagnosticLineSpan,
+            string? diagnosticMappedFilePath,
+            LinePositionSpan diagnosticMappedLineSpan,
             Location? diagnosticLocation
         ) =>
             new(
@@ -134,6 +140,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 diagnosticFilePath,
                 diagnosticSpan,
                 diagnosticLineSpan,
+                diagnosticMappedFilePath,
+                diagnosticMappedLineSpan,
                 // Discussed at the property: only a shape that will actually REPORT retains
                 // a source location. Dropping it here — and not merely at the call site —
                 // makes "a registrable subscriber can never root a SyntaxTree through the
@@ -149,6 +157,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             string? diagnosticFilePath,
             TextSpan diagnosticSpan,
             LinePositionSpan diagnosticLineSpan,
+            string? diagnosticMappedFilePath,
+            LinePositionSpan diagnosticMappedLineSpan,
             Location? diagnosticLocation
         ) =>
             new(
@@ -161,6 +171,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                 diagnosticFilePath,
                 diagnosticSpan,
                 diagnosticLineSpan,
+                diagnosticMappedFilePath,
+                diagnosticMappedLineSpan,
                 // Always diagnosable (PICA002), so the source location is always kept.
                 diagnosticLocation
             );
@@ -200,6 +212,24 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
 
         public TextSpan DiagnosticSpan { get; }
         public LinePositionSpan DiagnosticLineSpan { get; }
+
+        /// <summary>
+        /// The MAPPED counterpart of <see cref="DiagnosticFilePath"/>: the file a
+        /// <c>#line</c> directive points at (<c>#line 200 "Mapped.cs"</c>), which is what the
+        /// compiler prints and what an IDE navigates to. Equal to
+        /// <see cref="DiagnosticFilePath"/> when the source has no directives.
+        /// </summary>
+        public string? DiagnosticMappedFilePath { get; }
+
+        /// <summary>
+        /// The MAPPED counterpart of <see cref="DiagnosticLineSpan"/>: same position, but as
+        /// the compiler's <c>#line</c> mapping. All three mapped/physical values are plain
+        /// values (no Roslyn object carried) and they are excluded from
+        /// <see cref="HasSameShapeAs"/> / <see cref="ShapeHashCode"/> for the same reason as
+        /// <see cref="DiagnosticLineSpan"/>: a line shift must not invalidate the cached
+        /// output.
+        /// </summary>
+        public LinePositionSpan DiagnosticMappedLineSpan { get; }
 
         /// <summary>
         /// The declaration's REAL source location, kept ONLY for shapes that report a
@@ -313,7 +343,13 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
         );
         var assemblyName = typeSymbol.ContainingAssembly?.Name ?? string.Empty;
         var location = typeSymbol.Locations.Length > 0 ? typeSymbol.Locations[0] : null;
-        var (diagnosticFilePath, diagnosticSpan, diagnosticLineSpan) = PositionOf(location);
+        var (
+            diagnosticFilePath,
+            diagnosticSpan,
+            diagnosticLineSpan,
+            diagnosticMappedFilePath,
+            diagnosticMappedLineSpan
+        ) = PositionOf(location);
 
         // The ONE Roslyn object allowed to travel through the pipeline, and only towards a
         // shape that reports a diagnostic (see SubscriberInfo.DiagnosticLocation): Roslyn
@@ -339,6 +375,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     diagnosticFilePath,
                     diagnosticSpan,
                     diagnosticLineSpan,
+                    diagnosticMappedFilePath,
+                    diagnosticMappedLineSpan,
                     diagnosticLocation
                 ),
             ];
@@ -379,6 +417,8 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
                     diagnosticFilePath,
                     diagnosticSpan,
                     diagnosticLineSpan,
+                    diagnosticMappedFilePath,
+                    diagnosticMappedLineSpan,
                     diagnosticLocation
                 )
             );
@@ -403,15 +443,32 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
     /// purpose: it keeps its SyntaxTree — and through it the whole Compilation — alive for as
     /// long as the pipeline caches the value.
     /// </summary>
-    private static (string? FilePath, TextSpan Span, LinePositionSpan LineSpan) PositionOf(
-        Location? location
-    )
+    private static (
+        string? FilePath,
+        TextSpan Span,
+        LinePositionSpan LineSpan,
+        string? MappedFilePath,
+        LinePositionSpan MappedLineSpan
+    ) PositionOf(Location? location)
     {
         if (location is null || location.Kind == LocationKind.None)
-            return (null, default, default);
+            return (null, default, default, null, default);
 
+        // Two spans, on purpose. GetLineSpan() is the physical position; GetMappedLineSpan()
+        // is what the compiler prints and what an IDE navigates to, and the two differ
+        // exactly when the source carries `#line` directives (`#line 200 "Mapped.cs"`) —
+        // which is the normal case for a consumer that generates code ahead of this
+        // generator. Rebuilding with the physical span alone would report
+        // Subscriber.cs(7,19) where the compiler reports Mapped.cs(200,19).
         var lineSpan = location.GetLineSpan();
-        return (lineSpan.Path, location.SourceSpan, lineSpan.Span);
+        var mappedLineSpan = location.GetMappedLineSpan();
+        return (
+            lineSpan.Path,
+            location.SourceSpan,
+            lineSpan.Span,
+            mappedLineSpan.Path,
+            mappedLineSpan.Span
+        );
     }
 
     /// <summary>
@@ -658,7 +715,12 @@ public sealed class ActorSubscriberGenerator : IIncrementalGenerator
             : Location.Create(
                 subscriber.DiagnosticFilePath,
                 subscriber.DiagnosticSpan,
-                subscriber.DiagnosticLineSpan
+                subscriber.DiagnosticLineSpan,
+                // Four-argument overload: without the mapped file path/span the rebuilt
+                // location loses `#line` mapping and reports the physical file and line.
+                subscriber.DiagnosticMappedFilePath
+                    ?? subscriber.DiagnosticFilePath,
+                subscriber.DiagnosticMappedLineSpan
             );
     }
 
