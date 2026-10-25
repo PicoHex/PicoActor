@@ -20,11 +20,11 @@ namespace PicoActor.Abs;
 /// Crash recovery:
 ///   GetAsync rebuild → ReplayEvents (framework restores terminal-state flags) →
 ///   if no terminal event, OnReadyAsync automatically calls ResumeAsync()
-///   (when Version > 0; this is the mechanism behind "background recovery" —
-///   ResumeInterruptedSagasAsync is just its batched, state-classifying entry
-///   point) — the framework's flush wrapper consumes pending events raised during
-///   resume (SagaCompleted is persisted in the same batch when the saga reaches
-///   completion) → auto-stop once terminal.
+///   (only when the instance is a rebuild — see EventSourcedActor.IsReplaying; this is
+///   the mechanism behind "background recovery" — ResumeInterruptedSagasAsync is just
+///   its batched, state-classifying entry point) — the framework's flush wrapper
+///   consumes pending events raised during resume (SagaCompleted is persisted in the
+///   same batch when the saga reaches completion) → auto-stop once terminal.
 /// </summary>
 public abstract class SagaActor : EventSourcedActor
 {
@@ -111,9 +111,11 @@ public abstract class SagaActor : EventSourcedActor
     {
         await base.OnReadyAsync().ConfigureAwait(false);
 
-        // Recovery: no terminal event and Version > 0 (the SagaActor constructor takes
-        // no command, so no construction-time events → Version > 0 ⟺ replay)
-        if (!_completed && !_failed && Version > 0)
+        // Recovery only: an instance rebuilt from the persisted stream resumes. "Version > 0"
+        // was the old proxy for this and is wrong for a saga that raises events in its own
+        // constructor — that is a creation (and already ran no resume), so it must not
+        // resume again here.
+        if (!_completed && !_failed && IsReplaying)
         {
             _inCommandContext = true;
             try
@@ -122,6 +124,15 @@ public abstract class SagaActor : EventSourcedActor
             }
             catch (Exception ex)
             {
+                if (IsStopInterrupted(ex))
+                {
+                    // Shutdown interrupt (not a business failure): drop the in-flight
+                    // batch and pending completion, record no terminal event — the saga
+                    // stays resumable. Propagate as-is.
+                    DiscardPendingWork();
+                    throw;
+                }
+
                 // Business failure on the recovery path = terminal: record SagaFailed.
                 try
                 {
@@ -142,6 +153,17 @@ public abstract class SagaActor : EventSourcedActor
             }
             await FlushEventsAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Terminal-state auto-stop. Runs after initialization completed (not from inside
+    /// <see cref="OnReadyAsync"/>), so the runtime never drops the registry entry while a
+    /// caller is still initializing this saga — a concurrent GetAsync observes this
+    /// instance instead of racing a rebuild.
+    /// </summary>
+    internal override void OnInitialized()
+    {
+        base.OnInitialized();
 
         if (_completed || _failed)
             ScheduleStop();
@@ -177,6 +199,17 @@ public abstract class SagaActor : EventSourcedActor
         }
         catch (Exception ex)
         {
+            if (IsStopInterrupted(ex))
+            {
+                // Shutdown interrupt (not a business failure): the command was aborted
+                // by the stop, not refused by business logic. Drop the in-flight batch
+                // and any pending completion, record NO terminal event, and propagate
+                // as-is (the caller observes cancellation, and the saga remains
+                // resumable instead of being permanently buried as Failed).
+                DiscardPendingWork();
+                throw;
+            }
+
             try
             {
                 await FailAsync(ex).ConfigureAwait(false);
@@ -210,6 +243,28 @@ public abstract class SagaActor : EventSourcedActor
 
         if (_completed || _failed)
             ScheduleStop();
+    }
+
+    /// <summary>
+    /// True when <paramref name="ex"/> is cancellation raised by this actor being
+    /// stopped — a shutdown interrupt rather than a business failure. Only the actor's
+    /// own <see cref="Actor.StopToken"/> counts: a caller-owned token (timeout, request
+    /// abort) stays on the business-failure path, which keeps the documented
+    /// "business failure = terminal" semantics.
+    /// </summary>
+    private bool IsStopInterrupted(Exception ex) =>
+        ex is OperationCanceledException && StopToken.IsCancellationRequested;
+
+    /// <summary>
+    /// Drop everything the interrupted turn staged: uncommitted business events (Version
+    /// rolled back with them) and any pending completion, so no half-finished work and
+    /// no fake success can reach the event stream.
+    /// </summary>
+    private void DiscardPendingWork()
+    {
+        _pendingComplete = false;
+        _pendingResult = null;
+        RollbackUncommitted();
     }
 
     private async ValueTask FailAsync(Exception ex)

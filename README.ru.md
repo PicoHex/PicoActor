@@ -382,7 +382,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (экземпляр должен быть доступен до Build()).
 ```
 
-> **Необходимые пакеты:** добавить нужно только `PicoActor` (он включает `PicoActor.Abs` и абстракции `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`). Добавьте `PicoMediator`, если объявляете обработчики `IDomainEventSubscriber<TEvent>` (сгенерированный bridge вызывает `MediatorAutoSubscriptionRegistry` из этого пакета), и `PicoDI` + `PicoMediator.DI`, если используете контейнер (`SvcContainer`, `AddPicoMediator`).
+> **Необходимые пакеты:** добавить нужно только `PicoActor` (он включает `PicoActor.Abs` и абстракции `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator`). Для обработчиков `IDomainEventSubscriber<TEvent>` дополнительных пакетов не нужно: `PicoMediator` уже является зависимостью `PicoActor` (сгенерированный bridge вызывает его `MediatorAutoSubscriptionRegistry`). `PicoDI` + `PicoMediator.DI` нужны только для контейнера (`SvcContainer`, `AddPicoMediator`).
 
 > **Локальная разработка (ProjectReference):** анализаторы не распространяются по цепочкам `ProjectReference` — проектные потребители должны добавить прямую ссылку на `PicoActor.Gen` (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, зеркало `tests/PicoActor.Tests`). Потребители NuGet получают генератор автоматически через props `buildTransitive` пакета `PicoActor.Abs` — дополнительная ссылка не нужна.
 

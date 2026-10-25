@@ -164,7 +164,13 @@ public sealed class ActorSubscriberGeneratorOutputTests
             .Contains(
                 "new global::PicoActor.Abs.DomainEventEnvelope<global::Paid>(envelope.ActorId, envelope.Version, e)"
             );
-        await Assert.That(source).Contains("exceptions ??= []");
+        // Explicit List construction, not a collection expression: the generated file compiles
+        // under the CONSUMER's LangVersion, and `??= []` requires C# 12 (CS9058 at C# 11).
+        await Assert
+            .That(source)
+            .Contains(
+                "exceptions = new global::System.Collections.Generic.List<global::System.Exception>();"
+            );
         await Assert
             .That(source)
             .Contains("throw new global::System.AggregateException(exceptions)");

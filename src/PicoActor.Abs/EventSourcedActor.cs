@@ -21,6 +21,15 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     public ulong Version { get; protected set; }
 
     /// <summary>
+    /// True while this instance is a rebuild whose state came from the persisted stream
+    /// (<see cref="IEventSourcedActor.ReplayEvents"/>) rather than from a live creation
+    /// command. Set by replay, cleared by <see cref="OnInitialized"/> once initialization
+    /// finishes. "Version &gt; 0" is NOT a rebuild marker: a subclass may raise events in
+    /// its constructor, which is a creation.
+    /// </summary>
+    internal bool IsReplaying { get; private set; }
+
+    /// <summary>
     /// May be null in tests or non-persistent scenarios (pure in-memory mode).
     /// </summary>
     private IEventStore? _eventStore;
@@ -93,14 +102,63 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// </summary>
     protected override async ValueTask ProcessAsync(Envelope envelope)
     {
+        // Snapshot BEFORE dispatch: a throwing handler must not leak the events it
+        // already raised into the next command's flush. Those events were never
+        // persisted, so keeping them would append a failed command's events as part
+        // of the next successful batch (stream corruption) and inflate Version.
+        var eventCount = _events.Count;
+        // Version is snapshotted too: the count alone is not a reliable rollback baseline
+        // (a handler can call CommitEvents() mid-dispatch, which empties the list while
+        // Version stays inflated). Restoring the snapshot is exact in every case.
+        var versionSnapshot = Version;
+
         // 1. Dispatch to subclass — RaiseEvent records events without mutating state
-        var result = await OnMessageAsync(envelope.Command).ConfigureAwait(false);
+        object? result;
+        try
+        {
+            result = await OnMessageAsync(envelope.Command).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Only the dispatch is rolled back here — FlushEventsAsync owns its own
+            // rollback (doubling it would underflow Version).
+            RollbackDispatchEvents(eventCount, versionSnapshot);
+            throw;
+        }
 
         // 2. Persist → Mutate → Commit
         await FlushEventsAsync().ConfigureAwait(false);
 
         // 3. Reply only after successful persistence
         envelope.Tcs?.TrySetResult(result);
+    }
+
+    /// <summary>
+    /// Drop the events raised by a dispatch that threw (the batch was never persisted) and
+    /// restore <c>Version</c> to <paramref name="versionSnapshot"/> — the value captured
+    /// before the dispatch. Restoring (instead of subtracting a count) is exact even when
+    /// the handler cleared its own staged events with
+    /// <see cref="IEventSourcedActor.CommitEvents"/> before throwing: the list is then empty
+    /// while the Version is already inflated, and a count-based rollback would leave the
+    /// phantom baseline behind for the next flush (permanent ConcurrencyException).
+    /// <para>
+    /// HANDLERS MUST NOT CALL <see cref="FlushEventsAsync"/> FROM INSIDE A DISPATCH. The
+    /// rollback restores <c>Version</c> to the value captured before the dispatch, so an
+    /// inner flush that SUCCEEDED (events persisted, Version advanced) followed by a throw
+    /// out of the handler would push <c>Version</c> back BELOW the freshly persisted
+    /// baseline. The next flush would then compute <c>expectedVersion = Version - count</c>
+    /// from that regressed value and either re-append events the store already holds or die
+    /// with ConcurrencyException, permanently. Persist after the dispatch returns, or
+    /// return normally so the outer flush runs.
+    /// </para>
+    /// </summary>
+    private void RollbackDispatchEvents(int eventCount, ulong versionSnapshot)
+    {
+        var added = _events.Count - eventCount;
+        if (added > 0)
+            _events.RemoveRange(eventCount, added);
+
+        Version = versionSnapshot;
     }
 
     /// <summary>
@@ -199,19 +257,40 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// business failure makes the current batch non-atomic (<c>SagaActor.FailAsync</c>):
     /// the next append must compute expectedVersion from the last persisted baseline,
     /// otherwise the discarded events would leak into the next batch permanently.
+    /// The lower bound matches <see cref="RollbackDispatchEvents"/>: an inconsistent
+    /// Version must never underflow into a huge expectedVersion.
     /// </summary>
     protected void RollbackUncommitted()
     {
-        Version -= (ulong)_events.Count;
+        var delta = (ulong)_events.Count;
+        Version = Version >= delta ? Version - delta : 0UL;
         ClearEvents();
     }
 
     private void ClearEvents() => _events.Clear();
 
+    /// <summary>
+    /// Initialization is done: the instance is live, so the replay marker's job is
+    /// over. Subclass overrides must call the base implementation.
+    /// </summary>
+    internal override void OnInitialized()
+    {
+        IsReplaying = false;
+        base.OnInitialized();
+    }
+
     void IEventSourcedActor.CommitEvents() => ClearEvents();
 
     void IEventSourcedActor.ReplayEvents(IReadOnlyList<IDomainEvent> events)
     {
+        IsReplaying = true;
+
+        // A rebuilt instance must drop whatever its constructor staged: the persisted
+        // stream is authoritative. Keeping those events (a constructor-seeded saga is the
+        // real case) would append them again and make every later flush compute
+        // expectedVersion from a phantom baseline — a permanent ConcurrencyException.
+        ClearEvents();
+
         // Replay bypasses persistence — events are already in the store.
         // Mutate directly, then set Version.
         foreach (var e in events)

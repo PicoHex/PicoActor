@@ -28,6 +28,21 @@ public interface IActorSystem
     /// 2. Assigns a UUID v7 Id.
     /// 3. Registers in the system.
     /// 4. Calls SignalReady() to release the consumption loop.
+    /// Returns only after the actor finished initializing (construction events persisted).
+    /// Two failure classes, told apart by the exception type:
+    /// <para>
+    /// - <see cref="InvalidOperationException"/> — lifecycle refusal: no factory registered
+    ///   for T, creation while the system is stopping (creating an actor during
+    ///   <see cref="StopAllAsync"/> is refused, because it would outlive the shutdown), and
+    ///   an actor stopped DURING its initialization by a concurrent
+    ///   <see cref="StopAsync"/>/<see cref="RequestStop"/> — a handle to an actor that is
+    ///   already gone is never returned.
+    /// </para>
+    /// <para>
+    /// - The ORIGINAL exception, rethrown unchanged (not wrapped in
+    ///   <see cref="InvalidOperationException"/>), when initialization itself fails — a
+    ///   store failure surfaces as the store's own exception type.
+    /// </para>
     /// </summary>
     ValueTask<T> CreateAsync<T>(ICommand command)
         where T : IActor;
@@ -36,6 +51,30 @@ public interface IActorSystem
     /// Get an actor by UUID v7. Returns from memory if active;
     /// otherwise rebuilds from persisted events using the registered rebuildFactory.
     /// Returns null if not found or no rebuildFactory was registered.
+    /// <para>
+    /// Contract details callers can rely on:
+    /// - Returns <c>default</c> for the whole duration of <see cref="StopAllAsync"/>. The
+    ///   stopping window is not a moment to resurrect or hand out an actor that the mass
+    ///   stop is terminating.
+    /// - A registry hit WAITS for that instance's initialization to finish; an instance
+    ///   that is registered but still initializing is never handed out early.
+    /// - MAY return an already-unregistered TERMINAL saga instance (completed/failed):
+    ///   its state (IsCompleted / IsFailed / FailedReason) is readable, but it is out of the
+    ///   system by design — <see cref="Send"/> and <see cref="AskAsync{TResult}"/> on it
+    ///   throw <see cref="KeyNotFoundException"/>. Never a live handle to a non-terminal
+    ///   actor that stopped during initialization.
+    /// - An instance whose initialization FAILED is not returned once its cleanup has
+    ///   removed it from the registry. BEST EFFORT, not a guarantee: "resolve" and "remove"
+    ///   are separate steps, so a lookup that completes inside that narrow window can still
+    ///   see the failed instance (its init-completion signal has already fired either way).
+    /// - Concurrent calls for the same id are single-flight: one rebuild, one
+    ///   initialization, one resume — the other callers resolve to that instance.
+    /// </para>
+    /// <para>
+    /// Do NOT call this from inside your own initialization (or from initializations that
+    /// reference each other in a cycle) for your own id: the per-id gate is held through
+    /// initialization, so the nested call waits for an initialization that cannot finish.
+    /// </para>
     /// </summary>
     ValueTask<T?> GetAsync<T>(Guid id)
         where T : IActor;
@@ -57,6 +96,13 @@ public interface IActorSystem
     /// dispatched before the loop exits (a graceful stop drains the queue — nothing is
     /// silently dropped); messages sent after the stop fail with KeyNotFoundException
     /// because the registry entry is removed first. Idempotent.
+    /// <para>
+    /// The wait is bounded by <c>ActorSystemOptions.StopTimeout</c> when that is configured:
+    /// a handler that does not observe its stop token then no longer parks this call — the
+    /// wait is abandoned (with a warning) and this method returns. The loop itself cannot be
+    /// aborted, so treat that actor as untrusted. A faulted loop's exception is rethrown
+    /// either way.
+    /// </para>
     /// </summary>
     ValueTask StopAsync(Guid id);
 
@@ -72,6 +118,22 @@ public interface IActorSystem
     /// <summary>
     /// Gracefully stop every registered actor (host disposal — actor loops/CTSs
     /// must not leak until process exit). Idempotent per actor.
+    /// <para>
+    /// Best effort: this method does NOT throw — a failing actor (or a throwing log sink) is
+    /// reported and the remaining actors are still stopped. The registry is drained in
+    /// rounds, so an actor that registers while the shutdown runs (a creation that already
+    /// passed its guard) is stopped too. While it runs, <see cref="CreateAsync{T}"/> throws
+    /// and <see cref="GetAsync{T}"/> returns <c>default</c>; the window stays open until the
+    /// last concurrent call returns, so the system is usable again afterwards.
+    /// </para>
+    /// <para>
+    /// By default every actor is awaited WITHOUT a bound, so a message handler that ignores
+    /// its actor's stop token (it keeps awaiting something else) blocks this method until
+    /// that handler returns. Configure <c>ActorSystemOptions.StopTimeout</c> to make the
+    /// shutdown bounded: each actor then gets that budget, an actor that misses it is
+    /// reported as a warning and abandoned, and the remaining actors are still stopped. The
+    /// abandoned loop cannot be aborted by the framework — treat that actor as untrusted.
+    /// </para>
     /// </summary>
     ValueTask StopAllAsync();
 

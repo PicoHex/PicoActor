@@ -12,6 +12,13 @@
 //   - Saga + event outflow: envelope context (ActorId/Version), multi-subscriber
 //     (two IDomainEventSubscriber<OrderPaid> handlers), ICommandSender ports
 //     (Send / AskAsync; ExecuteSaga from the main flow, also callable from handlers)
+//
+// This file is ALSO the CI native-AOT gate, so the observations below are ASSERTIONS, not
+// decoration: every value a trimmed-away registration would zero out (generated subscribers
+// receiving their events, the saga loopback stopping itself, the recovery classification,
+// the replayed version) is checked with Gate(...), and a mismatch exits non-zero instead of
+// printing "0" next to the Done marker. Waits are bounded polls (GateWaitAsync), never a
+// fixed sleep whose length decides whether the assertion sees the work or not.
 // ═══════════════════════════════════════════════════════════════
 
 Console.WriteLine("=== PicoActor Sample: Event-Sourced Counter ===\n");
@@ -42,24 +49,26 @@ Console.WriteLine(
 // ── Send (fire-and-forget) ─────────────────────────────────────
 system.Send(counter.Id, new Increment(5));
 system.Send(counter.Id, new Increment(3));
-await Task.Delay(100); // yield to let mailbox process
-Console.WriteLine(
-    $"[Send+Ask]    After +5, +3 → {await system.AskAsync<int>(counter.Id, new GetValue())}"
-);
+
+// No sleep: AskAsync is queued behind the Sends in the same mailbox, so the value it answers
+// with is the one produced AFTER they were applied — the gate must not depend on how long a
+// delay happened to be.
+var afterTwoIncrements = await system.AskAsync<int>(counter.Id, new GetValue());
+Console.WriteLine($"[Send+Ask]    After +5, +3 → {afterTwoIncrements}");
+Gate(afterTwoIncrements == 18, $"10 + 5 + 3 should be 18, got {afterTwoIncrements}");
 
 system.Send(counter.Id, new Decrement(2));
-await Task.Delay(100);
-Console.WriteLine(
-    $"[Send+Ask]    After -2 → {await system.AskAsync<int>(counter.Id, new GetValue())}"
-);
+var afterDecrement = await system.AskAsync<int>(counter.Id, new GetValue());
+Console.WriteLine($"[Send+Ask]    After -2 → {afterDecrement}");
+Gate(afterDecrement == 16, $"18 - 2 should be 16, got {afterDecrement}");
 
 // ── Multi-event scenario (Reset) ───────────────────────────────
 system.Send(counter.Id, new Reset(100));
-await Task.Delay(100);
-Console.WriteLine(
-    $"[MultiEvent]  After Reset(100) → {await system.AskAsync<int>(counter.Id, new GetValue())}"
-);
+var afterReset = await system.AskAsync<int>(counter.Id, new GetValue());
+Console.WriteLine($"[MultiEvent]  After Reset(100) → {afterReset}");
+Gate(afterReset == 100, $"Reset(100) should read 100, got {afterReset}");
 Console.WriteLine($"              Version: {counter.Version} (5 events applied)");
+Gate(counter.Version == 5, $"5 events should leave Version 5, got {counter.Version}");
 
 // ── Subscribe to OutputChannel ─────────────────────────────────
 Console.WriteLine("\n── OutputChannel events (live) ──");
@@ -68,13 +77,23 @@ counter.OutputWriter = outChannel.Writer;
 
 system.Send(counter.Id, new Increment(42));
 system.Send(counter.Id, new Decrement(7));
-await Task.Delay(200); // yield to let mailbox process
 
-while (outChannel.Reader.TryRead(out var evt))
-    Console.WriteLine($"  OutputEvent: {evt.Type}, Data={evt.Data}");
-
+// Both commands write their output event while they run, and the AskAsync below is queued
+// behind them: once it answers, the channel already holds both events.
 var finalValue = await system.AskAsync<int>(counter.Id, new GetValue());
 Console.WriteLine($"[Final]       GetValue → {finalValue}");
+Gate(finalValue == 135, $"100 + 42 - 7 should be 135, got {finalValue}");
+
+var outputEvents = 0;
+while (outChannel.Reader.TryRead(out var evt))
+{
+    outputEvents++;
+    Console.WriteLine($"  OutputEvent: {evt.Type}, Data={evt.Data}");
+}
+Gate(
+    outputEvents == 2,
+    $"2 commands on a subscribed channel should emit 2 output events, got {outputEvents}"
+);
 
 // ── StopAsync & GetAsync (event-sourced rebuild) ───────────────
 Console.WriteLine("\n── Stop & Rebuild (event-sourced recovery) ──");
@@ -89,7 +108,9 @@ Console.WriteLine(
     $"[AskAsync]    Rebuilt GetValue → {await system.AskAsync<int>(rebuilt!.Id, new GetValue())}"
 );
 Console.WriteLine($"              Version: {rebuilt.Version} (7 events replayed)");
+Gate(rebuilt.Version == 7, $"replaying 7 events should rebuild Version 7, got {rebuilt.Version}");
 Console.WriteLine($"              Same Id: {rebuilt.Id == oldId}");
+Gate(rebuilt.Id == oldId, "a rebuilt actor must keep its aggregate id");
 
 // ── Idempotent StopAsync ───────────────────────────────────────
 await system.StopAsync(rebuilt.Id);
@@ -103,6 +124,7 @@ var reRebuilt = await system.GetAsync<Counter>(oldId);
 Console.WriteLine(
     $"[GetAsync]    Re-rebuild (ES actor persists) → {(reRebuilt is not null ? "found" : "null (non-ES)")}"
 );
+Gate(reRebuilt is not null, "an event-sourced actor must be rebuildable after StopAsync");
 
 // ═══════════════════════════════════════════════════════════════
 // Saga + Event Outflow (PicoMediator) — order payment process manager
@@ -149,20 +171,48 @@ static async Task SagaAndEventOutflowDemoAsync()
     //    → OrderPaidSub translates it into PaymentReceived → saga mailbox + RecordPayment → ledger
     //    → OrderPaidAuditSub (second subscriber, same event) queries the ledger via AskAsync
     await system.AskAsync<object?>(order.Id, new MarkPaid(order.Id));
-    await Task.Delay(300);
+    // The envelope is published synchronously, but the saga works through its own mailbox:
+    // wait for the terminal event it raises AFTER the translated command lands. Bounded, and
+    // on the observation itself instead of a sleep that guesses how long that takes.
+    await GateWaitAsync(
+        () => SagaCompletedSub.Received.Count > 0,
+        "SagaCompleted to reach its generated subscriber (event loopback)"
+    );
 
     // 4. Saga completed via event loopback; terminal event flowed out; auto-stopped
     var gone = await system.GetAsync<PaymentSaga>(execution.Id);
+    // 4d. Terminal state stops the saga on its own (the loopback, not a caller, closed it).
     Console.WriteLine($"[Loopback]   saga auto-stopped: {gone is null}");
+    Gate(gone is null, "the completed saga should be gone (auto-stopped)");
+    // 4a. Both generated subscribers for OrderPaid fired; the terminal event reached its own.
+    var auditCount = OrderPaidAuditSub.Received.Count;
     Console.WriteLine(
-        $"[Outflow]    OrderPaid envelopes received (multi-subscriber): {OrderPaidAuditSub.Received.Count}"
+        $"[Outflow]    OrderPaid envelopes received (multi-subscriber): {auditCount}"
     );
-    Console.WriteLine(
-        $"[Outflow]    SagaCompleted events received: {SagaCompletedSub.Received.Count}"
+    Gate(
+        auditCount == 1,
+        $"one OrderPaid should reach the second subscriber once, got {auditCount}"
     );
-    Console.WriteLine(
-        $"[Outflow]    SagaCompleted result: {SagaCompletedSub.Received.LastOrDefault()?.Result}"
+    Gate(
+        OrderPaidSub.Handled == 1,
+        $"one OrderPaid should reach the first subscriber once, got {OrderPaidSub.Handled}"
     );
+
+    var completedCount = SagaCompletedSub.Received.Count;
+    Console.WriteLine($"[Outflow]    SagaCompleted events received: {completedCount}");
+    Gate(completedCount == 1, $"exactly one SagaCompleted should flow out, got {completedCount}");
+
+    var completedResult = SagaCompletedSub.Received.FirstOrDefault()?.Result;
+    Console.WriteLine($"[Outflow]    SagaCompleted result: {completedResult}");
+    Gate(
+        completedResult is "paid",
+        $"SagaCompleted should carry the MarkComplete result paid, got {completedResult ?? "null"}"
+    );
+
+    // 4b. The write-side projection was fed by the event-to-command translation.
+    var ledgerCount = await system.AskAsync<int>(ledger.Id, new GetLedgerCount());
+    Console.WriteLine($"[Outflow]    Ledger records (write-side projection): {ledgerCount}");
+    Gate(ledgerCount == 1, $"the ledger should hold 1 payment record, got {ledgerCount}");
 
     // 5. Recovery: interrupt a saga after step 1 (no terminal event), then resume explicitly
     var interruptedId = Guid.CreateVersion7();
@@ -172,6 +222,57 @@ static async Task SagaAndEventOutflowDemoAsync()
     );
     foreach (var r in results)
         Console.WriteLine($"[Resume]     saga {r.Id}: {r.Status}");
+
+    // The already-completed saga's stream starts with the same event, so the recovery scan
+    // sees it and must SKIP it (terminal before rebuild): exactly one result — the
+    // interrupted saga — classified Completed because ResumeAsync found the order paid.
+    Gate(
+        results.Count == 1,
+        $"recovery should resume exactly the 1 interrupted saga, got {results.Count}"
+    );
+    Gate(
+        results[0].Id == interruptedId,
+        $"recovery should resume the interrupted saga {interruptedId}, got {results[0].Id}"
+    );
+    Gate(
+        results[0].Status == SagaResumeStatus.Completed,
+        $"the resumed saga should classify as Completed, got {results[0].Status}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Gate helpers: this sample doubles as the CI native-AOT gate
+// ═══════════════════════════════════════════════════════════════
+
+// A mismatch is a GATE failure, not a note in the log: report it on stderr and exit
+// non-zero, so a registration that ILC trimmed away (it shows up as a subscriber that never
+// fires, i.e. a count of 0) fails the CI job instead of printing "0" next to a Done marker.
+static void Gate(bool condition, string message)
+{
+    if (condition)
+        return;
+
+    Console.Error.WriteLine($"GATE FAILED: {message}");
+    Console.Error.WriteLine("GATE FAILED: the sample flow did not complete");
+    Environment.Exit(1);
+}
+
+// Bounded poll on the OBSERVATION instead of a fixed sleep: it returns as soon as the
+// condition holds (a few milliseconds of mailbox latency) and fails the gate loudly after
+// the timeout, so a trimmed or hung path cannot be mistaken for a slow machine.
+static async Task GateWaitAsync(Func<bool> condition, string message, int timeoutMs = 10000)
+{
+    var deadline = Environment.TickCount64 + timeoutMs;
+    while (!condition())
+    {
+        if (Environment.TickCount64 > deadline)
+        {
+            Gate(false, $"timed out after {timeoutMs} ms waiting for: {message}");
+            return;
+        }
+
+        await Task.Delay(10);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════

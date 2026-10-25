@@ -9,13 +9,25 @@ public interface IEventSourcedActor : IActor
     /// <summary>Current version. Managed by the persistence layer (runtime) and set by ReplayEvents.</summary>
     ulong Version { get; }
 
-    /// <summary>Clear uncommitted events after successful persistence. Does NOT touch the mailbox queue.</summary>
+    /// <summary>
+    /// Clear uncommitted events after successful persistence. Does NOT touch the mailbox queue.
+    /// Cleanup-only, NOT a discard primitive: it drops the pending list but leaves
+    /// <see cref="Version"/> untouched. Discarding an unpersisted batch (a handler that
+    /// decided not to commit) is the runtime's job — raise nothing, or let the dispatch throw
+    /// so the framework restores both the list and the version. Calling this for events that
+    /// were never persisted inflates Version and makes the next flush fail with
+    /// ConcurrencyException.
+    /// </summary>
     void CommitEvents();
 
     /// <summary>
     /// Rebuild in-memory state from persisted events.
     /// Called once before the first message is dispatched. Messages queue but don't dispatch during replay.
     /// Does NOT touch the mailbox queue.
+    /// The persisted stream is authoritative: whatever the (rebuild-path) constructor staged
+    /// as uncommitted events is DISCARDED first, so a constructor-seeded instance cannot
+    /// append its seeds on top of the replayed history. Version is set from the replayed
+    /// event count.
     /// </summary>
     void ReplayEvents(IReadOnlyList<IDomainEvent> events);
 }

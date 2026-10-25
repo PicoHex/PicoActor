@@ -122,3 +122,67 @@ jobs:
           --no-restore -c Release -r ${{ matrix.rid }}
           --self-contained
           -o publish/${{ matrix.rid }}
+
+      # The managed test runs above never touch the AOT artifact: `dotnet test` is a JIT
+      # run, so a source-generated registration that ILC trimmed away is invisible to
+      # them. Running the native binary is the only check that sees it — the sample walks
+      # the whole stack (DI registration, actor loop, event-sourced rebuild, saga, mediator
+      # outflow), so a trimmed registration fails here instead of in a consumer app.
+      # Cheap: the run itself is ~1 s (measured locally on win-x64).
+      #
+      # Cross-RID name: the Windows RIDs append `.exe`, the other RIDs publish an
+      # extensionless ELF/Mach-O. `publish/<rid>/` holds PicoActor.Sample[.exe] plus
+      # symbols only — no companion DLL to stage, so the binary is runnable as published.
+      # A failing run (non-zero exit) or a truncated flow (missing "=== Done ===") fails
+      # the job: this is a gate, not a demo. The sample does not merely PRINT its key
+      # observations — the generated subscribers receiving their events, the saga loopback
+      # stopping itself, the recovery classification, the event-sourced version — it ASSERTS
+      # them and exits 1 on any mismatch, so a registration trimmed away by ILC fails the job
+      # instead of printing "0" next to a Done marker.
+      - name: Run AOT sample (native binary)
+        # A hung binary must not sit on the job's 45-minute budget: the sample's own
+        # waits are bounded (10 s each) and the run itself takes ~1 s, so 5 minutes is
+        # already an order of magnitude of headroom.
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          # pipefail: without it the pipeline's status is `grep`'s, so a binary that
+          # crashes AFTER printing the Done marker would still pass this gate.
+          set -euo pipefail
+
+          dir="publish/${{ matrix.rid }}"
+          exe="$dir/PicoActor.Sample"
+          case "${{ matrix.rid }}" in
+            win-*) exe="$exe.exe" ;;
+          esac
+
+          if [ ! -f "$exe" ]; then
+            echo "::error::native AOT binary not found: $exe"
+            ls -la "$dir" || true
+            exit 1
+          fi
+
+          "$exe" | tee aot-sample.log
+          grep -q "=== Done ===" aot-sample.log
+
+  # ---------------------------------------------------------------------------
+  # Package smoke — the PACKAGED surface must be consumable with PicoActor alone
+  # (C1 regression guard: scripts/verify-package.sh). Independent of the unit-test
+  # matrix on purpose: it packs both packages in Release and restores two throwaway
+  # probe projects, which is minutes the per-RID build job should not pay.
+  # Needs `unzip` (the script unpacks the nuspec; preinstalled on ubuntu-latest).
+  # ---------------------------------------------------------------------------
+  package-smoke:
+    name: Package smoke (packaged surface)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Verify packaged surface (PicoActor alone)
+        run: bash scripts/verify-package.sh
