@@ -55,9 +55,14 @@ internal sealed class FixAAsyncCreationActor : EventSourcedActor
     /// old <c>await Task.Delay(50)</c> only made it *probable* that the check ran inside
     /// the delay: a machine that stalls the test thread for 50 ms before the constructor
     /// reaches the check (GC pause, debugger, CI contention) would see a COMPLETED ValueTask
-    /// and the test would pass/fail on timing instead of on the contract. The actor that
-    /// awaits this gate is discarded and stopped by the failing constructor, so the pending
-    /// continuation is never resumed and leaks nothing.
+    /// and the test would pass/fail on timing instead of on the contract.
+    /// <para>
+    /// It is NOT leak-free, and the earlier "leaks nothing" wording was wrong: the actor that
+    /// awaits this gate is stopped by the failing constructor, but its pending continuation
+    /// stays registered on a task that is never completed, so the stopped actor graph —
+    /// including this static gate — stays reachable until the test process exits. Bounded and
+    /// harmless: one actor per run of this test, in a process that ends when the suite does.
+    /// </para>
     /// </summary>
     private static readonly TaskCompletionSource<object?> NeverCompletingGate = new(
         TaskCreationOptions.RunContinuationsAsynchronously
@@ -189,7 +194,10 @@ public sealed class FixACreationFailureTests
     /// (creation commands must be synchronous) → InvalidOperationException.
     /// </summary>
     [Test]
-    public async Task CreationHandlerThatCompletesLater_ThrowsInvalidOperation()
+    [Timeout(15000)]
+    public async Task CreationHandlerThatCompletesLater_ThrowsInvalidOperation(
+        CancellationToken cancellationToken = default
+    )
     {
         var (system, _) = NewSystem();
 

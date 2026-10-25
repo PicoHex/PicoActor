@@ -134,8 +134,16 @@ jobs:
       # extensionless ELF/Mach-O. `publish/<rid>/` holds PicoActor.Sample[.exe] plus
       # symbols only — no companion DLL to stage, so the binary is runnable as published.
       # A failing run (non-zero exit) or a truncated flow (missing "=== Done ===") fails
-      # the job: this is a gate, not a demo.
+      # the job: this is a gate, not a demo. The sample does not merely PRINT its key
+      # observations — the generated subscribers receiving their events, the saga loopback
+      # stopping itself, the recovery classification, the event-sourced version — it ASSERTS
+      # them and exits 1 on any mismatch, so a registration trimmed away by ILC fails the job
+      # instead of printing "0" next to a Done marker.
       - name: Run AOT sample (native binary)
+        # A hung binary must not sit on the job's 45-minute budget: the sample's own
+        # waits are bounded (10 s each) and the run itself takes ~1 s, so 5 minutes is
+        # already an order of magnitude of headroom.
+        timeout-minutes: 5
         shell: bash
         run: |
           # pipefail: without it the pipeline's status is `grep`'s, so a binary that
