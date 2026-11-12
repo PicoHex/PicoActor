@@ -1,3 +1,4 @@
+I:PicoActor.ActorSystem : PicoActor.Abs.IActorPassivationHost
 I:PicoActor.ActorSystem : PicoActor.Abs.IActorSystem
 I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStore
 I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStoreEnumerator
