@@ -37,4 +37,34 @@ public sealed class ActorSystemOptions
     /// </para>
     /// </summary>
     public TimeSpan? StopTimeout { get; set; }
+
+    private int? _snapshotEveryNEvents;
+
+    /// <summary>
+    /// Opt-in snapshot acceleration for event-sourced actors. When set to N, an actor that
+    /// returns a payload from <c>EventSourcedActor.TakeSnapshot</c> saves a snapshot every N
+    /// persisted events, and recovery restores the snapshot and replays only the events after
+    /// it. Default <c>null</c> = off (every actor replays its whole stream).
+    /// <para>
+    /// Snapshotting is acceleration ONLY: the event stream is never truncated, at most one
+    /// snapshot per actor is kept, and a missing/corrupt/out-of-range snapshot falls back to a
+    /// full replay. A store that does not implement <see cref="Abs.IEventStoreSnapshot"/>
+    /// disables the feature regardless of this value.
+    /// </para>
+    /// <para>A value below 1 is rejected here: it can only be a host bug.</para>
+    /// </summary>
+    public int? SnapshotEveryNEvents
+    {
+        get => _snapshotEveryNEvents;
+        set
+        {
+            if (value is <= 0)
+                throw new ArgumentOutOfRangeException(
+                    nameof(SnapshotEveryNEvents),
+                    value,
+                    "SnapshotEveryNEvents must be a positive event count (null disables it)."
+                );
+            _snapshotEveryNEvents = value;
+        }
+    }
 }
