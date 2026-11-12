@@ -69,7 +69,9 @@ public sealed class FixSPIntegrationTests
 {
     [Test]
     [Timeout(20000)]
-    public async Task PassivatedActor_RebuildsFromSnapshot_AndReplaysOnlyTheTail()
+    public async Task PassivatedActor_RebuildsFromSnapshot_AndReplaysOnlyTheTail(
+        CancellationToken cancellationToken = default
+    )
     {
         var store = new InMemoryEventStore();
         var system = new ActorSystem(
@@ -96,12 +98,39 @@ public sealed class FixSPIntegrationTests
         await Assert.That(snapshot).IsNotNull();
         await Assert.That(snapshot!.Version).IsEqualTo((ulong)10);
 
-        // Idle passivation: the registry entry must disappear (poll the side-effect-free
-        // counter; probing with Send would refresh the activity time).
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (system.PassivatedCount == 0 && DateTime.UtcNow < deadline)
-            await Task.Delay(20);
+        // Idle passivation. The counter only proves the request was QUEUED (that is what the
+        // sweeper counts); the registry entry disappears later, when the loop reaches the
+        // sentinel. So the wait has to be on the OBSERVABLE effect, with a cap — asserting the
+        // KeyNotFoundException right after the counter moves is a timing assumption, not a
+        // property. The probe is read-only (SpaGet raises no event and changes no state);
+        // InvalidOperationException is the stop-race window (mailbox closed, entry not yet
+        // removed) and is retried.
+        var deadline = Environment.TickCount64 + 5_000;
+        while (system.PassivatedCount == 0 && Environment.TickCount64 < deadline)
+            await Task.Delay(20, cancellationToken);
         await Assert.That(system.PassivatedCount).IsGreaterThan(0);
+
+        var gone = false;
+        while (!gone && Environment.TickCount64 < deadline)
+        {
+            try
+            {
+                system.Send(id, new SpaGet());
+            }
+            catch (KeyNotFoundException)
+            {
+                gone = true;
+                break;
+            }
+            catch (InvalidOperationException)
+            {
+                // Stopping: retry until the registry entry is gone.
+            }
+
+            await Task.Delay(10, cancellationToken);
+        }
+
+        await Assert.That(gone).IsTrue();
         await Assert.That(() => system.Send(id, new SpaAdd(1))).Throws<KeyNotFoundException>();
 
         // Rebuild: snapshot + tail only. 12 events, snapshot at 10 => 2 Mutate calls.

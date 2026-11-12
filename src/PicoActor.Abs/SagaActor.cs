@@ -38,6 +38,19 @@ public abstract class SagaActor : EventSourcedActor
     /// <summary>The only construction path. Commands are driven through the mailbox.</summary>
     protected SagaActor() { }
 
+    /// <summary>
+    /// A saga is NEVER passivated, whatever its idle time says.
+    /// <para>
+    /// "Waiting for an external reply" is a saga's normal state: it is idle by definition while
+    /// the outside world works, so an idle-budget sweep would reclaim a saga that is mid-flight.
+    /// The reply command would then arrive at an id nobody owns (Send/AskAsync throw
+    /// <see cref="KeyNotFoundException"/>) and the saga would stay stranded exactly at the
+    /// moment it was supposed to progress. Coordination state is live work, not a cache.
+    /// </para>
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public override bool CanBePassivated => false;
+
     /// <summary>Restored by the framework from the event stream on replay.</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public bool IsCompleted => _completed;

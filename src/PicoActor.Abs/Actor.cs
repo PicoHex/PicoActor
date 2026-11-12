@@ -46,6 +46,14 @@ public abstract class Actor : IActor, IAsyncDisposable
     private int _processing;
 
     /// <summary>
+    /// 1 when the owning system reads <see cref="LastActivityUtc"/> (idle passivation is on), 0
+    /// otherwise. The idle clock is only paid for when somebody reads it: the hot paths (every
+    /// accepted <see cref="Post"/> and the end of every dispatched command) must be free of a
+    /// <c>DateTime.UtcNow</c> nobody consumes.
+    /// </summary>
+    private int _trackIdleActivity;
+
+    /// <summary>
     /// Framework-generated UUID v7 identity.
     /// Assigned by IActorSystem via <see cref="AttachToSystem"/> after construction,
     /// before SignalReady(). Immutable for application code thereafter.
@@ -232,13 +240,38 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// the registry (so Send/AskAsync throw <see cref="KeyNotFoundException"/>) and its state is
     /// rebuilt from the event stream by the next GetAsync. Not for application code.
     /// </para>
+    /// <para>
+    /// Returns whether the request was actually QUEUED. False means the mailbox is already closed
+    /// (the actor is stopping or stopped), so no reclaim will happen and the caller must not count
+    /// one: the request is only a request, and this is the only honest way to report a refusal.
+    /// </para>
     /// </summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public void RequestPassivation() =>
+    public bool RequestPassivation() =>
         _mailbox.Writer.TryWrite(new Envelope { Command = PassivateSentinel.Instance });
 
+    /// <summary>
+    /// Whether this actor's idle clock is observed. Set by the owning system when idle passivation
+    /// is configured (nothing else reads the clock); false by default, so a system that never
+    /// passivates pays nothing for timestamps. Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool TrackIdleActivity
+    {
+        get => Volatile.Read(ref _trackIdleActivity) != 0;
+        set => Volatile.Write(ref _trackIdleActivity, value ? 1 : 0);
+    }
+
     /// <summary>Record that activity just happened on this actor (UTC ticks, lock-free).</summary>
-    private void Touch() => Interlocked.Exchange(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+    private void Touch()
+    {
+        // Passivation disabled: nobody will ever read the value, so skip the clock read
+        // entirely. Read per call (not cached) so the switch stays honest.
+        if (Volatile.Read(ref _trackIdleActivity) == 0)
+            return;
+
+        Interlocked.Exchange(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+    }
 
     private async Task RunAsync(CancellationToken ct)
     {
@@ -327,11 +360,12 @@ public abstract class Actor : IActor, IAsyncDisposable
                     // Framework sentinel: passivation is a MESSAGE, not an external stop. It is
                     // handled strictly BEFORE dispatch, and it is not a command - the subclass
                     // never sees it, nothing is persisted for it, and no TCS can be waiting on it.
-                    // RequestStop removes the registry entry first, so later lookups miss (and a
-                    // concurrent GetAsync rebuilds from the stream) instead of reaching a corpse.
+                    // The removal is ownership-checked (see RequestOwnStop): it takes THIS
+                    // instance out, so later lookups miss (and a concurrent GetAsync rebuilds
+                    // from the stream) instead of reaching a corpse.
                     if (envelope.Command is PassivateSentinel)
                     {
-                        System?.RequestStop(Id);
+                        RequestOwnStop();
                         continue;
                     }
 
@@ -451,6 +485,29 @@ public abstract class Actor : IActor, IAsyncDisposable
     /// stopped — it does not keep running half-initialized.
     /// </summary>
     internal virtual void OnInitialized() { }
+
+    /// <summary>
+    /// Leave the registry and stop, on behalf of THIS instance (the passivation sentinel path).
+    /// <para>
+    /// The host is asked to remove the instance it is holding, not "whatever owns my id": by the
+    /// time a queued sentinel is consumed, the id may already belong to a rebuilt replacement, and
+    /// an id-only removal would unregister that live actor while leaving this one (already
+    /// stopping) behind. A refused request therefore does NOT fall back to an id-only stop: "that
+    /// id is not mine anymore" means there is nothing left for this instance to reclaim, and it is
+    /// already on its way out. A host that does not implement
+    /// <see cref="IActorPassivationHost"/> keeps the id-only behavior.
+    /// </para>
+    /// </summary>
+    private void RequestOwnStop()
+    {
+        if (System is IActorPassivationHost host)
+        {
+            host.TryRequestStop(Id, this);
+            return;
+        }
+
+        System?.RequestStop(Id);
+    }
 
     /// <summary>
     /// Report a throwing <see cref="OnInitialized"/> override without letting the report

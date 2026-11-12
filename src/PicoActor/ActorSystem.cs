@@ -5,7 +5,7 @@ namespace PicoActor;
 /// creation, retrieval, message routing, and stopping.
 /// Registered as a PicoDI Singleton.
 /// </summary>
-public sealed class ActorSystem : IActorSystem
+public sealed class ActorSystem : IActorSystem, IActorPassivationHost
 {
     private readonly ConcurrentDictionary<Guid, ActorBase> _registry = new();
     private readonly ConcurrentDictionary<Type, Func<ICommand, object>> _factories = new();
@@ -101,8 +101,10 @@ public sealed class ActorSystem : IActorSystem
         {
             _idleTimeout = idleTimeout;
 
-            // Derived default: half the idle budget, never below one second, so a reclaimed actor
-            // is noticed within roughly 1.5x its budget without spinning the CPU.
+            // Derived default: half the idle budget, floored at one second (a 1ms budget would
+            // otherwise sweep in a busy loop). For budgets of 2s and up an actor is therefore
+            // reclaimed within roughly 1.5x its budget; below 2s the one-second floor dominates,
+            // and a reclaim takes up to (budget + 1s).
             var derived = idleTimeout / 2;
             _idleSweepInterval =
                 options.IdleSweepInterval
@@ -530,6 +532,10 @@ public sealed class ActorSystem : IActorSystem
     private void WireActor(ActorBase actor, Guid id)
     {
         actor.AttachToSystem(id, this);
+
+        // The idle clock is only maintained when a sweeper will read it (see Actor.Touch).
+        actor.TrackIdleActivity = _idleTimeout is not null;
+
         WireErrorHandler(actor);
 
         if (actor is EventSourcedActor es)
@@ -732,6 +738,30 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <summary>
+    /// <see cref="IActorPassivationHost"/>: the ownership-checked stop a passivation requests.
+    /// <para>
+    /// The compare-and-remove is the whole point. <see cref="RequestStop"/> removes by id, and a
+    /// passivation request is consumed by a loop that may be a LOST instance: if the id has
+    /// already been rebuilt into a replacement, removing it by id would orphan that live actor
+    /// (unreachable, loop still running) and destroy a perfectly good rebuild. Only the instance
+    /// that asked is stopped; anything else answers false and is left alone.
+    /// </para>
+    /// </summary>
+    bool IActorPassivationHost.TryRequestStop(Guid id, IActor expected)
+    {
+        if (expected is not ActorBase actor)
+            return false;
+
+        if (!RemoveIfSame(id, actor))
+            return false;
+
+        // Same ordering as StopAsync/RequestStop: signal first, report afterwards (best effort).
+        actor.SignalStop();
+        TryLog(l => l.Info($"Stopping actor {id} (passivated)"));
+        return true;
+    }
+
+    /// <summary>
     /// Gracefully stop every registered actor (host disposal must not leak actor
     /// loops/CTSs until process exit). Best effort: this method does NOT throw — a failing
     /// actor is reported through the logger and the remaining ones are still stopped.
@@ -914,9 +944,12 @@ public sealed class ActorSystem : IActorSystem
     public long PassivatedCount => Interlocked.Read(ref _passivatedCount);
 
     /// <summary>
-    /// How many passivated actors have been rebuilt from their event stream by
-    /// <see cref="GetAsync{T}"/>. Together with <see cref="PassivatedCount"/> this is the
-    /// memory-vs-latency trade the feature makes: passivation buys memory with a replay.
+    /// How many SUCCESSFUL rebuilds from the event stream <see cref="GetAsync{T}"/> has performed.
+    /// That includes every reactivation of a passivated actor, but not only those: a manual
+    /// <c>GetAsync</c> of an id nobody owns (crash recovery, a saga resume, an operator probe)
+    /// counts here too. Together with <see cref="PassivatedCount"/> — which counts passivation
+    /// requests issued — this is the memory-vs-latency trade the feature makes: passivation buys
+    /// memory with a replay.
     /// </summary>
     public long ReactivatedCount => Interlocked.Read(ref _reactivatedCount);
 
@@ -930,10 +963,12 @@ public sealed class ActorSystem : IActorSystem
     /// </para>
     /// <para>
     /// A candidate must be: an <c>EventSourcedActor</c> whose concrete type has a registered
-    /// rebuild factory, initialized successfully, neither processing nor backed up, and idle for
-    /// at least the configured budget. Candidates are asked to passivate — they are never stopped
-    /// from the outside: the request is a mailbox sentinel, so the actor reclaims itself at a
-    /// message boundary and the registry entry disappears before its loop exits.
+    /// rebuild factory, whose <see cref="Abs.EventSourcedActor.CanBePassivated"/> is true (a
+    /// <see cref="SagaActor"/> opts out — waiting is its job), initialized successfully, neither
+    /// processing nor backed up, and idle for at least the configured budget. Candidates are asked
+    /// to passivate — they are never stopped from the outside: the request is a mailbox sentinel,
+    /// so the actor reclaims itself at a message boundary and the registry entry disappears before
+    /// its loop exits.
     /// </para>
     /// </summary>
     public ValueTask SweepIdleActorsAsync()
@@ -955,7 +990,14 @@ public sealed class ActorSystem : IActorSystem
                 continue;
 
             var idle = now - entry.Value.LastActivityUtc;
-            entry.Value.RequestPassivation();
+
+            // The request is a mailbox WRITE, and a closed mailbox refuses it (the actor is
+            // stopping; its registry entry is about to disappear or already belongs to another
+            // instance). Counting or logging a reclaim that was never queued would make the
+            // diagnostics lie, so the sweep moves on instead.
+            if (!entry.Value.RequestPassivation())
+                continue;
+
             Interlocked.Increment(ref _passivatedCount);
 
             // Best effort: a broken sink must never leave a half-decided sweep behind.
@@ -975,25 +1017,31 @@ public sealed class ActorSystem : IActorSystem
     private bool IsPassivationCandidate(ActorBase actor, DateTime now, TimeSpan idleTimeout)
     {
         // 1. Only an event-sourced actor has a stream to come back from.
-        if (actor is not EventSourcedActor)
+        if (actor is not EventSourcedActor eventSourced)
             return false;
 
         // 2. ... and only if THIS concrete type can be rebuilt: GetAsync looks the factory up by
         //    the requested type, so an ES actor registered without one is not rebuildable.
-        if (!_rebuildFactories.ContainsKey(actor.GetType()))
+        if (!_rebuildFactories.ContainsKey(eventSourced.GetType()))
             return false;
 
-        // 3. A registered instance appears BEFORE its initialization finishes (replay, saga
+        // 3. The actor type must allow it. A saga waiting for an external reply is idle BY
+        //    DEFINITION, so the clock is the wrong question for it: reclaiming a live saga
+        //    strands its coordination state (the reply arrives at an id nobody owns).
+        if (!eventSourced.CanBePassivated)
+            return false;
+
+        // 4. A registered instance appears BEFORE its initialization finishes (replay, saga
         //    resume). Reclaiming it then would throw away work in progress.
-        if (!actor.InitCompletedTask.IsCompletedSuccessfully)
+        if (!eventSourced.InitCompletedTask.IsCompletedSuccessfully)
             return false;
 
-        // 4. A working actor, or one with queued work, is not idle whatever the clock says.
-        if (actor.IsProcessing || actor.PendingCount > 0)
+        // 5. A working actor, or one with queued work, is not idle whatever the clock says.
+        if (eventSourced.IsProcessing || eventSourced.PendingCount > 0)
             return false;
 
-        // 5. Finally the idle clock itself.
-        return now - actor.LastActivityUtc >= idleTimeout;
+        // 6. Finally the idle clock itself.
+        return now - eventSourced.LastActivityUtc >= idleTimeout;
     }
 
     /// <summary>

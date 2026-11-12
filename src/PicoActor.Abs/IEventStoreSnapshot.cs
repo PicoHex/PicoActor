@@ -9,6 +9,13 @@ namespace PicoActor.Abs;
 /// event-count version model of <see cref="IEventStore"/>): recovery restores the payload and
 /// then replays only the events AFTER that version.
 /// </para>
+/// <para>
+/// BUFFER OWNERSHIP: the producer of a payload is allowed to REUSE its serialization buffer (one
+/// buffer per aggregate, filled again on the next snapshot), so whoever keeps an
+/// <see cref="ActorSnapshot"/> beyond the <see cref="IEventStoreSnapshot.SaveSnapshotAsync"/>
+/// call must keep its own copy (the bundled <c>InMemoryEventStore</c> does). Until the array is
+/// overwritten the snapshot describes exactly the state at <paramref name="Version"/>.
+/// </para>
 /// </summary>
 public sealed record ActorSnapshot(ulong Version, byte[] Payload);
 
@@ -46,11 +53,12 @@ public interface IEventStoreSnapshot
 }
 
 /// <summary>
-/// Framework-internal recovery contract implemented by
-/// <see cref="EventSourcedActor"/>: lets the actor system restore a snapshot and replay only
-/// the events after it, without widening <see cref="IEventSourcedActor"/> (whose
+/// Recovery contract implemented by <see cref="EventSourcedActor"/> and CALLED BY THE RUNTIME
+/// (the actor system): it restores a snapshot and replays only the events after it, without
+/// widening <see cref="IEventSourcedActor"/> (whose
 /// <see cref="IEventSourcedActor.ReplayEvents"/> keeps its "rebuild from the whole stream"
-/// meaning).
+/// meaning). Application code derives from <see cref="EventSourcedActor"/> rather than
+/// implementing this interface.
 /// </summary>
 public interface ISnapshotableActor : IEventSourcedActor
 {
