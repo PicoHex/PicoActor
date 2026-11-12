@@ -339,12 +339,15 @@ public abstract class Actor : IActor, IAsyncDisposable
                     // The actor is dead, so it must LEAVE the registry, not merely stop its
                     // loop: SignalStop alone left the dead instance registered, and every
                     // lookup kept routing to it (Send/Ask threw "is stopping" and GetAsync
-                    // handed out a corpse instead of missing). RequestStop removes the entry
-                    // and signals the stop — the same shape as SagaActor.ScheduleStop.
+                    // handed out a corpse instead of missing). RequestOwnStop removes the
+                    // entry and signals the stop — the same shape as SagaActor.ScheduleStop,
+                    // and ownership-checked for the same reason as the passivation sentinel:
+                    // by the time this dead instance leaves, the id may already belong to a
+                    // rebuilt replacement, which an id-only removal would unregister instead.
                     // Unattached actors (manually driven probes, and discarded copies built
                     // before wiring) have no system to deregister from: stop directly.
                     if (System is not null)
-                        System.RequestStop(Id);
+                        RequestOwnStop();
                     else
                         SignalStop();
                     return;
@@ -487,7 +490,9 @@ public abstract class Actor : IActor, IAsyncDisposable
     internal virtual void OnInitialized() { }
 
     /// <summary>
-    /// Leave the registry and stop, on behalf of THIS instance (the passivation sentinel path).
+    /// Leave the registry and stop, on behalf of THIS instance. Both self-stop routes go
+    /// through here: the passivation sentinel (the actor was asked to give its state back) and
+    /// the failed-initialization stop (the actor is dead and must not stay registered).
     /// <para>
     /// The host is asked to remove the instance it is holding, not "whatever owns my id": by the
     /// time a queued sentinel is consumed, the id may already belong to a rebuilt replacement, and

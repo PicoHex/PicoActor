@@ -86,6 +86,14 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator, IEv
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The snapshot returned is the one stored here — the SAME array, not a copy, because a
+    /// read path may run on every rebuild of an aggregate. It is therefore READ-ONLY for the
+    /// caller: writing into <see cref="ActorSnapshot.Payload"/> would silently rewrite the
+    /// snapshot every later recovery of this actor restores.
+    /// <see cref="SaveSnapshotAsync"/> copies on the way in, so a producer may keep reusing its
+    /// serialization buffer.
+    /// </remarks>
     public ValueTask<ActorSnapshot?> LoadSnapshotAsync(
         Guid actorId,
         CancellationToken ct = default
