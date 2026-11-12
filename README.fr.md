@@ -189,6 +189,79 @@ est restaurée. L'Acteur n'est **pas empoisonné** — le message suivant est
 traité normalement.
 `Mutate` doit être une fonction pure qui ne lève jamais d'exception ; sinon, le lot est déjà durable et l'acteur est **arrêté** (retiré du registre) au lieu de continuer avec un état non fiable.
 
+### Snapshot Acceleration (opt-in) (Accélération par instantanés, optionnel)
+
+Pour les flux longs, rejouer chaque événement à chaque reconstruction constitue le coût de récupération.
+Un instantané (snapshot) est une charge opaque que l'acteur enregistre tous les N événements persistés, de sorte qu'une
+reconstruction le restaure et ne rejoue que la queue. Les instantanés ne sont qu'une **accélération** :
+le flux d'événements n'est jamais tronqué, au plus un instantané par
+agrégat est conservé, et un instantané manquant, corrompu ou hors limites retombe sur
+un rejeu complet.
+
+```csharp
+public sealed class Counter : EventSourcedActor
+{
+    private int _value;
+
+    // Payload = the state this actor needs to restore (encoding is your choice:
+    // PicoActor has no serializer dependency). Return null to opt out.
+    protected override byte[]? TakeSnapshot() => BitConverter.GetBytes(_value);
+
+    // MUST be overridden whenever TakeSnapshot is: the framework restores the
+    // payload and then replays only the events after `version`.
+    protected override void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
+        _value = BitConverter.ToInt32(payload);
+}
+
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,               // must implement IEventStoreSnapshot
+    SnapshotEveryNEvents = 1_000,     // default null = disabled
+});
+```
+
+- Déclencheur : tous les N événements **persistés** (comptés par événement, pas par flush).
+- Format de transmission : `IEventStoreSnapshot.SaveSnapshotAsync(id, new ActorSnapshot(version, payload))` ;
+  `version` est égal au nombre d'événements couverts par la charge (`version == event count`).
+- Les échecs n'affectent jamais une commande : un `TakeSnapshot` qui lève, un store défaillant, ou
+  un `RestoreSnapshot` qui lève est signalé via `OnSnapshotFailed` /
+  un log d'avertissement, et la récupération retombe sur le rejeu du flux entier.
+- `IsReplaying` est `protected` : surchargez la publication du read model pilotée par `Mutate`
+  avec `if (IsReplaying) return;` pour éviter un travail O(n) par événement rejoué
+  (sinon une reconstruction est O(n²)).
+
+### Idle Passivation (opt-in) (Passivation par inactivité, optionnel)
+
+Les acteurs restent en mémoire jusqu'à leur arrêt. Pour les charges comportant de nombreux
+agrégats de longue vie, un budget d'inactivité récupère l'état matérialisé des acteurs
+qui peuvent être reconstruits :
+
+```csharp
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,
+    IdleTimeout = TimeSpan.FromMinutes(5),        // default null = disabled
+    IdleSweepInterval = TimeSpan.FromSeconds(30), // default: half the budget, min 1s
+});
+```
+
+- Les candidats sont **uniquement des acteurs event-sourcés reconstruisibles** : un
+  `EventSourcedActor` dont le type concret a été enregistré **avec une fabrique de
+  reconstruction**. Les acteurs non-ES ne sont jamais touchés (leur état ne peut pas être reconstruit).
+- Un candidat doit être initialisé, ne pas traiter de commande, avoir une boîte aux lettres vide
+  et être inactif pendant tout le budget. L'arrêt transite par la
+  boîte aux lettres sous forme de sentinelle du framework, il tombe donc sur une frontière de message ; la demande
+  d'arrêt est vérifiée en propriété, si bien qu'une demande obsolète ne peut pas retirer une instance
+  plus récente du même id.
+- `SagaActor` en est exempté (`CanBePassivated => false`) : attendre une réponse
+  externe ressemble à de l'inactivité, et le récupérer perdrait cette réponse.
+- La réactivation est explicite : `GetAsync<T>(id)` rejoue le flux (ou restaure
+  l'instantané et rejoue la queue). Jusque-là, `Send`/`AskAsync` se comportent
+  exactement comme pour n'importe quel id non enregistré (`KeyNotFoundException`) — `AskAsync` n'a pas de
+  paramètre de type, il ne peut donc pas choisir de fabrique de reconstruction.
+- Observabilité : `SweepIdleActorsAsync()`, `PassivatedCount`, `ReactivatedCount`,
+  et une ligne de log par reconstruction avec le nombre d'événements rejoués.
+
 ### SagaActor (Coordonnateur à durée de vie finie)
 
 `SagaActor extends EventSourcedActor` — pour des opérations inter-agrégats avec un cycle de vie fini. Contrairement à un EventSourcedActor ordinaire dont la boîte aux lettres tourne indéfiniment, un SagaActor **s'arrête automatiquement** une fois que le framework a persisté son événement terminal.

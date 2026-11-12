@@ -185,6 +185,76 @@ OnMessageAsync → RaiseEvent（仅记录，不改变状态）
 Actor **不会被毒化**——下一条消息正常处理。
 `Mutate` 必须是纯函数且不得抛异常;一旦抛出,批次已落盘、状态不可信——actor 会被**停止**(移出 registry),而不是带着不可信状态继续运行。
 
+### Snapshot Acceleration (opt-in)（快照加速，可选）
+
+对于长事件流，每次重建都重放全部事件，这就是恢复成本的来源。
+快照（snapshot）是 Actor 每隔 N 个已持久化事件保存的一份不透明载荷，
+重建时先恢复它，然后只重放尾部事件。快照**仅用于加速**：
+事件流永远不会被截断，每个聚合最多保留一份快照，
+快照缺失、损坏或版本超出范围时会回退到完整重放。
+
+```csharp
+public sealed class Counter : EventSourcedActor
+{
+    private int _value;
+
+    // Payload = the state this actor needs to restore (encoding is your choice:
+    // PicoActor has no serializer dependency). Return null to opt out.
+    protected override byte[]? TakeSnapshot() => BitConverter.GetBytes(_value);
+
+    // MUST be overridden whenever TakeSnapshot is: the framework restores the
+    // payload and then replays only the events after `version`.
+    protected override void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
+        _value = BitConverter.ToInt32(payload);
+}
+
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,               // must implement IEventStoreSnapshot
+    SnapshotEveryNEvents = 1_000,     // default null = disabled
+});
+```
+
+- 触发条件：每 N 个**已持久化**事件（按事件计数，而非按 flush 计数）。
+- 线上格式：`IEventStoreSnapshot.SaveSnapshotAsync(id, new ActorSnapshot(version, payload))`；
+  `version` 等于该载荷覆盖的事件数（`version == event count`）。
+- 失败永不影响命令：`TakeSnapshot` 抛异常、存储失败，
+  或 `RestoreSnapshot` 抛异常，都会通过 `OnSnapshotFailed` /
+  一条警告日志上报，恢复则回退为重放整个事件流。
+- `IsReplaying` 是 `protected`：用 `if (IsReplaying) return;` 重写由
+  `Mutate` 驱动的读模型发布逻辑，避免每个重放事件都做 O(n) 的工作
+  （否则一次重建就是 O(n²)）。
+
+### Idle Passivation (opt-in)（空闲钝化，可选）
+
+Actor 会一直驻留内存，直到被停止。对于拥有大量长期存活聚合的工作负载，
+一段空闲预算可以回收那些能够重建的 Actor 的具体化状态：
+
+```csharp
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,
+    IdleTimeout = TimeSpan.FromMinutes(5),        // default null = disabled
+    IdleSweepInterval = TimeSpan.FromSeconds(30), // default: half the budget, min 1s
+});
+```
+
+- 候选对象**仅限可重建的事件溯源 Actor**：即具体类型是以
+  **重建工厂**注册过的 `EventSourcedActor`。非 ES Actor 永远不会被触碰
+  （它们的状态无法重建）。
+- 候选对象必须已初始化、未在处理命令、邮箱为空，
+  并且在整个预算时间内都处于空闲。停止操作以框架哨兵的形式
+  穿过邮箱，因此落在消息边界上；停止请求会做所有权校验，
+  所以过期的请求无法移除同一 id 的较新实例。
+- `SagaActor` 豁免（`CanBePassivated => false`）：等待外部应答
+  看起来就像空闲，回收它会丢掉那个应答。
+- 重新激活是显式的：`GetAsync<T>(id)` 重放事件流（或恢复快照
+  并重放尾部）。在此之前 `Send`/`AskAsync` 的行为与任何未注册 id
+  完全一致（`KeyNotFoundException`）——`AskAsync` 没有类型参数，
+  因此无法选择重建工厂。
+- 可观测性：`SweepIdleActorsAsync()`、`PassivatedCount`、`ReactivatedCount`，
+  以及每次重建带重放事件数的一行日志。
+
 ### SagaActor（有限生命周期协调器）
 
 `SagaActor extends EventSourcedActor`——面向生命周期有限的跨聚合操作。与邮箱永久运行的普通 EventSourcedActor 不同，SagaActor 在框架持久化其终态事件后会**自动停止**。

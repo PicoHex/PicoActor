@@ -189,6 +189,80 @@ OnMessageAsync → RaiseEvent (только запись, без изменен�
 следующее сообщение обрабатывается нормально.
 `Mutate` должен быть чистой функцией и никогда не бросать исключений; если это произошло, пакет уже персистентен, и актор **останавливается** (удаляется из реестра), а не продолжает работу с недостоверным состоянием.
 
+### Snapshot Acceleration (opt-in) (Ускорение через снимки, опционально)
+
+Для длинных потоков повторное воспроизведение всех событий при каждой пересборке состояния — это и есть
+стоимость восстановления.
+Снимок (snapshot) — это непрозрачная полезная нагрузка, которую актор сохраняет каждые N персистентных событий, так что
+пересборка загружает его и воспроизводит только хвост. Снимки — **только** ускорение:
+поток событий никогда не усекается, на один агрегат хранится не более одного
+снимка, а отсутствующий, повреждённый или выходящий за диапазон снимок приводит к
+полному воспроизведению.
+
+```csharp
+public sealed class Counter : EventSourcedActor
+{
+    private int _value;
+
+    // Payload = the state this actor needs to restore (encoding is your choice:
+    // PicoActor has no serializer dependency). Return null to opt out.
+    protected override byte[]? TakeSnapshot() => BitConverter.GetBytes(_value);
+
+    // MUST be overridden whenever TakeSnapshot is: the framework restores the
+    // payload and then replays only the events after `version`.
+    protected override void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
+        _value = BitConverter.ToInt32(payload);
+}
+
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,               // must implement IEventStoreSnapshot
+    SnapshotEveryNEvents = 1_000,     // default null = disabled
+});
+```
+
+- Триггер: каждые N **персистентных** событий (считаются по событиям, а не по флешам).
+- Формат передачи: `IEventStoreSnapshot.SaveSnapshotAsync(id, new ActorSnapshot(version, payload))`;
+  `version` равен числу событий, которые покрывает нагрузка (`version == event count`).
+- Сбои никогда не влияют на команду: исключение в `TakeSnapshot`, сбой хранилища или
+  исключение в `RestoreSnapshot` сообщаются через `OnSnapshotFailed` /
+  предупреждение в логе, а восстановление откатывается к воспроизведению всего потока.
+- `IsReplaying` объявлен как `protected`: переопределите публикацию read-модели, управляемую `Mutate`,
+  с помощью `if (IsReplaying) return;`, чтобы избежать работы O(n) на каждое воспроизведённое событие
+  (иначе пересборка будет O(n²)).
+
+### Idle Passivation (opt-in) (Пассивация простоя, опционально)
+
+Акторы остаются в памяти до остановки. Для нагрузок со множеством долгоживущих
+агрегатов бюджет простоя освобождает материализованное состояние акторов, которые можно
+восстановить:
+
+```csharp
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,
+    IdleTimeout = TimeSpan.FromMinutes(5),        // default null = disabled
+    IdleSweepInterval = TimeSpan.FromSeconds(30), // default: half the budget, min 1s
+});
+```
+
+- Кандидаты — **только восстановимые event sourcing акторы**: `EventSourcedActor`,
+  конкретный тип которого был зарегистрирован **с фабрикой
+  восстановления**. Акторы, не использующие ES, не затрагиваются (их состояние нельзя восстановить).
+- Кандидат должен быть инициализирован, не обрабатывать команду, иметь пустой
+  почтовый ящик и простаивать в течение всего бюджета. Остановка проходит через
+  почтовый ящик как сентинел фреймворка, поэтому она попадает на границу сообщений; запрос
+  остановки проверяется на принадлежность, так что устаревший запрос не может удалить более новый
+  экземпляр того же id.
+- `SagaActor` исключён (`CanBePassivated => false`): ожидание внешнего
+  ответа выглядит как простой, и его освобождение потеряло бы этот ответ.
+- Реактивация явная: `GetAsync<T>(id)` воспроизводит поток (или загружает
+  снимок и воспроизводит хвост). До этого `Send`/`AskAsync` ведут себя
+  точно как с любым незарегистрированным id (`KeyNotFoundException`) — у `AskAsync` нет
+  параметра типа, поэтому он не может выбрать фабрику восстановления.
+- Наблюдаемость: `SweepIdleActorsAsync()`, `PassivatedCount`, `ReactivatedCount`,
+  и строка лога на каждое восстановление с числом воспроизведённых событий.
+
 ### SagaActor (Координатор с конечным временем жизни)
 
 `SagaActor extends EventSourcedActor` — для межагрегатных операций с конечным жизненным циклом. В отличие от обычного EventSourcedActor, чей почтовый ящик работает вечно, SagaActor **автоматически останавливается** после того, как фреймворк персистит его терминальное событие.

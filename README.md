@@ -182,6 +182,79 @@ public sealed class Counter : EventSourcedActor
 }
 ```
 
+### Snapshot Acceleration (opt-in)
+
+For long streams, replaying every event on each rebuild is the recovery cost.
+A snapshot is an opaque payload the actor saves every N persisted events, so a
+rebuild restores it and replays only the tail. Snapshots are acceleration
+**only**: the event stream is never truncated, at most one snapshot per
+aggregate is kept, and a missing, corrupt or out-of-range snapshot falls back to
+a full replay.
+
+```csharp
+public sealed class Counter : EventSourcedActor
+{
+    private int _value;
+
+    // Payload = the state this actor needs to restore (encoding is your choice:
+    // PicoActor has no serializer dependency). Return null to opt out.
+    protected override byte[]? TakeSnapshot() => BitConverter.GetBytes(_value);
+
+    // MUST be overridden whenever TakeSnapshot is: the framework restores the
+    // payload and then replays only the events after `version`.
+    protected override void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
+        _value = BitConverter.ToInt32(payload);
+}
+
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,               // must implement IEventStoreSnapshot
+    SnapshotEveryNEvents = 1_000,     // default null = disabled
+});
+```
+
+- Trigger: every N **persisted** events (counted per event, not per flush).
+- Wire format: `IEventStoreSnapshot.SaveSnapshotAsync(id, new ActorSnapshot(version, payload))`;
+  `version` equals the number of events the payload covers (`version == event count`).
+- Failures never affect a command: a throwing `TakeSnapshot`, a failing store, or
+  a throwing `RestoreSnapshot` is reported through `OnSnapshotFailed` /
+  a warning log, and recovery falls back to replaying the whole stream.
+- `IsReplaying` is `protected`: override `Mutate`-driven read-model publication
+  with `if (IsReplaying) return;` to avoid O(n) work per replayed event
+  (otherwise a rebuild is O(n²)).
+
+### Idle Passivation (opt-in)
+
+Actors stay in memory until stopped. For workloads with many long-lived
+aggregates, an idle budget reclaims the materialized state of actors that can be
+rebuilt:
+
+```csharp
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,
+    IdleTimeout = TimeSpan.FromMinutes(5),        // default null = disabled
+    IdleSweepInterval = TimeSpan.FromSeconds(30), // default: half the budget, min 1s
+});
+```
+
+- Candidates are **only rebuildable event-sourced actors**: an
+  `EventSourcedActor` whose concrete type was registered **with a rebuild
+  factory**. Non-ES actors are never touched (their state cannot be rebuilt).
+- A candidate must be initialized, not processing a command, have an empty
+  mailbox, and be idle for the whole budget. The stop travels through the
+  mailbox as a framework sentinel, so it lands on a message boundary; the stop
+  request is ownership-checked, so a stale request cannot remove a newer
+  instance of the same id.
+- `SagaActor` is exempt (`CanBePassivated => false`): waiting for an external
+  reply looks idle, and reclaiming it would drop that reply.
+- Reactivation is explicit: `GetAsync<T>(id)` replays the stream (or restores
+  the snapshot and replays the tail). Until then `Send`/`AskAsync` behave
+  exactly like any unregistered id (`KeyNotFoundException`) — `AskAsync` has no
+  type parameter, so it cannot choose a rebuild factory.
+- Observability: `SweepIdleActorsAsync()`, `PassivatedCount`, `ReactivatedCount`,
+  and a per-rebuild log line with the replayed event count.
+
 ### SagaActor (Finite-Life Coordinator)
 
 `SagaActor extends EventSourcedActor` — for cross-aggregate operations with a

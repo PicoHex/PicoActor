@@ -187,6 +187,78 @@ OnMessageAsync → RaiseEvent(기록만, 상태 변경 없음)
 롤백됩니다. Actor는 **오염되지 않습니다**——다음 메시지가 정상 처리됩니다.
 `Mutate`는 순수 함수여야 하며 예외를 던지면 안 됩니다. 던지면 배치는 이미 영속화되어 상태를 신뢰할 수 없으므로, actor는 **중지**되고(레지스트리에서 제거) 신뢰할 수 없는 상태로 계속 실행되지 않습니다.
 
+### Snapshot Acceleration (opt-in)(스냅샷 가속, 선택 사항)
+
+긴 스트림에서는 재구성할 때마다 모든 이벤트를 리플레이하는 것이 복구 비용이 됩니다.
+스냅샷은 액터가 N개의 영속화된 이벤트마다 저장하는 불투명한 페이로드이며,
+재구성 시 이를 복원하고 꼬리 부분만 리플레이합니다. 스냅샷은 **오직 가속**을 위한
+것입니다: 이벤트 스트림은 절대 잘리지 않고, 애그리거트당 최대 하나의 스냅샷만
+유지되며, 스냅샷이 없거나 손상되었거나 범위를 벗어나면 전체 리플레이로
+폴백합니다.
+
+```csharp
+public sealed class Counter : EventSourcedActor
+{
+    private int _value;
+
+    // Payload = the state this actor needs to restore (encoding is your choice:
+    // PicoActor has no serializer dependency). Return null to opt out.
+    protected override byte[]? TakeSnapshot() => BitConverter.GetBytes(_value);
+
+    // MUST be overridden whenever TakeSnapshot is: the framework restores the
+    // payload and then replays only the events after `version`.
+    protected override void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
+        _value = BitConverter.ToInt32(payload);
+}
+
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,               // must implement IEventStoreSnapshot
+    SnapshotEveryNEvents = 1_000,     // default null = disabled
+});
+```
+
+- 트리거: **영속화된** 이벤트 N개마다(플러시 단위가 아니라 이벤트 단위로 카운트).
+- 와이어 포맷: `IEventStoreSnapshot.SaveSnapshotAsync(id, new ActorSnapshot(version, payload))`;
+  `version`은 페이로드가 포괄하는 이벤트 수와 같습니다(`version == event count`).
+- 실패는 명령에 절대 영향을 주지 않습니다: `TakeSnapshot`에서 예외가 발생하거나,
+  스토어가 실패하거나, `RestoreSnapshot`에서 예외가 발생하면 `OnSnapshotFailed` /
+  경고 로그로 보고되고, 복구는 전체 스트림 리플레이로 폴백합니다.
+- `IsReplaying`은 `protected`입니다: `Mutate` 기반 리드 모델 발행을
+  `if (IsReplaying) return;`으로 재정의하여 리플레이된 이벤트마다 O(n) 작업을
+  피하세요(그렇지 않으면 재구성은 O(n²)이 됩니다).
+
+### Idle Passivation (opt-in)(유휴 패시베이션, 선택 사항)
+
+액터는 중지될 때까지 메모리에 남아 있습니다. 수명이 긴 애그리거트가 많은
+워크로드에서는 유휴 예산으로 재구성 가능한 액터의 구체화된 상태를
+회수할 수 있습니다:
+
+```csharp
+var system = new ActorSystem(new ActorSystemOptions
+{
+    EventStore = store,
+    IdleTimeout = TimeSpan.FromMinutes(5),        // default null = disabled
+    IdleSweepInterval = TimeSpan.FromSeconds(30), // default: half the budget, min 1s
+});
+```
+
+- 후보는 **재구성 가능한 Event Sourcing 액터만** 해당합니다: 구체 타입이
+  **재구성 팩토리와 함께** 등록된 `EventSourcedActor`입니다. 비-ES 액터는
+  절대 건드리지 않습니다(그 상태는 재구성할 수 없습니다).
+- 후보는 초기화되어 있어야 하고, 명령을 처리 중이 아니어야 하며, mailbox가 비어 있어야 하고,
+  예산 전체 기간 동안 유휴 상태여야 합니다. 중지는 프레임워크 센티널로
+  mailbox를 통과하므로 메시지 경계에서 적용됩니다. 중지 요청은 소유권이
+  검사되므로 오래된 요청이 같은 id의 최신 인스턴스를 제거할 수 없습니다.
+- `SagaActor`는 예외입니다(`CanBePassivated => false`): 외부 응답을 기다리는 것은
+  유휴로 보이며, 회수하면 그 응답을 잃게 됩니다.
+- 재활성화는 명시적입니다: `GetAsync<T>(id)`가 스트림을 리플레이합니다(또는
+  스냅샷을 복원하고 꼬리를 리플레이합니다). 그 전까지 `Send`/`AskAsync`는
+  등록되지 않은 id와 정확히 동일하게 동작합니다(`KeyNotFoundException`) — `AskAsync`는
+  타입 매개변수가 없으므로 재구성 팩토리를 선택할 수 없습니다.
+- 관측성: `SweepIdleActorsAsync()`, `PassivatedCount`, `ReactivatedCount`,
+  그리고 재구성마다 리플레이된 이벤트 수를 담은 로그 라인.
+
 ### SagaActor(유한 수명 코디네이터)
 
 `SagaActor extends EventSourcedActor` — 수명이 유한한 애그리게이트 간 작업을 위한 타입입니다. 메일박스가 영원히 동작하는 일반 EventSourcedActor 와 달리, SagaActor 는 프레임워크가 종단 이벤트를 영속화한 후 **자동으로 중지**됩니다.
