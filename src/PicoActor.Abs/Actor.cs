@@ -35,6 +35,25 @@ public abstract class Actor : IActor, IAsyncDisposable
     private int _discarded;
 
     /// <summary>
+    /// UTC ticks of the last observed activity: a successful <see cref="Post"/> (a command was
+    /// accepted) and the END of every dispatched command (successful or not). This is the clock
+    /// the idle sweeper reads. It deliberately does NOT move while a command is running - that is
+    /// what <see cref="IsProcessing"/> is for: a long handler is not an idle actor.
+    /// </summary>
+    private long _lastActivityTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>1 while a command is being dispatched by the loop, 0 otherwise.</summary>
+    private int _processing;
+
+    /// <summary>
+    /// 1 when the owning system reads <see cref="LastActivityUtc"/> (idle passivation is on), 0
+    /// otherwise. The idle clock is only paid for when somebody reads it: the hot paths (every
+    /// accepted <see cref="Post"/> and the end of every dispatched command) must be free of a
+    /// <c>DateTime.UtcNow</c> nobody consumes.
+    /// </summary>
+    private int _trackIdleActivity;
+
+    /// <summary>
     /// Framework-generated UUID v7 identity.
     /// Assigned by IActorSystem via <see cref="AttachToSystem"/> after construction,
     /// before SignalReady(). Immutable for application code thereafter.
@@ -176,7 +195,83 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     /// <summary>Called by IActorSystem to deliver an envelope. False = delivery failed (stopping).</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public bool Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
+    public bool Post(Envelope envelope)
+    {
+        // Accepted work counts as activity: an actor that keeps receiving commands must never
+        // look idle just because its turns happen to be short.
+        if (!_mailbox.Writer.TryWrite(envelope))
+            return false;
+
+        Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// When this actor was last active (UTC): the last accepted <see cref="Post"/> or the end of
+    /// the last dispatched command. Read by the ActorSystem idle sweeper; not for application
+    /// code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public DateTime LastActivityUtc => new(Volatile.Read(ref _lastActivityTicks), DateTimeKind.Utc);
+
+    /// <summary>
+    /// True while the loop is dispatching a command (set before <see cref="ProcessAsync"/> and
+    /// cleared after it, including on failure). An actor that is working is never a passivation
+    /// candidate. Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool IsProcessing => Volatile.Read(ref _processing) != 0;
+
+    /// <summary>
+    /// Commands buffered in the mailbox and not yet dispatched. A non-zero backlog means the actor
+    /// still has work waiting, so it is not idle. Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public int PendingCount => _mailbox.Reader.Count;
+
+    /// <summary>
+    /// Ask this actor to give its materialized state back, THROUGH THE MAILBOX (a message
+    /// boundary) instead of an external <see cref="SignalStop"/>: the request is queued behind
+    /// everything already accepted, the loop stops itself when it reaches it, and no command is
+    /// ever dispatched on an actor that is being reclaimed.
+    /// <para>
+    /// Only meaningful for actors the runtime can rebuild (an EventSourcedActor with a registered
+    /// rebuild factory) - the framework's idle sweeper is the caller. The actor is removed from
+    /// the registry (so Send/AskAsync throw <see cref="KeyNotFoundException"/>) and its state is
+    /// rebuilt from the event stream by the next GetAsync. Not for application code.
+    /// </para>
+    /// <para>
+    /// Returns whether the request was actually QUEUED. False means the mailbox is already closed
+    /// (the actor is stopping or stopped), so no reclaim will happen and the caller must not count
+    /// one: the request is only a request, and this is the only honest way to report a refusal.
+    /// </para>
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool RequestPassivation() =>
+        _mailbox.Writer.TryWrite(new Envelope { Command = PassivateSentinel.Instance });
+
+    /// <summary>
+    /// Whether this actor's idle clock is observed. Set by the owning system when idle passivation
+    /// is configured (nothing else reads the clock); false by default, so a system that never
+    /// passivates pays nothing for timestamps. Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool TrackIdleActivity
+    {
+        get => Volatile.Read(ref _trackIdleActivity) != 0;
+        set => Volatile.Write(ref _trackIdleActivity, value ? 1 : 0);
+    }
+
+    /// <summary>Record that activity just happened on this actor (UTC ticks, lock-free).</summary>
+    private void Touch()
+    {
+        // Passivation disabled: nobody will ever read the value, so skip the clock read
+        // entirely. Read per call (not cached) so the switch stays honest.
+        if (Volatile.Read(ref _trackIdleActivity) == 0)
+            return;
+
+        Interlocked.Exchange(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+    }
 
     private async Task RunAsync(CancellationToken ct)
     {
@@ -244,12 +339,15 @@ public abstract class Actor : IActor, IAsyncDisposable
                     // The actor is dead, so it must LEAVE the registry, not merely stop its
                     // loop: SignalStop alone left the dead instance registered, and every
                     // lookup kept routing to it (Send/Ask threw "is stopping" and GetAsync
-                    // handed out a corpse instead of missing). RequestStop removes the entry
-                    // and signals the stop — the same shape as SagaActor.ScheduleStop.
+                    // handed out a corpse instead of missing). RequestOwnStop removes the
+                    // entry and signals the stop — the same shape as SagaActor.ScheduleStop,
+                    // and ownership-checked for the same reason as the passivation sentinel:
+                    // by the time this dead instance leaves, the id may already belong to a
+                    // rebuilt replacement, which an id-only removal would unregister instead.
                     // Unattached actors (manually driven probes, and discarded copies built
                     // before wiring) have no system to deregister from: stop directly.
                     if (System is not null)
-                        System.RequestStop(Id);
+                        RequestOwnStop();
                     else
                         SignalStop();
                     return;
@@ -262,6 +360,19 @@ public abstract class Actor : IActor, IAsyncDisposable
                     var envelope in _mailbox.Reader.ReadAllAsync(ct).ConfigureAwait(false)
                 )
                 {
+                    // Framework sentinel: passivation is a MESSAGE, not an external stop. It is
+                    // handled strictly BEFORE dispatch, and it is not a command - the subclass
+                    // never sees it, nothing is persisted for it, and no TCS can be waiting on it.
+                    // The removal is ownership-checked (see RequestOwnStop): it takes THIS
+                    // instance out, so later lookups miss (and a concurrent GetAsync rebuilds
+                    // from the stream) instead of reaching a corpse.
+                    if (envelope.Command is PassivateSentinel)
+                    {
+                        RequestOwnStop();
+                        continue;
+                    }
+
+                    Volatile.Write(ref _processing, 1);
                     try
                     {
                         await ProcessAsync(envelope).ConfigureAwait(false);
@@ -273,6 +384,14 @@ public abstract class Actor : IActor, IAsyncDisposable
                             envelope.Tcs.TrySetException(ex);
                         else
                             InvokeErrorHandler(ex, envelope.Command);
+                    }
+                    finally
+                    {
+                        // Cleared in a finally: a throwing handler (or a failed persist) must not
+                        // leave the actor looking permanently "processing" - that would exempt it
+                        // from passivation for the rest of the process lifetime.
+                        Volatile.Write(ref _processing, 0);
+                        Touch();
                     }
                 }
             }
@@ -371,6 +490,31 @@ public abstract class Actor : IActor, IAsyncDisposable
     internal virtual void OnInitialized() { }
 
     /// <summary>
+    /// Leave the registry and stop, on behalf of THIS instance. Both self-stop routes go
+    /// through here: the passivation sentinel (the actor was asked to give its state back) and
+    /// the failed-initialization stop (the actor is dead and must not stay registered).
+    /// <para>
+    /// The host is asked to remove the instance it is holding, not "whatever owns my id": by the
+    /// time a queued sentinel is consumed, the id may already belong to a rebuilt replacement, and
+    /// an id-only removal would unregister that live actor while leaving this one (already
+    /// stopping) behind. A refused request therefore does NOT fall back to an id-only stop: "that
+    /// id is not mine anymore" means there is nothing left for this instance to reclaim, and it is
+    /// already on its way out. A host that does not implement
+    /// <see cref="IActorPassivationHost"/> keeps the id-only behavior.
+    /// </para>
+    /// </summary>
+    private void RequestOwnStop()
+    {
+        if (System is IActorPassivationHost host)
+        {
+            host.TryRequestStop(Id, this);
+            return;
+        }
+
+        System?.RequestStop(Id);
+    }
+
+    /// <summary>
     /// Report a throwing <see cref="OnInitialized"/> override without letting the report
     /// itself escape: the loop is already unwinding and a broken diagnostic channel must not
     /// turn a hook bug into an unobserved task fault.
@@ -445,4 +589,14 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     /// <summary>IAsyncDisposable — delegates to StopAsync.</summary>
     async ValueTask IAsyncDisposable.DisposeAsync() => await StopAsync();
+
+    /// <summary>
+    /// Framework-only command that asks the loop to reclaim this actor's materialized state once
+    /// the mailbox reaches it (see <see cref="RequestPassivation"/>). Never dispatched to
+    /// OnMessageAsync, never persisted, never handed to application code.
+    /// </summary>
+    private sealed record PassivateSentinel : ICommand
+    {
+        public static PassivateSentinel Instance { get; } = new();
+    }
 }

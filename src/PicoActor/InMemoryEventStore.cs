@@ -8,10 +8,17 @@ namespace PicoActor;
 /// <see cref="ConcurrencyException"/>). Lock contention is per actor, so
 /// different actors never block each other.
 /// </summary>
-public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
+public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator, IEventStoreSnapshot
 {
     private readonly ConcurrentDictionary<Guid, List<IDomainEvent>> _streams = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
+
+    /// <summary>
+    /// At most ONE snapshot per actor (the latest saved overwrites the previous one):
+    /// snapshots are a recovery accelerator, not history — history is the event stream,
+    /// which snapshots never touch.
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, ActorSnapshot> _snapshots = new();
 
     /// <inheritdoc/>
     public async ValueTask<ulong> AppendAsync(
@@ -76,6 +83,38 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
         {
             gate.Release();
         }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The snapshot returned is the one stored here — the SAME array, not a copy, because a
+    /// read path may run on every rebuild of an aggregate. It is therefore READ-ONLY for the
+    /// caller: writing into <see cref="ActorSnapshot.Payload"/> would silently rewrite the
+    /// snapshot every later recovery of this actor restores.
+    /// <see cref="SaveSnapshotAsync"/> copies on the way in, so a producer may keep reusing its
+    /// serialization buffer.
+    /// </remarks>
+    public ValueTask<ActorSnapshot?> LoadSnapshotAsync(
+        Guid actorId,
+        CancellationToken ct = default
+    ) => new(_snapshots.TryGetValue(actorId, out var snapshot) ? snapshot : null);
+
+    /// <inheritdoc/>
+    public ValueTask SaveSnapshotAsync(
+        Guid actorId,
+        ActorSnapshot snapshot,
+        CancellationToken ct = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+        // Last write wins: the newest snapshot supersedes every older one for this actor.
+        // The payload is COPIED, not referenced: an aggregate is allowed to serialize into a
+        // buffer it reuses (that is the whole point of keeping one), and keeping the reference
+        // would let the next TakeSnapshot rewrite the snapshot already stored here — a stream
+        // description that silently changes under a version it no longer matches.
+        _snapshots[actorId] = new ActorSnapshot(snapshot.Version, snapshot.Payload.ToArray());
+        return default;
     }
 
     /// <inheritdoc/>

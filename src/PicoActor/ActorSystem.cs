@@ -5,7 +5,7 @@ namespace PicoActor;
 /// creation, retrieval, message routing, and stopping.
 /// Registered as a PicoDI Singleton.
 /// </summary>
-public sealed class ActorSystem : IActorSystem
+public sealed class ActorSystem : IActorSystem, IActorPassivationHost
 {
     private readonly ConcurrentDictionary<Guid, ActorBase> _registry = new();
     private readonly ConcurrentDictionary<Type, Func<ICommand, object>> _factories = new();
@@ -35,6 +35,34 @@ public sealed class ActorSystem : IActorSystem
     /// </summary>
     private readonly TimeSpan? _stopTimeout;
 
+    /// <summary>Idle budget for passivation; <see langword="null"/> = disabled (the default).</summary>
+    private readonly TimeSpan? _idleTimeout;
+
+    /// <summary>Cadence of the background sweeper (only meaningful with <see cref="_idleTimeout"/>).</summary>
+    private readonly TimeSpan _idleSweepInterval;
+
+    /// <summary>Owns the sweeper loop's lifetime; cancelled and awaited by <see cref="StopAllAsync"/>.</summary>
+    private readonly CancellationTokenSource? _idleSweepCts;
+
+    /// <summary>The background sweeper (null when passivation is disabled).</summary>
+    private readonly Task? _idleSweepLoop;
+
+    private long _passivatedCount;
+    private long _reactivatedCount;
+
+    /// <summary>
+    /// Floor for the DERIVED sweep interval (<see cref="ActorSystemOptions.IdleSweepInterval"/>
+    /// unset). An explicitly configured interval is honoured as-is: only the default has to be
+    /// protected from a pathological timeout (a 1ms budget would otherwise sweep in a busy loop).
+    /// </summary>
+    private static readonly TimeSpan MinIdleSweepInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Opt-in snapshot threshold per actor (<see langword="null"/> = off, the default), handed
+    /// to every ES actor through <see cref="WireActor"/>.
+    /// </summary>
+    private readonly int? _snapshotEveryNEvents;
+
     /// <summary>
     /// Creates an ActorSystem from <paramref name="options"/>. This is the single
     /// construction path — the event store must be chosen explicitly via
@@ -47,6 +75,44 @@ public sealed class ActorSystem : IActorSystem
         _publisher = options.DomainEventPublisher;
         _logger = options.Logger;
         _stopTimeout = options.StopTimeout;
+        _snapshotEveryNEvents = options.SnapshotEveryNEvents;
+
+        // Passivation is opt-in. Reject a meaningless budget at construction instead of sweeping
+        // with it: "disabled" is null, and zero/negative would silently mean "sweep everything
+        // immediately" — the opposite of an idle budget.
+        if (options.IdleTimeout is { } configuredTimeout && configuredTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                configuredTimeout,
+                "ActorSystemOptions.IdleTimeout must be positive; use null to disable idle passivation."
+            );
+
+        if (
+            options.IdleSweepInterval is { } configuredInterval
+            && configuredInterval <= TimeSpan.Zero
+        )
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                configuredInterval,
+                "ActorSystemOptions.IdleSweepInterval must be positive."
+            );
+
+        if (options.IdleTimeout is { } idleTimeout)
+        {
+            _idleTimeout = idleTimeout;
+
+            // Derived default: half the idle budget, floored at one second (a 1ms budget would
+            // otherwise sweep in a busy loop). For budgets of 2s and up an actor is therefore
+            // reclaimed within roughly 1.5x its budget; below 2s the one-second floor dominates,
+            // and a reclaim takes up to (budget + 1s).
+            var derived = idleTimeout / 2;
+            _idleSweepInterval =
+                options.IdleSweepInterval
+                ?? (derived < MinIdleSweepInterval ? MinIdleSweepInterval : derived);
+
+            _idleSweepCts = new CancellationTokenSource();
+            _idleSweepLoop = SweepIdleActorsLoopAsync(_idleSweepCts.Token);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -243,7 +309,9 @@ public sealed class ActorSystem : IActorSystem
             // the gate would let partially replayed state run OnReadyAsync (including saga resume).
             try
             {
-                es.ReplayEvents(events);
+                // Snapshot-accelerated when the store and the aggregate both support it;
+                // the full replay is the fallback, never a worse path than before.
+                await RestoreOrReplayAsync(actor, events).ConfigureAwait(false);
             }
             catch
             {
@@ -299,12 +367,88 @@ public sealed class ActorSystem : IActorSystem
                 l.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})")
             );
 
+            // Passivation bookkeeping: a reclaim is only paid off here (see PassivatedCount).
+            NoteReactivated();
+
             return ResolveAfterInitialization<T>(id, actor);
         }
         finally
         {
             gate.Semaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Rebuild state for a fresh instance from <paramref name="events"/> (the full stream,
+    /// re-read under the per-id gate).
+    /// <para>
+    /// When the store implements <see cref="IEventStoreSnapshot"/> and a snapshot is usable,
+    /// the instance restores it and replays ONLY the events after the snapshot version —
+    /// that tail is the whole point of the feature (a 79,772-event stream costs the events
+    /// since the last snapshot instead of all of them). Everything else is the historical
+    /// full replay.
+    /// </para>
+    /// <para>
+    /// Snapshots are acceleration only: reading the snapshot is inside the same try as
+    /// applying it, and any failure — unreadable snapshot, undecodable payload, a version past
+    /// the end of the stream — is reported as a warning and DEGRADES to the full replay. It is
+    /// never surfaced to the caller, because the event stream is complete and authoritative.
+    /// A Mutate that throws while replaying the tail is NOT caught here: that is the same
+    /// fatal aggregate fault a full replay would hit, and the caller's cleanup path owns it.
+    /// </para>
+    /// </summary>
+    private async ValueTask RestoreOrReplayAsync(
+        ActorBase actor,
+        IReadOnlyList<IDomainEvent> events
+    )
+    {
+        var es = (IEventSourcedActor)actor;
+
+        if (
+            _eventStore is not IEventStoreSnapshot snapshotStore
+            || actor is not ISnapshotableActor snapshotable
+        )
+        {
+            es.ReplayEvents(events);
+            return;
+        }
+
+        ulong baseVersion;
+        try
+        {
+            var snapshot = await snapshotStore.LoadSnapshotAsync(actor.Id).ConfigureAwait(false);
+
+            // Version 0 describes nothing, and a version beyond the end of the stream belongs
+            // to a stream that was rolled back or truncated: neither can be applied.
+            if (snapshot is null || snapshot.Version == 0 || snapshot.Version > (ulong)events.Count)
+            {
+                es.ReplayEvents(events);
+                return;
+            }
+
+            baseVersion = snapshot.Version;
+            snapshotable.RestoreSnapshot(baseVersion, snapshot.Payload);
+        }
+        catch (Exception ex)
+        {
+            TryLog(l =>
+                l.Warning(
+                    $"Actor {actor.GetType().Name} {actor.Id}: snapshot ignored, replaying the "
+                        + $"full stream ({ex.Message})"
+                )
+            );
+            es.ReplayEvents(events);
+            return;
+        }
+
+        var tail = events.Skip((int)baseVersion).ToList();
+        snapshotable.ReplayEventsFrom(baseVersion, tail);
+        TryLog(l =>
+            l.Info(
+                $"Actor {actor.GetType().Name} {actor.Id} restored from snapshot v{baseVersion}, "
+                    + $"replayed {tail.Count} of {events.Count} events"
+            )
+        );
     }
 
     /// <summary>
@@ -388,10 +532,17 @@ public sealed class ActorSystem : IActorSystem
     private void WireActor(ActorBase actor, Guid id)
     {
         actor.AttachToSystem(id, this);
+
+        // The idle clock is only maintained when a sweeper will read it (see Actor.Touch).
+        actor.TrackIdleActivity = _idleTimeout is not null;
+
         WireErrorHandler(actor);
 
         if (actor is EventSourcedActor es)
+        {
             es.AttachPersistence(_eventStore, _publisher);
+            es.AttachSnapshotPolicy(_snapshotEveryNEvents);
+        }
     }
 
     /// <summary>
@@ -587,6 +738,30 @@ public sealed class ActorSystem : IActorSystem
     }
 
     /// <summary>
+    /// <see cref="IActorPassivationHost"/>: the ownership-checked stop a passivation requests.
+    /// <para>
+    /// The compare-and-remove is the whole point. <see cref="RequestStop"/> removes by id, and a
+    /// passivation request is consumed by a loop that may be a LOST instance: if the id has
+    /// already been rebuilt into a replacement, removing it by id would orphan that live actor
+    /// (unreachable, loop still running) and destroy a perfectly good rebuild. Only the instance
+    /// that asked is stopped; anything else answers false and is left alone.
+    /// </para>
+    /// </summary>
+    bool IActorPassivationHost.TryRequestStop(Guid id, IActor expected)
+    {
+        if (expected is not ActorBase actor)
+            return false;
+
+        if (!RemoveIfSame(id, actor))
+            return false;
+
+        // Same ordering as StopAsync/RequestStop: signal first, report afterwards (best effort).
+        actor.SignalStop();
+        TryLog(l => l.Info($"Stopping actor {id} (passivated)"));
+        return true;
+    }
+
+    /// <summary>
     /// Gracefully stop every registered actor (host disposal must not leak actor
     /// loops/CTSs until process exit). Best effort: this method does NOT throw — a failing
     /// actor is reported through the logger and the remaining ones are still stopped.
@@ -598,6 +773,8 @@ public sealed class ActorSystem : IActorSystem
     /// actor that registers while the shutdown runs is stopped too. Creation is refused
     /// (<see cref="CreateAsync{T}"/>) and lookups return default for the duration of the
     /// call; the stopping window closes when it returns.
+    /// The idle sweeper is cancelled first and awaited to a stop, so no passivation can run
+    /// concurrently with the shutdown; it is not restarted afterwards.
     /// </summary>
     public async ValueTask StopAllAsync()
     {
@@ -606,6 +783,11 @@ public sealed class ActorSystem : IActorSystem
         Interlocked.Increment(ref _stopping);
         try
         {
+            // The idle sweeper is cancelled FIRST and awaited to a stop: a sweep running
+            // concurrently with the mass stop would reclaim actors out from under it (and could
+            // hand a fresh passivation request to an actor whose resources are being released).
+            await StopIdleSweeperAsync().ConfigureAwait(false);
+
             // Bounded: each round stops everything registered at its start, so a registry
             // that keeps gaining actors (a concurrent CreateAsync that already passed its
             // check) is retried a few times and then reported instead of spinning forever.
@@ -749,6 +931,184 @@ public sealed class ActorSystem : IActorSystem
         // SagaExecutionException propagates through AskAsync after SagaActor.ProcessAsync
         // faults the TCS. Saga auto-stops via SagaActor.ProcessAsync → ScheduleStop.
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // Passivation (idle actor reclamation)
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// How many passivation requests this system has issued (<see cref="SweepIdleActorsAsync"/>).
+    /// Diagnostics only: the request is queued, so a count that exceeds the number of actors now
+    /// missing is normal (repeated sweeps may request the same actor again).
+    /// </summary>
+    public long PassivatedCount => Interlocked.Read(ref _passivatedCount);
+
+    /// <summary>
+    /// How many SUCCESSFUL rebuilds from the event stream <see cref="GetAsync{T}"/> has performed.
+    /// That includes every reactivation of a passivated actor, but not only those: a manual
+    /// <c>GetAsync</c> of an id nobody owns (crash recovery, a saga resume, an operator probe)
+    /// counts here too. Together with <see cref="PassivatedCount"/> — which counts passivation
+    /// requests issued — this is the memory-vs-latency trade the feature makes: passivation buys
+    /// memory with a replay.
+    /// </summary>
+    public long ReactivatedCount => Interlocked.Read(ref _reactivatedCount);
+
+    /// <summary>
+    /// Reclaim the state of every idle, REBUILDABLE event-sourced actor, once.
+    /// <para>
+    /// No-op when <see cref="ActorSystemOptions.IdleTimeout"/> is null (the default: passivation
+    /// disabled) and while the system is stopping. The background sweeper calls this on every
+    /// tick; tests and operators can call it directly to make the timing explicit — the method is
+    /// idempotent and safe to call any number of times, including for ids that are already gone.
+    /// </para>
+    /// <para>
+    /// A candidate must be: an <c>EventSourcedActor</c> whose concrete type has a registered
+    /// rebuild factory, whose <see cref="Abs.EventSourcedActor.CanBePassivated"/> is true (a
+    /// <see cref="SagaActor"/> opts out — waiting is its job), initialized successfully, neither
+    /// processing nor backed up, and idle for at least the configured budget. Candidates are asked
+    /// to passivate — they are never stopped from the outside: the request is a mailbox sentinel,
+    /// so the actor reclaims itself at a message boundary and the registry entry disappears before
+    /// its loop exits.
+    /// </para>
+    /// </summary>
+    public ValueTask SweepIdleActorsAsync()
+    {
+        if (_idleTimeout is not { } idleTimeout || Volatile.Read(ref _stopping) > 0)
+            return default;
+
+        var now = DateTime.UtcNow;
+
+        // Enumerating a ConcurrentDictionary is a snapshot: an actor that registers or leaves
+        // during the sweep cannot break the iteration.
+        foreach (var entry in _registry)
+        {
+            // Re-checked per candidate: a mass stop may have begun while this sweep runs.
+            if (Volatile.Read(ref _stopping) > 0)
+                return default;
+
+            if (!IsPassivationCandidate(entry.Value, now, idleTimeout))
+                continue;
+
+            var idle = now - entry.Value.LastActivityUtc;
+
+            // The request is a mailbox WRITE, and a closed mailbox refuses it (the actor is
+            // stopping; its registry entry is about to disappear or already belongs to another
+            // instance). Counting or logging a reclaim that was never queued would make the
+            // diagnostics lie, so the sweep moves on instead.
+            if (!entry.Value.RequestPassivation())
+                continue;
+
+            Interlocked.Increment(ref _passivatedCount);
+
+            // Best effort: a broken sink must never leave a half-decided sweep behind.
+            var type = entry.Value.GetType().Name;
+            var id = entry.Key;
+            TryLog(l => l.Info($"Passivating idle actor {type} {id} after {idle} idle"));
+        }
+
+        return default;
+    }
+
+    /// <summary>
+    /// Every rule that keeps an actor in memory, in the order that matters. A miss on any of them
+    /// is a hard "no": reclaiming a state that cannot be rebuilt is data loss, and reclaiming an
+    /// actor that is working (or has work queued) is a lost command.
+    /// </summary>
+    private bool IsPassivationCandidate(ActorBase actor, DateTime now, TimeSpan idleTimeout)
+    {
+        // 1. Only an event-sourced actor has a stream to come back from.
+        if (actor is not EventSourcedActor eventSourced)
+            return false;
+
+        // 2. ... and only if THIS concrete type can be rebuilt: GetAsync looks the factory up by
+        //    the requested type, so an ES actor registered without one is not rebuildable.
+        if (!_rebuildFactories.ContainsKey(eventSourced.GetType()))
+            return false;
+
+        // 3. The actor type must allow it. A saga waiting for an external reply is idle BY
+        //    DEFINITION, so the clock is the wrong question for it: reclaiming a live saga
+        //    strands its coordination state (the reply arrives at an id nobody owns).
+        if (!eventSourced.CanBePassivated)
+            return false;
+
+        // 4. A registered instance appears BEFORE its initialization finishes (replay, saga
+        //    resume). Reclaiming it then would throw away work in progress.
+        if (!eventSourced.InitCompletedTask.IsCompletedSuccessfully)
+            return false;
+
+        // 5. A working actor, or one with queued work, is not idle whatever the clock says.
+        if (eventSourced.IsProcessing || eventSourced.PendingCount > 0)
+            return false;
+
+        // 6. Finally the idle clock itself.
+        return now - eventSourced.LastActivityUtc >= idleTimeout;
+    }
+
+    /// <summary>
+    /// The background sweeper, started once at construction when an idle budget is configured.
+    /// Best effort by construction: a failing sweep is reported and the next tick tries again —
+    /// a diagnostic bug must never silently disable memory reclamation for the whole process.
+    /// Cancelled and awaited by <see cref="StopAllAsync"/>.
+    /// </summary>
+    private async Task SweepIdleActorsLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(_idleSweepInterval);
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                try
+                {
+                    await SweepIdleActorsAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    TryLog(l => l.Warning($"Idle actor sweep failed: {ex.Message}"));
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on StopAllAsync.
+        }
+    }
+
+    /// <summary>
+    /// Cancel the sweeper (if any) and wait for it to leave. Idempotent: the loop finishes once,
+    /// and a second mass stop simply re-awaits it. Passivation stays off afterwards — the system
+    /// can still be used (create/lookup), but without reclamation until a new system is built.
+    /// </summary>
+    private async ValueTask StopIdleSweeperAsync()
+    {
+        if (_idleSweepCts is null || _idleSweepLoop is null)
+            return;
+
+        try
+        {
+            await _idleSweepCts.CancelAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // A previous mass stop already disposed it: cancellation is done.
+        }
+
+        try
+        {
+            await _idleSweepLoop.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The loop's own cancellation path.
+        }
+
+        _idleSweepCts.Dispose();
+    }
+
+    /// <summary>
+    /// Bookkeeping for a successful rebuild from the stream (called from the GetAsync rebuild
+    /// path). <see cref="ReactivatedCount"/> is the other half of the passivation trade.
+    /// </summary>
+    private void NoteReactivated() => Interlocked.Increment(ref _reactivatedCount);
 
     /// <summary>
     /// Per-id single-flight gate for <see cref="GetAsync{T}"/>: rebuild + initialization of
