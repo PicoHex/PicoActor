@@ -67,4 +67,38 @@ public sealed class ActorSystemOptions
             _snapshotEveryNEvents = value;
         }
     }
+
+    /// <summary>
+    /// How long an actor may stay idle before the runtime RECLAIMS its materialized state
+    /// (idle passivation). Default <c>null</c> = disabled, the original semantics: every actor
+    /// stays in memory until it is stopped explicitly.
+    /// <para>
+    /// Opt-in, and deliberately narrow: only actors the runtime can rebuild are candidates - an
+    /// <c>EventSourcedActor</c> whose concrete type was registered WITH a rebuild factory. The
+    /// event stream is the truth, so the in-memory state is only a cache: passivating an idle
+    /// aggregate frees it, and the next <see cref="ActorSystem.GetAsync{T}"/> replays the stream
+    /// (same id, same state, same version). Non-ES actors, ES types without a rebuild factory,
+    /// actors that are mid-command, and actors with a mailbox backlog are never touched.
+    /// </para>
+    /// <para>
+    /// The reclaim itself is a mailbox sentinel: the actor stops at a message boundary
+    /// (<see cref="ActorSystem.RequestStop"/>), never through an external signal racing a
+    /// dispatch. Because the registry entry is removed, <c>Send</c>/<c>AskAsync</c> on a
+    /// passivated id throw <see cref="KeyNotFoundException"/> until it is reactivated - which is
+    /// exactly what happens today for any actor that is not registered.
+    /// </para>
+    /// <para>A non-positive value is rejected at construction: "disabled" is <c>null</c>.</para>
+    /// </summary>
+    public TimeSpan? IdleTimeout { get; set; }
+
+    /// <summary>
+    /// How often the background sweeper looks for idle actors. Default <c>null</c> = derive it
+    /// from <see cref="IdleTimeout"/> (half of it, never less than one second) so an actor is
+    /// reclaimed within roughly 1.5x <see cref="IdleTimeout"/> of going idle.
+    /// <para>
+    /// Only meaningful together with <see cref="IdleTimeout"/>. Tests and operations can also
+    /// drive the sweep explicitly with <see cref="ActorSystem.SweepIdleActorsAsync"/>.
+    /// </para>
+    /// </summary>
+    public TimeSpan? IdleSweepInterval { get; set; }
 }
