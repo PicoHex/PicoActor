@@ -1,8 +1,6 @@
-I:PicoActor.ActorSystem : PicoActor.Abs.IActorPassivationHost
 I:PicoActor.ActorSystem : PicoActor.Abs.IActorSystem
 I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStore
 I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStoreEnumerator
-I:PicoActor.InMemoryEventStore : PicoActor.Abs.IEventStoreSnapshot
 I:PicoActor.MediatorDomainEventPublisher : PicoActor.Abs.IDomainEventPublisher
 M:PicoActor.ActorConfig..ctor() : void
 M:PicoActor.ActorSystem..ctor(PicoActor.ActorSystemOptions options) : void
@@ -17,16 +15,13 @@ M:PicoActor.ActorSystem.ResumeInterruptedSagasAsync``1(string firstEventType, Sy
 M:PicoActor.ActorSystem.Send(System.Guid id, PicoActor.Abs.ICommand command) : void override
 M:PicoActor.ActorSystem.StopAllAsync() : System.Threading.Tasks.ValueTask override
 M:PicoActor.ActorSystem.StopAsync(System.Guid id) : System.Threading.Tasks.ValueTask override
-M:PicoActor.ActorSystem.SweepIdleActorsAsync() : System.Threading.Tasks.ValueTask
 M:PicoActor.ActorSystemOptions..ctor() : void
 M:PicoActor.EventStoreConfig..ctor() : void
 M:PicoActor.InMemoryEventStore..ctor() : void
 M:PicoActor.InMemoryEventStore.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> override
 M:PicoActor.InMemoryEventStore.ListAggregateIdsAsync(string firstEventType) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<System.Guid>> override
 M:PicoActor.InMemoryEventStore.LoadAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent>> override
-M:PicoActor.InMemoryEventStore.LoadSnapshotAsync(System.Guid actorId, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.ActorSnapshot> override
 M:PicoActor.InMemoryEventStore.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> override
-M:PicoActor.InMemoryEventStore.SaveSnapshotAsync(System.Guid actorId, PicoActor.Abs.ActorSnapshot snapshot, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask override
 M:PicoActor.MediatorDomainEventPublisher..ctor(PicoMediator.Abs.IPublisher publisher, PicoLog.Abs.ILogger logger = null) : void
 M:PicoActor.MediatorDomainEventPublisher.PublishAsync(System.Guid actorId, ulong version, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask override
 M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container) : PicoDI.Abs.ISvcContainer static
@@ -34,14 +29,9 @@ M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer containe
 M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoActor.ActorConfig config) : PicoDI.Abs.ISvcContainer static
 M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoMediator.Abs.IPublisher publisher) : PicoDI.Abs.ISvcContainer static
 P:PicoActor.ActorConfig.EventStore : PicoActor.EventStoreConfig { get; set; }
-P:PicoActor.ActorSystem.PassivatedCount : long { get; }
-P:PicoActor.ActorSystem.ReactivatedCount : long { get; }
 P:PicoActor.ActorSystemOptions.DomainEventPublisher : PicoActor.Abs.IDomainEventPublisher { get; set; }
 P:PicoActor.ActorSystemOptions.EventStore : PicoActor.Abs.IEventStore { get; set; }
-P:PicoActor.ActorSystemOptions.IdleSweepInterval : System.Nullable`1<System.TimeSpan> { get; set; }
-P:PicoActor.ActorSystemOptions.IdleTimeout : System.Nullable`1<System.TimeSpan> { get; set; }
 P:PicoActor.ActorSystemOptions.Logger : PicoLog.Abs.ILogger { get; set; }
-P:PicoActor.ActorSystemOptions.SnapshotEveryNEvents : System.Nullable`1<int> { get; set; }
 P:PicoActor.ActorSystemOptions.StopTimeout : System.Nullable`1<System.TimeSpan> { get; set; }
 P:PicoActor.EventStoreConfig.Type : string { get; set; }
 T:class PicoActor.ActorConfig

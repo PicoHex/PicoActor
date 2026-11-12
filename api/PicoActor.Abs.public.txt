@@ -9,19 +9,15 @@ F:PicoActor.Abs.SagaResumeStatus.value__ : int
 I:PicoActor.Abs.Actor : PicoActor.Abs.IActor
 I:PicoActor.Abs.Actor : System.IAsyncDisposable
 I:PicoActor.Abs.ActorOutputEvent : System.IEquatable`1<PicoActor.Abs.ActorOutputEvent>
-I:PicoActor.Abs.ActorSnapshot : System.IEquatable`1<PicoActor.Abs.ActorSnapshot>
 I:PicoActor.Abs.DomainEventEnvelope : PicoMediator.Abs.IEvent
 I:PicoActor.Abs.DomainEventEnvelope : PicoMediator.Abs.IMessage
 I:PicoActor.Abs.DomainEventEnvelope : System.IEquatable`1<PicoActor.Abs.DomainEventEnvelope>
 I:PicoActor.Abs.DomainEventEnvelope`1 : System.IEquatable`1<PicoActor.Abs.DomainEventEnvelope`1<TEvent>>
 I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.IActor
 I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.IEventSourcedActor
-I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.ISnapshotableActor
 I:PicoActor.Abs.IDomainEvent : PicoMediator.Abs.IEvent
 I:PicoActor.Abs.IDomainEvent : PicoMediator.Abs.IMessage
 I:PicoActor.Abs.IEventSourcedActor : PicoActor.Abs.IActor
-I:PicoActor.Abs.ISnapshotableActor : PicoActor.Abs.IActor
-I:PicoActor.Abs.ISnapshotableActor : PicoActor.Abs.IEventSourcedActor
 I:PicoActor.Abs.SagaCompleted : PicoActor.Abs.IDomainEvent
 I:PicoActor.Abs.SagaCompleted : PicoMediator.Abs.IEvent
 I:PicoActor.Abs.SagaCompleted : PicoMediator.Abs.IMessage
@@ -40,13 +36,11 @@ M:PicoActor.Abs.Actor.OnMessageAsync(PicoActor.Abs.ICommand command) : System.Th
 M:PicoActor.Abs.Actor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.Actor.Post(PicoActor.Abs.Envelope envelope) : bool
 M:PicoActor.Abs.Actor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask virtual
-M:PicoActor.Abs.Actor.RequestPassivation() : bool
 M:PicoActor.Abs.Actor.SignalReady() : void
 M:PicoActor.Abs.Actor.SignalStop() : void
 M:PicoActor.Abs.Actor.StopAsync() : System.Threading.Tasks.ValueTask
 M:PicoActor.Abs.Actor.WriteOutput(string type, string data = null, string turnId = null) : void
 M:PicoActor.Abs.ActorOutputEvent..ctor(string Type, string Data, string TurnId = null) : void
-M:PicoActor.Abs.ActorSnapshot..ctor(ulong Version, byte[] Payload) : void
 M:PicoActor.Abs.ConcurrencyException..ctor(System.Guid actorId, ulong expectedVersion, ulong actualVersion) : void
 M:PicoActor.Abs.DomainEventEnvelope..ctor(System.Guid ActorId, ulong Version, PicoActor.Abs.IDomainEvent Event) : void
 M:PicoActor.Abs.DomainEventEnvelope`1..ctor(System.Guid ActorId, ulong Version, TEvent Event) : void
@@ -54,18 +48,13 @@ M:PicoActor.Abs.Envelope..ctor() : void
 M:PicoActor.Abs.EventSourcedActor..ctor() : void
 M:PicoActor.Abs.EventSourcedActor..ctor(PicoActor.Abs.ICommand creationCommand) : void
 M:PicoActor.Abs.EventSourcedActor.AttachPersistence(PicoActor.Abs.IEventStore eventStore, PicoActor.Abs.IDomainEventPublisher publisher) : void
-M:PicoActor.Abs.EventSourcedActor.AttachSnapshotPolicy(System.Nullable`1<int> everyNEvents) : void
 M:PicoActor.Abs.EventSourcedActor.FlushEventsAsync() : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.EventSourcedActor.Mutate(PicoActor.Abs.IDomainEvent event) : void abstract
 M:PicoActor.Abs.EventSourcedActor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
-M:PicoActor.Abs.EventSourcedActor.OnSnapshotFailed(System.Exception ex) : void virtual
 M:PicoActor.Abs.EventSourcedActor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.EventSourcedActor.RaiseEvent``1(T event) : void
-M:PicoActor.Abs.EventSourcedActor.RestoreSnapshot(ulong version, System.ReadOnlySpan`1<byte> payload) : void virtual
 M:PicoActor.Abs.EventSourcedActor.RollbackUncommitted() : void
-M:PicoActor.Abs.EventSourcedActor.TakeSnapshot() : byte[] virtual
 M:PicoActor.Abs.EventSourcedActor.TryHandleFrameworkEvent(PicoActor.Abs.IDomainEvent event) : bool virtual
-M:PicoActor.Abs.IActorPassivationHost.TryRequestStop(System.Guid id, PicoActor.Abs.IActor expected) : bool abstract
 M:PicoActor.Abs.IActorSystem.AskAsync``1(System.Guid id, PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<TResult> abstract
 M:PicoActor.Abs.IActorSystem.CreateAsync``1(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<T> abstract
 M:PicoActor.Abs.IActorSystem.ExecuteSaga``2(PicoActor.Abs.ICommand command) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.SagaExecution`1<TResult>> abstract
@@ -88,10 +77,6 @@ M:PicoActor.Abs.IEventStore.AppendAsync(System.Guid actorId, ulong expectedVersi
 M:PicoActor.Abs.IEventStore.LoadAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent>> abstract
 M:PicoActor.Abs.IEventStore.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> abstract
 M:PicoActor.Abs.IEventStoreEnumerator.ListAggregateIdsAsync(string firstEventType) : System.Threading.Tasks.ValueTask`1<System.Collections.Generic.IReadOnlyList`1<System.Guid>> abstract
-M:PicoActor.Abs.IEventStoreSnapshot.LoadSnapshotAsync(System.Guid actorId, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.ActorSnapshot> abstract
-M:PicoActor.Abs.IEventStoreSnapshot.SaveSnapshotAsync(System.Guid actorId, PicoActor.Abs.ActorSnapshot snapshot, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask abstract
-M:PicoActor.Abs.ISnapshotableActor.ReplayEventsFrom(ulong baseVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : void abstract
-M:PicoActor.Abs.ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload) : void abstract
 M:PicoActor.Abs.SagaActor..ctor() : void
 M:PicoActor.Abs.SagaActor.FlushEventsAsync() : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.SagaActor.MarkComplete(object result = null) : void
@@ -106,19 +91,13 @@ M:PicoActor.Abs.SagaFailed..ctor(string Reason) : void
 M:PicoActor.Abs.SagaResumeResult..ctor(System.Guid Id, PicoActor.Abs.SagaResumeStatus Status, string Reason = null) : void
 P:PicoActor.Abs.Actor.Id : System.Guid { get; }
 P:PicoActor.Abs.Actor.InitCompletedTask : System.Threading.Tasks.Task { get; }
-P:PicoActor.Abs.Actor.IsProcessing : bool { get; }
-P:PicoActor.Abs.Actor.LastActivityUtc : System.DateTime { get; }
 P:PicoActor.Abs.Actor.OutputWriter : System.Threading.Channels.ChannelWriter`1<PicoActor.Abs.ActorOutputEvent> { get; set; }
-P:PicoActor.Abs.Actor.PendingCount : int { get; }
 P:PicoActor.Abs.Actor.StopToken : System.Threading.CancellationToken { get; }
 P:PicoActor.Abs.Actor.System : PicoActor.Abs.IActorSystem { get; }
-P:PicoActor.Abs.Actor.TrackIdleActivity : bool { get; set; }
 P:PicoActor.Abs.Actor.UnhandledErrorHandler : System.Action`2<System.Exception, PicoActor.Abs.ICommand> { get; set; }
 P:PicoActor.Abs.ActorOutputEvent.Data : string { get; init; }
 P:PicoActor.Abs.ActorOutputEvent.TurnId : string { get; init; }
 P:PicoActor.Abs.ActorOutputEvent.Type : string { get; init; }
-P:PicoActor.Abs.ActorSnapshot.Payload : byte[] { get; init; }
-P:PicoActor.Abs.ActorSnapshot.Version : ulong { get; init; }
 P:PicoActor.Abs.ConcurrencyException.ActorId : System.Guid { get; }
 P:PicoActor.Abs.ConcurrencyException.ActualVersion : ulong { get; }
 P:PicoActor.Abs.ConcurrencyException.ExpectedVersion : ulong { get; }
@@ -130,12 +109,9 @@ P:PicoActor.Abs.DomainEventEnvelope`1.Event : TEvent { get; init; }
 P:PicoActor.Abs.DomainEventEnvelope`1.Version : ulong { get; init; }
 P:PicoActor.Abs.Envelope.Command : PicoActor.Abs.ICommand { get; init; }
 P:PicoActor.Abs.Envelope.Tcs : System.Threading.Tasks.TaskCompletionSource`1<object> { get; init; }
-P:PicoActor.Abs.EventSourcedActor.CanBePassivated : bool { get; }
-P:PicoActor.Abs.EventSourcedActor.IsReplaying : bool { get; }
 P:PicoActor.Abs.EventSourcedActor.Version : ulong { get; protected set; }
 P:PicoActor.Abs.IActor.Id : System.Guid { get; }
 P:PicoActor.Abs.IEventSourcedActor.Version : ulong { get; }
-P:PicoActor.Abs.SagaActor.CanBePassivated : bool { get; }
 P:PicoActor.Abs.SagaActor.FailedReason : string { get; }
 P:PicoActor.Abs.SagaActor.IsCompleted : bool { get; }
 P:PicoActor.Abs.SagaActor.IsFailed : bool { get; }
@@ -150,7 +126,6 @@ P:PicoActor.Abs.SagaResumeResult.Reason : string { get; init; }
 P:PicoActor.Abs.SagaResumeResult.Status : PicoActor.Abs.SagaResumeStatus { get; init; }
 T:class PicoActor.Abs.Actor
 T:class PicoActor.Abs.ActorOutputEvent
-T:class PicoActor.Abs.ActorSnapshot
 T:class PicoActor.Abs.ConcurrencyException
 T:class PicoActor.Abs.DomainEventEnvelope
 T:class PicoActor.Abs.DomainEventEnvelope`1
@@ -165,7 +140,6 @@ T:class PicoActor.Abs.SagaResumeResult
 T:class PicoMediator.Generated.MediatorEventDispatchers_PicoActor_Abs
 T:enum PicoActor.Abs.SagaResumeStatus
 T:interface PicoActor.Abs.IActor
-T:interface PicoActor.Abs.IActorPassivationHost
 T:interface PicoActor.Abs.IActorSystem
 T:interface PicoActor.Abs.ICommand
 T:interface PicoActor.Abs.ICommandSender
@@ -175,5 +149,3 @@ T:interface PicoActor.Abs.IDomainEventSubscriber`1
 T:interface PicoActor.Abs.IEventSourcedActor
 T:interface PicoActor.Abs.IEventStore
 T:interface PicoActor.Abs.IEventStoreEnumerator
-T:interface PicoActor.Abs.IEventStoreSnapshot
-T:interface PicoActor.Abs.ISnapshotableActor
