@@ -110,8 +110,13 @@ public sealed class FixSPIntegrationTests
             await Task.Delay(20, cancellationToken);
         await Assert.That(system.PassivatedCount).IsGreaterThan(0);
 
+        // A FRESH budget for the second effect: the registry entry disappearing is a
+        // different wait (the loop must first reach the sentinel and finish the actor), and
+        // sharing the first wait's absolute deadline made the second one run on whatever was
+        // left of it — a slow machine failed here for a timing reason, not a behaviour one.
+        var goneDeadline = Environment.TickCount64 + 5_000;
         var gone = false;
-        while (!gone && Environment.TickCount64 < deadline)
+        while (!gone && Environment.TickCount64 < goneDeadline)
         {
             try
             {

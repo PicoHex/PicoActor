@@ -178,9 +178,16 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
     /// </para>
     /// <para>
     /// Read models and other O(n) effects must be skipped here only if replay already skips
-    /// them — see <see cref="IsReplaying"/>. Throwing is allowed and safe: recovery reports it
-    /// through <see cref="OnSnapshotFailed"/> and falls back to replaying the whole stream, so
-    /// a corrupt or stale payload can never break the aggregate or its history.
+    /// them — see <see cref="IsReplaying"/>. Throwing is allowed and safe: recovery records a
+    /// WARNING in the runtime's log and falls back to replaying the whole stream, so a corrupt
+    /// or stale payload can never break the aggregate or its history.
+    /// </para>
+    /// <para>
+    /// <see cref="OnSnapshotFailed"/> is NOT on this path. It reports the failures of
+    /// PRODUCING a snapshot (<see cref="TakeSnapshot"/>) and of WRITING one (the store's save),
+    /// both of which happen on a live actor's command turn. A snapshot that cannot be READ or
+    /// APPLIED during recovery is only a lost accelerator, so the runtime downgrades it to a
+    /// warning and replays everything — there is no caller to notify.
     /// </para>
     /// </summary>
     protected virtual void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
@@ -192,9 +199,14 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
         );
 
     /// <summary>
-    /// Report that snapshotting failed (<see cref="TakeSnapshot"/> or the store threw).
-    /// Default: silent — snapshotting is an accelerator, and its failures are never allowed
-    /// to affect the actor. A throwing override is swallowed as well.
+    /// Report that PRODUCING or WRITING a snapshot failed (<see cref="TakeSnapshot"/> threw, or
+    /// the store's save threw). Default: silent — snapshotting is an accelerator, and its
+    /// failures are never allowed to affect the actor. A throwing override is swallowed as well.
+    /// <para>
+    /// Recovery is deliberately NOT reported here: a snapshot that cannot be read or applied
+    /// falls back to a full replay with a warning in the runtime's log (see
+    /// <see cref="RestoreSnapshot"/>).
+    /// </para>
     /// </summary>
     protected virtual void OnSnapshotFailed(Exception ex) { }
 

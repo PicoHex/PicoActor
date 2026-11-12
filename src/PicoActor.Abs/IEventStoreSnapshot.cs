@@ -10,11 +10,19 @@ namespace PicoActor.Abs;
 /// then replays only the events AFTER that version.
 /// </para>
 /// <para>
-/// BUFFER OWNERSHIP: the producer of a payload is allowed to REUSE its serialization buffer (one
-/// buffer per aggregate, filled again on the next snapshot), so whoever keeps an
-/// <see cref="ActorSnapshot"/> beyond the <see cref="IEventStoreSnapshot.SaveSnapshotAsync"/>
-/// call must keep its own copy (the bundled <c>InMemoryEventStore</c> does). Until the array is
-/// overwritten the snapshot describes exactly the state at <paramref name="Version"/>.
+/// BUFFER OWNERSHIP, write side: the producer of a payload is allowed to REUSE its
+/// serialization buffer (one buffer per aggregate, filled again on the next snapshot), so
+/// whoever keeps an <see cref="ActorSnapshot"/> beyond the
+/// <see cref="IEventStoreSnapshot.SaveSnapshotAsync"/> call must keep its own copy (the bundled
+/// <c>InMemoryEventStore</c> does). Until the array is overwritten the snapshot describes exactly
+/// the state at <paramref name="Version"/>.
+/// </para>
+/// <para>
+/// BUFFER OWNERSHIP, read side: a payload RETURNED by
+/// <see cref="IEventStoreSnapshot.LoadSnapshotAsync"/> belongs to the store and is READ-ONLY for
+/// the caller — a restore (or any other reader) must not write into the array it is handed. A
+/// store may hand out the very array it keeps, so an in-place edit silently rewrites the
+/// snapshot every later recovery of that aggregate restores.
 /// </para>
 /// </summary>
 public sealed record ActorSnapshot(ulong Version, byte[] Payload);
@@ -64,8 +72,8 @@ public interface ISnapshotableActor : IEventSourcedActor
 {
     /// <summary>
     /// Restore state from a snapshot payload. <paramref name="version"/> is the version the
-    /// payload covers. Throwing is allowed: the framework reports it and falls back to a full
-    /// replay.
+    /// payload covers. Throwing is allowed: the framework records a warning and falls back to a
+    /// full replay.
     /// </summary>
     void RestoreSnapshot(ulong version, byte[] payload);
 

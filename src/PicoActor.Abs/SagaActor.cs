@@ -47,9 +47,14 @@ public abstract class SagaActor : EventSourcedActor
     /// <see cref="KeyNotFoundException"/>) and the saga would stay stranded exactly at the
     /// moment it was supposed to progress. Coordination state is live work, not a cache.
     /// </para>
+    /// <para>
+    /// SEALED: the answer is a property of BEING a saga, so a concrete saga cannot opt itself
+    /// back in. A workflow that wants to be reclaimed is not a saga — it is an ordinary
+    /// <see cref="EventSourcedActor"/>.
+    /// </para>
     /// </summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public override bool CanBePassivated => false;
+    public sealed override bool CanBePassivated => false;
 
     /// <summary>Restored by the framework from the event stream on replay.</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
