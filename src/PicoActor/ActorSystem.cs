@@ -36,6 +36,12 @@ public sealed class ActorSystem : IActorSystem
     private readonly TimeSpan? _stopTimeout;
 
     /// <summary>
+    /// Opt-in snapshot threshold per actor (<see langword="null"/> = off, the default), handed
+    /// to every ES actor through <see cref="WireActor"/>.
+    /// </summary>
+    private readonly int? _snapshotEveryNEvents;
+
+    /// <summary>
     /// Creates an ActorSystem from <paramref name="options"/>. This is the single
     /// construction path — the event store must be chosen explicitly via
     /// <see cref="ActorSystemOptions.EventStore"/>.
@@ -47,6 +53,7 @@ public sealed class ActorSystem : IActorSystem
         _publisher = options.DomainEventPublisher;
         _logger = options.Logger;
         _stopTimeout = options.StopTimeout;
+        _snapshotEveryNEvents = options.SnapshotEveryNEvents;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -243,7 +250,9 @@ public sealed class ActorSystem : IActorSystem
             // the gate would let partially replayed state run OnReadyAsync (including saga resume).
             try
             {
-                es.ReplayEvents(events);
+                // Snapshot-accelerated when the store and the aggregate both support it;
+                // the full replay is the fallback, never a worse path than before.
+                await RestoreOrReplayAsync(actor, events).ConfigureAwait(false);
             }
             catch
             {
@@ -305,6 +314,79 @@ public sealed class ActorSystem : IActorSystem
         {
             gate.Semaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Rebuild state for a fresh instance from <paramref name="events"/> (the full stream,
+    /// re-read under the per-id gate).
+    /// <para>
+    /// When the store implements <see cref="IEventStoreSnapshot"/> and a snapshot is usable,
+    /// the instance restores it and replays ONLY the events after the snapshot version —
+    /// that tail is the whole point of the feature (a 79,772-event stream costs the events
+    /// since the last snapshot instead of all of them). Everything else is the historical
+    /// full replay.
+    /// </para>
+    /// <para>
+    /// Snapshots are acceleration only: reading the snapshot is inside the same try as
+    /// applying it, and any failure — unreadable snapshot, undecodable payload, a version past
+    /// the end of the stream — is reported as a warning and DEGRADES to the full replay. It is
+    /// never surfaced to the caller, because the event stream is complete and authoritative.
+    /// A Mutate that throws while replaying the tail is NOT caught here: that is the same
+    /// fatal aggregate fault a full replay would hit, and the caller's cleanup path owns it.
+    /// </para>
+    /// </summary>
+    private async ValueTask RestoreOrReplayAsync(
+        ActorBase actor,
+        IReadOnlyList<IDomainEvent> events
+    )
+    {
+        var es = (IEventSourcedActor)actor;
+
+        if (
+            _eventStore is not IEventStoreSnapshot snapshotStore
+            || actor is not ISnapshotableActor snapshotable
+        )
+        {
+            es.ReplayEvents(events);
+            return;
+        }
+
+        ulong baseVersion;
+        try
+        {
+            var snapshot = await snapshotStore.LoadSnapshotAsync(actor.Id).ConfigureAwait(false);
+
+            // Version 0 describes nothing, and a version beyond the end of the stream belongs
+            // to a stream that was rolled back or truncated: neither can be applied.
+            if (snapshot is null || snapshot.Version == 0 || snapshot.Version > (ulong)events.Count)
+            {
+                es.ReplayEvents(events);
+                return;
+            }
+
+            baseVersion = snapshot.Version;
+            snapshotable.RestoreSnapshot(baseVersion, snapshot.Payload);
+        }
+        catch (Exception ex)
+        {
+            TryLog(l =>
+                l.Warning(
+                    $"Actor {actor.GetType().Name} {actor.Id}: snapshot ignored, replaying the "
+                        + $"full stream ({ex.Message})"
+                )
+            );
+            es.ReplayEvents(events);
+            return;
+        }
+
+        var tail = events.Skip((int)baseVersion).ToList();
+        snapshotable.ReplayEventsFrom(baseVersion, tail);
+        TryLog(l =>
+            l.Info(
+                $"Actor {actor.GetType().Name} {actor.Id} restored from snapshot v{baseVersion}, "
+                    + $"replayed {tail.Count} of {events.Count} events"
+            )
+        );
     }
 
     /// <summary>
@@ -391,7 +473,10 @@ public sealed class ActorSystem : IActorSystem
         WireErrorHandler(actor);
 
         if (actor is EventSourcedActor es)
+        {
             es.AttachPersistence(_eventStore, _publisher);
+            es.AttachSnapshotPolicy(_snapshotEveryNEvents);
+        }
     }
 
     /// <summary>

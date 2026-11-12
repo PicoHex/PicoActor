@@ -8,10 +8,17 @@ namespace PicoActor;
 /// <see cref="ConcurrencyException"/>). Lock contention is per actor, so
 /// different actors never block each other.
 /// </summary>
-public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
+public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator, IEventStoreSnapshot
 {
     private readonly ConcurrentDictionary<Guid, List<IDomainEvent>> _streams = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
+
+    /// <summary>
+    /// At most ONE snapshot per actor (the latest saved overwrites the previous one):
+    /// snapshots are a recovery accelerator, not history — history is the event stream,
+    /// which snapshots never touch.
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, ActorSnapshot> _snapshots = new();
 
     /// <inheritdoc/>
     public async ValueTask<ulong> AppendAsync(
@@ -76,6 +83,26 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator
         {
             gate.Release();
         }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<ActorSnapshot?> LoadSnapshotAsync(
+        Guid actorId,
+        CancellationToken ct = default
+    ) => new(_snapshots.TryGetValue(actorId, out var snapshot) ? snapshot : null);
+
+    /// <inheritdoc/>
+    public ValueTask SaveSnapshotAsync(
+        Guid actorId,
+        ActorSnapshot snapshot,
+        CancellationToken ct = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+        // Last write wins: the newest snapshot supersedes every older one for this actor.
+        _snapshots[actorId] = snapshot;
+        return default;
     }
 
     /// <inheritdoc/>

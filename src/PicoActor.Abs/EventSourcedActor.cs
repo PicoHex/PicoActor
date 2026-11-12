@@ -13,7 +13,7 @@ namespace PicoActor.Abs;
 /// State is only mutated after successful persistence, guaranteeing that
 /// in-memory state is always consistent with the event stream.
 /// </summary>
-public abstract class EventSourcedActor : Actor, IEventSourcedActor
+public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotableActor
 {
     private readonly List<IDomainEvent> _events = new();
 
@@ -51,6 +51,16 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     private IDomainEventPublisher? _publisher;
 
     /// <summary>
+    /// Snapshot trigger: save a snapshot once this many events have been flushed since the
+    /// last snapshot attempt. Null = snapshotting off (the default, and the only value unless
+    /// the host opts in through <c>ActorSystemOptions.SnapshotEveryNEvents</c>).
+    /// </summary>
+    private int? _snapshotEveryNEvents;
+
+    /// <summary>Events flushed since the last snapshot attempt.</summary>
+    private int _eventsSinceSnapshot;
+
+    /// <summary>
     /// Framework wiring: attaches the event store and the publish hook.
     /// Called by IActorSystem via <see cref="Actor.AttachToSystem"/>'s flow, before
     /// SignalReady(). Not for application code.
@@ -60,6 +70,19 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     {
         _eventStore = eventStore;
         _publisher = publisher;
+    }
+
+    /// <summary>
+    /// Framework wiring: attaches the snapshot policy chosen by the host
+    /// (<c>ActorSystemOptions.SnapshotEveryNEvents</c>) and resets the counter. Called by
+    /// IActorSystem through <see cref="Actor.AttachToSystem"/>'s flow, before SignalReady().
+    /// Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void AttachSnapshotPolicy(int? everyNEvents)
+    {
+        _snapshotEveryNEvents = everyNEvents;
+        _eventsSinceSnapshot = 0;
     }
 
     /// <summary>Creation path. Chains to Actor(ICommand).</summary>
@@ -99,6 +122,40 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// FlushEventsAsync (after persistence) and ReplayEvents (recovery).
     /// </summary>
     protected virtual bool TryHandleFrameworkEvent(IDomainEvent @event) => false;
+
+    /// <summary>
+    /// Produce the state this aggregate is fully described by, at the current
+    /// <see cref="Version"/>. Return null (the base default) to opt out: the type does not
+    /// snapshot, and recovery keeps replaying the whole stream.
+    /// <para>
+    /// Called only after a successful flush that reached the configured threshold, so the
+    /// state it reads is the state the stream describes at <see cref="Version"/>. Snapshotting
+    /// is an ACCELERATOR: the event stream is never truncated, so returning null, changing the
+    /// payload shape, or failing here only costs speed. Throwing is reported through
+    /// <see cref="OnSnapshotFailed"/> and never fails the flushed command.
+    /// </para>
+    /// </summary>
+    protected virtual byte[]? TakeSnapshot() => null;
+
+    /// <summary>
+    /// Rebuild state from a payload previously produced by <see cref="TakeSnapshot"/>.
+    /// <paramref name="version"/> is the version that payload covers; the framework then
+    /// replays only the events after it through <see cref="Mutate"/>.
+    /// <para>
+    /// Read models and other O(n) effects must be skipped here only if replay already skips
+    /// them — see <see cref="IsReplaying"/>. Throwing is allowed and safe: recovery reports it
+    /// through <see cref="OnSnapshotFailed"/> and falls back to replaying the whole stream, so
+    /// a corrupt or stale payload can never break the aggregate or its history.
+    /// </para>
+    /// </summary>
+    protected virtual void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) { }
+
+    /// <summary>
+    /// Report that snapshotting failed (<see cref="TakeSnapshot"/> or the store threw).
+    /// Default: silent — snapshotting is an accelerator, and its failures are never allowed
+    /// to affect the actor. A throwing override is swallowed as well.
+    /// </summary>
+    protected virtual void OnSnapshotFailed(Exception ex) { }
 
     /// <summary>
     /// Flush uncommitted events produced during construction.
@@ -185,6 +242,10 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         if (_events.Count == 0)
             return;
 
+        // Captured before the list is cleared: the snapshot trigger counts the events this
+        // flush actually persisted (batch size, not a fixed 1).
+        var flushedEvents = _events.Count;
+
         // Persist first — if this fails, state remains unchanged (RaiseEvent didn't Mutate).
         // On failure, discard the uncommitted events and roll Version back to the
         // last persisted version. Otherwise Version stays inflated and the failed
@@ -247,6 +308,81 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
         }
 
         ClearEvents();
+
+        // Success path only: a failed flush rolled the batch back and never reached this
+        // line, so a snapshot can never describe events that are not in the stream.
+        await SaveSnapshotIfDueAsync(flushedEvents).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Counting snapshot trigger. After a SUCCESSFUL flush, accumulate the batch size and, once
+    /// the configured threshold is reached, ask the subclass for a payload and hand it to the
+    /// store.
+    /// <para>
+    /// Never affects the actor: a null payload means "this type does not snapshot", every
+    /// failure (payload production or store write) is reported through
+    /// <see cref="OnSnapshotFailed"/> and swallowed, and the counter is reset on every attempt
+    /// so a failing store is retried at the NEXT threshold instead of on every flush.
+    /// </para>
+    /// </summary>
+    private async ValueTask SaveSnapshotIfDueAsync(int flushedEvents)
+    {
+        if (_snapshotEveryNEvents is not { } threshold)
+            return;
+
+        // Checked before counting: a store that cannot persist snapshots makes the feature a
+        // no-op, so the counter must not spin on a capability the store lacks.
+        if (_eventStore is not IEventStoreSnapshot snapshotStore)
+            return;
+
+        _eventsSinceSnapshot += flushedEvents;
+        if (_eventsSinceSnapshot < threshold)
+            return;
+
+        // This threshold is consumed whether or not the attempt below succeeds.
+        _eventsSinceSnapshot = 0;
+
+        byte[]? payload;
+        try
+        {
+            payload = TakeSnapshot();
+        }
+        catch (Exception ex)
+        {
+            ReportSnapshotFailure(ex);
+            return;
+        }
+
+        if (payload is null)
+            return; // The type opts out of snapshotting.
+
+        try
+        {
+            await snapshotStore
+                .SaveSnapshotAsync(Id, new ActorSnapshot(Version, payload))
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ReportSnapshotFailure(ex);
+        }
+    }
+
+    /// <summary>
+    /// Deliver a snapshotting failure to <see cref="OnSnapshotFailed"/> without letting a
+    /// throwing override escape: snapshotting is an accelerator, and its diagnostics must
+    /// never turn a durable, successfully flushed batch into a failed command.
+    /// </summary>
+    private void ReportSnapshotFailure(Exception ex)
+    {
+        try
+        {
+            OnSnapshotFailed(ex);
+        }
+        catch
+        {
+            // Diagnostics only.
+        }
     }
 
     /// <summary>
@@ -294,8 +430,28 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
 
     void IEventSourcedActor.CommitEvents() => ClearEvents();
 
-    void IEventSourcedActor.ReplayEvents(IReadOnlyList<IDomainEvent> events)
+    void IEventSourcedActor.ReplayEvents(IReadOnlyList<IDomainEvent> events) =>
+        // ReplayEventsFrom(0, ...) IS the historical full replay: same clear, same Mutate
+        // loop, Version = events.Count.
+        ReplayEventsFrom(0, events);
+
+    void ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload) =>
+        RestoreSnapshot(version, payload.AsSpan());
+
+    void ISnapshotableActor.ReplayEventsFrom(
+        ulong baseVersion,
+        IReadOnlyList<IDomainEvent> events
+    ) => ReplayEventsFrom(baseVersion, events);
+
+    /// <summary>
+    /// Replay <paramref name="events"/> on top of <paramref name="baseVersion"/> (0 = the
+    /// full stream). Snapshot-accelerated recovery restores the payload first and passes the
+    /// snapshot's version here, so only the events after it reach <see cref="Mutate"/>.
+    /// </summary>
+    private void ReplayEventsFrom(ulong baseVersion, IReadOnlyList<IDomainEvent> events)
     {
+        // One marker for both paths: everything replayed is a recovery, including the tail
+        // of a snapshot restore, so subclasses skip their O(n) per-event effects either way.
         IsReplaying = true;
 
         // A rebuilt instance must drop whatever its constructor staged: the persisted
@@ -311,6 +467,6 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
             if (!TryHandleFrameworkEvent(e))
                 Mutate(e);
         }
-        Version = (ulong)events.Count;
+        Version = baseVersion + (ulong)events.Count;
     }
 }
