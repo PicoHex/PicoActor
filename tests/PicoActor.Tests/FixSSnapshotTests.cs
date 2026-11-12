@@ -108,7 +108,12 @@ public sealed class FixSSnapshotTests
         ActorSystem System,
         InMemoryEventStore Store,
         SSnapshotCounter Actor
-    )> BuildCounterAsync(int? everyNEvents, int adds, bool snapshotsEnabled = true)
+    )> BuildCounterAsync(
+        int? everyNEvents,
+        int adds,
+        bool snapshotsEnabled = true,
+        bool fireAndForget = false
+    )
     {
         var store = new InMemoryEventStore();
         var system = new ActorSystem(
@@ -124,7 +129,18 @@ public sealed class FixSSnapshotTests
 
         var actor = await system.CreateAsync<SSnapshotCounter>(new SSnapshotCreate(0));
         for (var i = 0; i < adds; i++)
-            await system.AskAsync<object?>(actor.Id, new SSnapshotAdd(1));
+        {
+            if (fireAndForget)
+                system.Send(actor.Id, new SSnapshotAdd(1));
+            else
+                await system.AskAsync<object?>(actor.Id, new SSnapshotAdd(1));
+        }
+
+        // The mailbox is FIFO and the loop dispatches one envelope at a time, so this ask
+        // completes only after every queued command above was persisted — one flush per
+        // command, which is what makes the counted trigger deterministic.
+        if (fireAndForget)
+            await system.AskAsync<int>(actor.Id, new SSnapshotGet());
 
         return (system, store, actor);
     }
@@ -309,7 +325,43 @@ public sealed class FixSSnapshotTests
     }
 
     /// <summary>
-    /// 8. Configuration is validated at the option setter: a threshold below 1 can only
+    /// 8. Realistic size: 5,001 persisted events with a 1,000-event threshold leave one
+    /// snapshot at the very end of the stream, so a rebuild replays exactly ONE event instead
+    /// of 5,001. Production streams are 11k-79k events; this is the shape that has to shrink.
+    /// </summary>
+    [Test]
+    public async Task LargeStream_RebuildReplaysOnlyTheEventsAfterTheLastSnapshot()
+    {
+        const int total = 5_001; // 1 creation event + 5,000 increments
+        const int threshold = 1_000;
+
+        var (system, store, actor) = await BuildCounterAsync(
+            everyNEvents: threshold,
+            adds: total - 1,
+            fireAndForget: true
+        );
+        var id = actor.Id;
+
+        await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(total);
+        await Assert.That(actor.Version).IsEqualTo((ulong)total);
+
+        var snapshot = await store.LoadSnapshotAsync(id);
+        await Assert.That(snapshot).IsNotNull();
+        await Assert.That(snapshot!.Version).IsEqualTo(5_000UL);
+
+        await system.StopAsync(id);
+        var rebuilt = await system.GetAsync<SSnapshotCounter>(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(total - 5_000);
+        await Assert.That(rebuilt.MutateCalls).IsEqualTo(1);
+        await Assert.That(rebuilt.Value).IsEqualTo(5_000);
+
+        await system.StopAsync(id);
+    }
+
+    /// <summary>
+    /// 9. Configuration is validated at the option setter: a threshold below 1 can only
     /// mean a host bug, so it fails at configuration time instead of silently snapshotting
     /// on every event (or never).
     /// </summary>
