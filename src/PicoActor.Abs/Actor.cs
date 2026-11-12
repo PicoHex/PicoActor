@@ -35,6 +35,17 @@ public abstract class Actor : IActor, IAsyncDisposable
     private int _discarded;
 
     /// <summary>
+    /// UTC ticks of the last observed activity: a successful <see cref="Post"/> (a command was
+    /// accepted) and the END of every dispatched command (successful or not). This is the clock
+    /// the idle sweeper reads. It deliberately does NOT move while a command is running - that is
+    /// what <see cref="IsProcessing"/> is for: a long handler is not an idle actor.
+    /// </summary>
+    private long _lastActivityTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>1 while a command is being dispatched by the loop, 0 otherwise.</summary>
+    private int _processing;
+
+    /// <summary>
     /// Framework-generated UUID v7 identity.
     /// Assigned by IActorSystem via <see cref="AttachToSystem"/> after construction,
     /// before SignalReady(). Immutable for application code thereafter.
@@ -176,7 +187,58 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     /// <summary>Called by IActorSystem to deliver an envelope. False = delivery failed (stopping).</summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public bool Post(Envelope envelope) => _mailbox.Writer.TryWrite(envelope);
+    public bool Post(Envelope envelope)
+    {
+        // Accepted work counts as activity: an actor that keeps receiving commands must never
+        // look idle just because its turns happen to be short.
+        if (!_mailbox.Writer.TryWrite(envelope))
+            return false;
+
+        Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// When this actor was last active (UTC): the last accepted <see cref="Post"/> or the end of
+    /// the last dispatched command. Read by the ActorSystem idle sweeper; not for application
+    /// code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public DateTime LastActivityUtc => new(Volatile.Read(ref _lastActivityTicks), DateTimeKind.Utc);
+
+    /// <summary>
+    /// True while the loop is dispatching a command (set before <see cref="ProcessAsync"/> and
+    /// cleared after it, including on failure). An actor that is working is never a passivation
+    /// candidate. Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public bool IsProcessing => Volatile.Read(ref _processing) != 0;
+
+    /// <summary>
+    /// Commands buffered in the mailbox and not yet dispatched. A non-zero backlog means the actor
+    /// still has work waiting, so it is not idle. Not for application code.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public int PendingCount => _mailbox.Reader.Count;
+
+    /// <summary>
+    /// Ask this actor to give its materialized state back, THROUGH THE MAILBOX (a message
+    /// boundary) instead of an external <see cref="SignalStop"/>: the request is queued behind
+    /// everything already accepted, the loop stops itself when it reaches it, and no command is
+    /// ever dispatched on an actor that is being reclaimed.
+    /// <para>
+    /// Only meaningful for actors the runtime can rebuild (an EventSourcedActor with a registered
+    /// rebuild factory) - the framework's idle sweeper is the caller. The actor is removed from
+    /// the registry (so Send/AskAsync throw <see cref="KeyNotFoundException"/>) and its state is
+    /// rebuilt from the event stream by the next GetAsync. Not for application code.
+    /// </para>
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public void RequestPassivation() =>
+        _mailbox.Writer.TryWrite(new Envelope { Command = PassivateSentinel.Instance });
+
+    /// <summary>Record that activity just happened on this actor (UTC ticks, lock-free).</summary>
+    private void Touch() => Interlocked.Exchange(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
 
     private async Task RunAsync(CancellationToken ct)
     {
@@ -262,6 +324,18 @@ public abstract class Actor : IActor, IAsyncDisposable
                     var envelope in _mailbox.Reader.ReadAllAsync(ct).ConfigureAwait(false)
                 )
                 {
+                    // Framework sentinel: passivation is a MESSAGE, not an external stop. It is
+                    // handled strictly BEFORE dispatch, and it is not a command - the subclass
+                    // never sees it, nothing is persisted for it, and no TCS can be waiting on it.
+                    // RequestStop removes the registry entry first, so later lookups miss (and a
+                    // concurrent GetAsync rebuilds from the stream) instead of reaching a corpse.
+                    if (envelope.Command is PassivateSentinel)
+                    {
+                        System?.RequestStop(Id);
+                        continue;
+                    }
+
+                    Volatile.Write(ref _processing, 1);
                     try
                     {
                         await ProcessAsync(envelope).ConfigureAwait(false);
@@ -273,6 +347,14 @@ public abstract class Actor : IActor, IAsyncDisposable
                             envelope.Tcs.TrySetException(ex);
                         else
                             InvokeErrorHandler(ex, envelope.Command);
+                    }
+                    finally
+                    {
+                        // Cleared in a finally: a throwing handler (or a failed persist) must not
+                        // leave the actor looking permanently "processing" - that would exempt it
+                        // from passivation for the rest of the process lifetime.
+                        Volatile.Write(ref _processing, 0);
+                        Touch();
                     }
                 }
             }
@@ -445,4 +527,14 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     /// <summary>IAsyncDisposable — delegates to StopAsync.</summary>
     async ValueTask IAsyncDisposable.DisposeAsync() => await StopAsync();
+
+    /// <summary>
+    /// Framework-only command that asks the loop to reclaim this actor's materialized state once
+    /// the mailbox reaches it (see <see cref="RequestPassivation"/>). Never dispatched to
+    /// OnMessageAsync, never persisted, never handed to application code.
+    /// </summary>
+    private sealed record PassivateSentinel : ICommand
+    {
+        public static PassivateSentinel Instance { get; } = new();
+    }
 }

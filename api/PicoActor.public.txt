@@ -15,6 +15,7 @@ M:PicoActor.ActorSystem.ResumeInterruptedSagasAsync``1(string firstEventType, Sy
 M:PicoActor.ActorSystem.Send(System.Guid id, PicoActor.Abs.ICommand command) : void override
 M:PicoActor.ActorSystem.StopAllAsync() : System.Threading.Tasks.ValueTask override
 M:PicoActor.ActorSystem.StopAsync(System.Guid id) : System.Threading.Tasks.ValueTask override
+M:PicoActor.ActorSystem.SweepIdleActorsAsync() : System.Threading.Tasks.ValueTask
 M:PicoActor.ActorSystemOptions..ctor() : void
 M:PicoActor.EventStoreConfig..ctor() : void
 M:PicoActor.InMemoryEventStore..ctor() : void
@@ -29,8 +30,12 @@ M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer containe
 M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoActor.ActorConfig config) : PicoDI.Abs.ISvcContainer static
 M:PicoActor.PicoActorDiExtensions.AddPicoActor(PicoDI.Abs.ISvcContainer container, PicoMediator.Abs.IPublisher publisher) : PicoDI.Abs.ISvcContainer static
 P:PicoActor.ActorConfig.EventStore : PicoActor.EventStoreConfig { get; set; }
+P:PicoActor.ActorSystem.PassivatedCount : long { get; }
+P:PicoActor.ActorSystem.ReactivatedCount : long { get; }
 P:PicoActor.ActorSystemOptions.DomainEventPublisher : PicoActor.Abs.IDomainEventPublisher { get; set; }
 P:PicoActor.ActorSystemOptions.EventStore : PicoActor.Abs.IEventStore { get; set; }
+P:PicoActor.ActorSystemOptions.IdleSweepInterval : System.Nullable`1<System.TimeSpan> { get; set; }
+P:PicoActor.ActorSystemOptions.IdleTimeout : System.Nullable`1<System.TimeSpan> { get; set; }
 P:PicoActor.ActorSystemOptions.Logger : PicoLog.Abs.ILogger { get; set; }
 P:PicoActor.ActorSystemOptions.StopTimeout : System.Nullable`1<System.TimeSpan> { get; set; }
 P:PicoActor.EventStoreConfig.Type : string { get; set; }

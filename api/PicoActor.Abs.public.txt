@@ -36,6 +36,7 @@ M:PicoActor.Abs.Actor.OnMessageAsync(PicoActor.Abs.ICommand command) : System.Th
 M:PicoActor.Abs.Actor.OnReadyAsync() : System.Threading.Tasks.ValueTask virtual
 M:PicoActor.Abs.Actor.Post(PicoActor.Abs.Envelope envelope) : bool
 M:PicoActor.Abs.Actor.ProcessAsync(PicoActor.Abs.Envelope envelope) : System.Threading.Tasks.ValueTask virtual
+M:PicoActor.Abs.Actor.RequestPassivation() : void
 M:PicoActor.Abs.Actor.SignalReady() : void
 M:PicoActor.Abs.Actor.SignalStop() : void
 M:PicoActor.Abs.Actor.StopAsync() : System.Threading.Tasks.ValueTask
@@ -91,7 +92,10 @@ M:PicoActor.Abs.SagaFailed..ctor(string Reason) : void
 M:PicoActor.Abs.SagaResumeResult..ctor(System.Guid Id, PicoActor.Abs.SagaResumeStatus Status, string Reason = null) : void
 P:PicoActor.Abs.Actor.Id : System.Guid { get; }
 P:PicoActor.Abs.Actor.InitCompletedTask : System.Threading.Tasks.Task { get; }
+P:PicoActor.Abs.Actor.IsProcessing : bool { get; }
+P:PicoActor.Abs.Actor.LastActivityUtc : System.DateTime { get; }
 P:PicoActor.Abs.Actor.OutputWriter : System.Threading.Channels.ChannelWriter`1<PicoActor.Abs.ActorOutputEvent> { get; set; }
+P:PicoActor.Abs.Actor.PendingCount : int { get; }
 P:PicoActor.Abs.Actor.StopToken : System.Threading.CancellationToken { get; }
 P:PicoActor.Abs.Actor.System : PicoActor.Abs.IActorSystem { get; }
 P:PicoActor.Abs.Actor.UnhandledErrorHandler : System.Action`2<System.Exception, PicoActor.Abs.ICommand> { get; set; }

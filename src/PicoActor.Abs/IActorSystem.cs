@@ -69,6 +69,15 @@ public interface IActorSystem
     ///   see the failed instance (its init-completion signal has already fired either way).
     /// - Concurrent calls for the same id are single-flight: one rebuild, one
     ///   initialization, one resume — the other callers resolve to that instance.
+    /// - When idle passivation is enabled (<c>ActorSystemOptions.IdleTimeout</c>), this is the
+    ///   REACTIVATION path: an actor that was idle long enough gave its materialized state back
+    ///   and is absent from the registry until this call rebuilds it from its event stream (same
+    ///   id, same version, same state). While it is absent it behaves exactly like any
+    ///   unregistered actor: <see cref="Send"/> and <see cref="AskAsync{TResult}"/> throw
+    ///   <see cref="KeyNotFoundException"/>, because they have no way to know which rebuild
+    ///   factory applies (there is no type argument to read it from). Only actors the runtime can
+    ///   rebuild are ever reclaimed — an event-sourced type registered with a rebuild factory;
+    ///   everything else stays in memory for the lifetime of the system.
     /// </para>
     /// <para>
     /// Do NOT call this from inside your own initialization (or from initializations that
@@ -133,6 +142,12 @@ public interface IActorSystem
     /// shutdown bounded: each actor then gets that budget, an actor that misses it is
     /// reported as a warning and abandoned, and the remaining actors are still stopped. The
     /// abandoned loop cannot be aborted by the framework — treat that actor as untrusted.
+    /// </para>
+    /// <para>
+    /// Idle passivation stops with the shutdown: the background sweeper is cancelled first and
+    /// awaited to a full stop (so no sweep can reclaim an actor while the mass stop runs), and it
+    /// is not restarted afterwards. A system that stays alive can still create and look up
+    /// actors — it just no longer reclaims idle ones; build a new system to re-enable it.
     /// </para>
     /// </summary>
     ValueTask StopAllAsync();
