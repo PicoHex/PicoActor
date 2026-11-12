@@ -74,6 +74,52 @@ internal sealed class FixPCounter : EventSourcedActor
     }
 }
 
+/// <summary>
+/// A saga that is WAITING for an external reply: it never completes on its own, and its
+/// resume is a no-op, so a rebuild just waits again. Waiting IS its normal state, which is
+/// exactly why the idle clock cannot be the only question asked of it — passivating it would
+/// drop the reply the outside world is about to Send.
+/// </summary>
+internal sealed record FixPSagaStart(string Name) : ICommand;
+
+internal sealed record FixPSagaReply(string Value) : ICommand;
+
+internal sealed record FixPSagaName : ICommand;
+
+internal sealed record FixPSagaStarted(string Name) : IDomainEvent;
+
+internal sealed class FixPWaitingSaga : SagaActor
+{
+    private string _name = "";
+
+    public FixPWaitingSaga() { }
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        switch (command)
+        {
+            case FixPSagaStart start:
+                RaiseEvent(new FixPSagaStarted(start.Name));
+                return default;
+            case FixPSagaReply reply:
+                return new ValueTask<object?>(reply.Value);
+            case FixPSagaName:
+                return new ValueTask<object?>(_name);
+            default:
+                return default;
+        }
+    }
+
+    /// <summary>Still waiting for the outside world: recovery has nothing to advance.</summary>
+    protected override ValueTask ResumeAsync() => default;
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        if (@event is FixPSagaStarted started)
+            _name = started.Name;
+    }
+}
+
 /// <summary>Non-ES actor: its state exists only in memory, so it can never be reclaimed.</summary>
 internal sealed class FixPPlainActor : Actor
 {
@@ -488,6 +534,159 @@ public sealed class FixPPassivationTests
             await Assert.That(rebuilt).IsNotNull();
             await Assert.That(rebuilt!.Version).IsEqualTo(4UL);
             await Assert.That(await system.AskAsync<int>(id, new FixPGetValue())).IsEqualTo(6);
+        }
+        finally
+        {
+            await system.StopAllAsync();
+        }
+    }
+
+    /// <summary>
+    /// I-1: a saga WAITING for an external reply must never be reclaimed. It is registered with
+    /// a rebuild factory (so on paper it IS a candidate) and it is idle by definition while it
+    /// waits — but its state is not a cache of a finished aggregate. Passivating it means the
+    /// reply command arrives at an id nobody owns (KeyNotFoundException) and the saga is stuck
+    /// mid-flight for good. A plain ES actor in the SAME system is still reclaimed, so the
+    /// exemption belongs to the saga, it does not disable the feature.
+    /// </summary>
+    [Test]
+    public async Task SagaWaitingForReply_IsNeverPassivated_WhilePlainEsActorStillIs()
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, TimeSpan.FromMilliseconds(200), TimeSpan.FromHours(1));
+        try
+        {
+            system.Register<FixPWaitingSaga>(
+                _ => new FixPWaitingSaga(),
+                () => new FixPWaitingSaga()
+            );
+            RegisterCounter(system);
+
+            // A saga takes no creation-time command: it is created empty and then advanced
+            // through its mailbox, exactly like production code does.
+            var saga = await system.CreateAsync<FixPWaitingSaga>(new FixPSagaStart("waiting"));
+            var sagaId = saga.Id;
+            await Assert
+                .That(await system.AskAsync<object?>(sagaId, new FixPSagaStart("waiting")))
+                .IsNull();
+            await Assert
+                .That(await system.AskAsync<string>(sagaId, new FixPSagaReply("hello")))
+                .IsEqualTo("hello");
+
+            var counter = await system.CreateAsync<FixPCounter>(new FixPCreate());
+            var counterId = counter.Id;
+
+            // Control: the plain ES actor in the same system IS reclaimed. The sweep is driven
+            // by hand — the configured interval is an hour, so no timer decides anything here.
+            var baseline = system.PassivatedCount;
+            await Assert
+                .That(await SweepUntilAsync(system, () => system.PassivatedCount > baseline))
+                .IsTrue();
+            await Assert.That(await WaitUntilAsync(() => IsGone(system, counterId))).IsTrue();
+
+            // ... while the idle saga is untouched: waiting is its normal state, and the reply
+            // it is waiting for must still reach the SAME id.
+            await Assert.That(IsGone(system, sagaId)).IsFalse();
+            await Assert
+                .That(await system.AskAsync<string>(sagaId, new FixPSagaName()))
+                .IsEqualTo("waiting");
+            await Assert
+                .That(await system.AskAsync<string>(sagaId, new FixPSagaReply("still here")))
+                .IsEqualTo("still here");
+        }
+        finally
+        {
+            await system.StopAllAsync();
+        }
+    }
+
+    /// <summary>
+    /// m-2: with passivation OFF (the default) nothing ever reads the idle clock, so the hot
+    /// paths — every <c>Post</c>, and the end of every dispatched command — must not pay for a
+    /// <c>DateTime.UtcNow</c> that has no reader.
+    /// </summary>
+    [Test]
+    public async Task PassivationDisabled_LeavesTheIdleClockUntouched()
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, null, null);
+        try
+        {
+            RegisterCounter(system);
+
+            var actor = await system.CreateAsync<FixPCounter>(new FixPCreate());
+            var before = actor.LastActivityUtc;
+
+            await Task.Delay(50);
+            system.Send(actor.Id, new FixPIncrement(1));
+            await Assert
+                .That(await system.AskAsync<object?>(actor.Id, new FixPIncrement(1)))
+                .IsNull();
+            await Assert
+                .That(await system.AskAsync<int>(actor.Id, new FixPGetValue()))
+                .IsEqualTo(2);
+
+            await Assert.That(actor.LastActivityUtc).IsEqualTo(before);
+        }
+        finally
+        {
+            await system.StopAllAsync();
+        }
+    }
+
+    /// <summary>
+    /// m-2, other half: when passivation IS enabled the clock must still move, or the sweeper
+    /// would reclaim a working actor.
+    /// </summary>
+    [Test]
+    public async Task PassivationEnabled_TracksIdleActivity()
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
+        try
+        {
+            RegisterCounter(system);
+
+            var actor = await system.CreateAsync<FixPCounter>(new FixPCreate());
+            var before = actor.LastActivityUtc;
+
+            await Task.Delay(50);
+            await Assert
+                .That(await system.AskAsync<object?>(actor.Id, new FixPIncrement(1)))
+                .IsNull();
+
+            await Assert.That(actor.LastActivityUtc).IsGreaterThan(before);
+        }
+        finally
+        {
+            await system.StopAllAsync();
+        }
+    }
+
+    /// <summary>
+    /// m-9: the passivation request is a mailbox write, and a write to a CLOSED mailbox fails.
+    /// The caller (the sweeper) must be able to tell, instead of counting — and logging — a
+    /// reclaim that never happened.
+    /// </summary>
+    [Test]
+    public async Task RequestPassivation_ReportsWhetherTheRequestWasQueued()
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, null, null);
+        try
+        {
+            RegisterCounter(system);
+
+            var stopping = await system.CreateAsync<FixPCounter>(new FixPCreate());
+            await system.StopAsync(stopping.Id);
+
+            // Closed mailbox (the loop already exited): the request was NOT queued.
+            await Assert.That(stopping.RequestPassivation()).IsFalse();
+
+            // A live actor accepts it, and reclaims itself at that message boundary.
+            var live = await system.CreateAsync<FixPCounter>(new FixPCreate());
+            await Assert.That(live.RequestPassivation()).IsTrue();
+            await Assert.That(await WaitUntilAsync(() => IsGone(system, live.Id))).IsTrue();
         }
         finally
         {

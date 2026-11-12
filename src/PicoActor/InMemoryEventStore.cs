@@ -101,7 +101,11 @@ public sealed class InMemoryEventStore : IEventStore, IEventStoreEnumerator, IEv
         ArgumentNullException.ThrowIfNull(snapshot);
 
         // Last write wins: the newest snapshot supersedes every older one for this actor.
-        _snapshots[actorId] = snapshot;
+        // The payload is COPIED, not referenced: an aggregate is allowed to serialize into a
+        // buffer it reuses (that is the whole point of keeping one), and keeping the reference
+        // would let the next TakeSnapshot rewrite the snapshot already stored here — a stream
+        // description that silently changes under a version it no longer matches.
+        _snapshots[actorId] = new ActorSnapshot(snapshot.Version, snapshot.Payload.ToArray());
         return default;
     }
 

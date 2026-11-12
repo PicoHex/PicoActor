@@ -46,10 +46,13 @@ public sealed class ActorSystemOptions
     /// persisted events, and recovery restores the snapshot and replays only the events after
     /// it. Default <c>null</c> = off (every actor replays its whole stream).
     /// <para>
-    /// Snapshotting is acceleration ONLY: the event stream is never truncated, at most one
-    /// snapshot per actor is kept, and a missing/corrupt/out-of-range snapshot falls back to a
-    /// full replay. A store that does not implement <see cref="Abs.IEventStoreSnapshot"/>
-    /// disables the feature regardless of this value.
+    /// Snapshotting is acceleration ONLY: the event stream is never truncated, a snapshot the
+    /// aggregate cannot restore is refused, and a missing/corrupt/out-of-range snapshot falls back
+    /// to a full replay. A store that does not implement
+    /// <see cref="Abs.IEventStoreSnapshot"/> disables the feature regardless of this value.
+    /// The bundled <c>InMemoryEventStore</c> keeps at most one snapshot per actor (the latest);
+    /// a custom store should follow the same contract — older snapshots are superseded
+    /// accelerators, not history.
     /// </para>
     /// <para>A value below 1 is rejected here: it can only be a host bug.</para>
     /// </summary>
@@ -93,8 +96,10 @@ public sealed class ActorSystemOptions
 
     /// <summary>
     /// How often the background sweeper looks for idle actors. Default <c>null</c> = derive it
-    /// from <see cref="IdleTimeout"/> (half of it, never less than one second) so an actor is
-    /// reclaimed within roughly 1.5x <see cref="IdleTimeout"/> of going idle.
+    /// from <see cref="IdleTimeout"/>: half the budget, floored at one second. For budgets of two
+    /// seconds and up that means an actor is reclaimed within roughly 1.5x its budget; below two
+    /// seconds the one-second floor dominates instead, so a reclaim can take up to
+    /// <c>IdleTimeout + 1s</c>. Set it explicitly to trade sweep cost against reclaim latency.
     /// <para>
     /// Only meaningful together with <see cref="IdleTimeout"/>. Tests and operations can also
     /// drive the sweep explicitly with <see cref="ActorSystem.SweepIdleActorsAsync"/>.

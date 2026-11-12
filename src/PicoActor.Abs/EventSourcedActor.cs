@@ -124,6 +124,27 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
     protected virtual bool TryHandleFrameworkEvent(IDomainEvent @event) => false;
 
     /// <summary>
+    /// May the runtime reclaim this instance's materialized state while it is idle, and rebuild
+    /// it from the event stream on the next lookup? Default <see langword="true"/>: for a plain
+    /// aggregate the in-memory state is only a cache and the stream is the truth.
+    /// <para>
+    /// Override to <see langword="false"/> when being idle is the actor's JOB rather than
+    /// evidence that nothing is happening — <see cref="SagaActor"/>, which waits for external
+    /// replies, is the case this exists for. Reclaiming such an actor hands its id back to nobody
+    /// (Send/AskAsync then throw <see cref="KeyNotFoundException"/>) exactly when the outside
+    /// world is about to answer it, and the coordination state is stranded mid-flight.
+    /// </para>
+    /// <para>
+    /// This is a property of the actor TYPE for the runtime, not host configuration (the host
+    /// opts the whole feature in or out with
+    /// <c>ActorSystemOptions.IdleTimeout</c>). Returning false only exempts the actor from
+    /// passivation; nothing else about it changes. Not for application code.
+    /// </para>
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public virtual bool CanBePassivated => true;
+
+    /// <summary>
     /// Produce the state this aggregate is fully described by, at the current
     /// <see cref="Version"/>. Return null (the base default) to opt out: the type does not
     /// snapshot, and recovery keeps replaying the whole stream.
@@ -134,6 +155,11 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
     /// payload shape, or failing here only costs speed. Throwing is reported through
     /// <see cref="OnSnapshotFailed"/> and never fails the flushed command.
     /// </para>
+    /// <para>
+    /// <b>Override this TOGETHER WITH <see cref="RestoreSnapshot"/>.</b> Returning a payload that
+    /// <see cref="RestoreSnapshot"/> cannot apply is a contract error: recovery refuses the
+    /// snapshot (see there) and replays the whole stream.
+    /// </para>
     /// </summary>
     protected virtual byte[]? TakeSnapshot() => null;
 
@@ -142,13 +168,28 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
     /// <paramref name="version"/> is the version that payload covers; the framework then
     /// replays only the events after it through <see cref="Mutate"/>.
     /// <para>
+    /// <b>Override this TOGETHER WITH <see cref="TakeSnapshot"/>, or neither.</b> The base
+    /// implementation refuses with <see cref="NotSupportedException"/> on purpose: a payload
+    /// nothing can restore used to be "restored" silently by an empty implementation, leaving the
+    /// state WITHOUT the prefix the payload covers — a wrong aggregate that reports success, the
+    /// worst possible failure mode for a recovery accelerator. Because the framework catches the
+    /// exception, the only consequence of breaking the pair is that recovery replays the whole
+    /// stream (correct, just slower).
+    /// </para>
+    /// <para>
     /// Read models and other O(n) effects must be skipped here only if replay already skips
     /// them — see <see cref="IsReplaying"/>. Throwing is allowed and safe: recovery reports it
     /// through <see cref="OnSnapshotFailed"/> and falls back to replaying the whole stream, so
     /// a corrupt or stale payload can never break the aggregate or its history.
     /// </para>
     /// </summary>
-    protected virtual void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) { }
+    protected virtual void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
+        throw new NotSupportedException(
+            $"{GetType().Name} overrides TakeSnapshot without RestoreSnapshot: a payload that "
+                + "cannot be restored would silently drop the state it covers, so the runtime "
+                + "refuses it and replays the whole event stream instead. Override both members, "
+                + "or neither."
+        );
 
     /// <summary>
     /// Report that snapshotting failed (<see cref="TakeSnapshot"/> or the store threw).
@@ -358,8 +399,12 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
 
         try
         {
+            // The write observes the actor's stop token like any other I/O of this actor: a
+            // shutdown interrupt cancels it instead of being held up by the store. Cancellation
+            // is reported exactly like a store failure — the batch is already durable, so it can
+            // never fail the command that triggered it.
             await snapshotStore
-                .SaveSnapshotAsync(Id, new ActorSnapshot(Version, payload))
+                .SaveSnapshotAsync(Id, new ActorSnapshot(Version, payload), StopToken)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
