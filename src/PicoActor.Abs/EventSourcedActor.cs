@@ -27,7 +27,20 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor
     /// finishes. "Version &gt; 0" is NOT a rebuild marker: a subclass may raise events in
     /// its constructor, which is a creation.
     /// </summary>
-    internal bool IsReplaying { get; private set; }
+    /// <remarks>
+    /// REPLAY IS NOT A LIVE DISPATCH. Effects that are O(n) per event — publishing the read
+    /// model (a database write, a projection update, an outbound notification), messaging
+    /// another actor, logging at Info — must be skipped while this is true. Replaying n
+    /// events with an O(n) effect per event makes the rebuild O(n^2), which is exactly what
+    /// makes long-lived aggregates slow to recover. One-shot effects are not the problem;
+    /// the per-event ones are.
+    /// <para>
+    /// Read it inside <see cref="Mutate"/>, not in a constructor: the flag is set by replay
+    /// and cleared when initialization completes, so a live dispatch after recovery sees
+    /// false.
+    /// </para>
+    /// </remarks>
+    protected bool IsReplaying { get; private set; }
 
     /// <summary>
     /// May be null in tests or non-persistent scenarios (pure in-memory mode).
