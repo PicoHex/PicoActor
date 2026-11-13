@@ -16,7 +16,7 @@
       },
       "Microsoft.SourceLink.GitHub": {
         "type": "Direct",
-        "requested": "[11.0.100, )",
+        "requested": "[11.0.*, )",
         "resolved": "11.0.100",
         "contentHash": "aBHHGAxLog2OC1nbXyCFyfy1lG9qwYO/COBPc/5cJEqbXpiznmz+wxLU+TVrI+2LzQYFSKpn7pk+RHtx9eHe9w==",
         "dependencies": {
@@ -27,21 +27,21 @@
       },
       "PicoDI.Abs": {
         "type": "Direct",
-        "requested": "[2026.11.0, )",
-        "resolved": "2026.11.0",
-        "contentHash": "AaZOvYaf7UdlIKLaUFAD+PL1g4dY/27DUnZGzAxdNtXGv4hSgj+mIu9XJ8zlrpbn7bZo5QaRuQKirMTzDUHcXA=="
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "xehIWfCaRpVzFWxvg3C7/65pqkpD/mY4b2S4dwk4H2hWQNbZNe1/ZAFhEvre7OyI2srI6WRjJGPCElSVgEHIFA=="
       },
       "PicoLog.Abs": {
         "type": "Direct",
-        "requested": "[2026.11.0, )",
-        "resolved": "2026.11.0",
-        "contentHash": "/RDWj/WIv4JyhQMNi58uCA1ZXM4HI5Qmj4eC0o4nNPnaai0QQzdcuU8+SchnWWcHm4aGeRuna999Gylv6cDOGw=="
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "58IIOrC5CUXtDpHplyNo9juFJ81sXyOLweAHB8PFKAHbx0NEKXXqjWH7osrAHlnfygs4U/oL2VSJV3/vXMbe4w=="
       },
       "PicoMediator.Abs": {
         "type": "Direct",
-        "requested": "[2026.11.0, )",
-        "resolved": "2026.11.0",
-        "contentHash": "F50VHXdzI9xIH9E2IiCfcpvbpjqcB9JIrpZ8YEAYfH9hzt8VB+JuRHpwcBN+Yu6plSFsM5vCSE++KEQ8U68rEA=="
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "cWush6YBacYDs0wHC07mm2WjwgHZDglUGEDVb/9ILG1ugSfcZQJM6QZkn9E02WjHR2eSRRWwkqAn9NI5/ukHKw=="
       },
       "Microsoft.Build.Tasks.Git": {
         "type": "Transitive",
@@ -64,19 +64,19 @@
       "picoactor.abs": {
         "type": "Project",
         "dependencies": {
-          "PicoDI.Abs": "[2026.11.0, )",
+          "PicoDI.Abs": "[2026.11.*, )",
           "PicoMediator": "[2026.11.*, )",
-          "PicoMediator.Abs": "[2026.11.0, )"
+          "PicoMediator.Abs": "[2026.11.*, )"
         }
       },
       "PicoMediator": {
         "type": "CentralTransitive",
         "requested": "[2026.11.*, )",
-        "resolved": "2026.11.0",
-        "contentHash": "wPdZTbPXWaFuEZrWaWpvw/e04YFrgmEh8K1Q4Z8DQG8JeLe8c14t3i6y8CbqTpQzsV1vseSQZ9+6tQlbqeuIAg==",
+        "resolved": "2026.11.1",
+        "contentHash": "5opsTZgQ5pJm/8OhMq48Vczuxtspjhufa4QBWJHmjBAUmGwI0O41tftTcJhG/wYGdDOeQV1HIp9BAJNR/NvrBQ==",
         "dependencies": {
-          "PicoDI.Abs": "2026.11.0",
-          "PicoMediator.Abs": "2026.11.0"
+          "PicoDI.Abs": "2026.11.1",
+          "PicoMediator.Abs": "2026.11.1"
         }
       }
     }

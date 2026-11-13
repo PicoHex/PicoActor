@@ -33,14 +33,12 @@
     <!-- Default version for local / non-CI builds -->
     <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
 
-    <!-- Central Package Management -->
-    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-
     <!-- Committed NuGet lock files (one packages.lock.json per project).
-         Directory.Packages.props floats the analyzer-free first-party packages on
-         their 2026.<x>.* segment; the lock file is what makes that float reproducible
-         (identical graphs locally and in CI) and reviewable (a version move shows up
-         as a lock-file diff, not a silent restore-time upgrade).
+         Directory.Packages.props floats every dependency on its non-breaking (last)
+         segment — first-party 2026.<x>.*, official  x.y.* — and the lock file is what
+         makes those floats reproducible (identical graphs locally and in CI) and
+         reviewable (a version move shows up as a lock-file diff, not a silent
+         restore-time upgrade).
          CI restores with RestoreLockedMode=true — a stale lock file FAILS the build
          instead of being regenerated. .github/workflows/deps-refresh.yml is the only
          path that intentionally rewrites these files (the force-evaluate flag).
@@ -54,6 +52,10 @@
          dependency bug: dispatch deps-refresh.yml and merge its PR to re-stamp the
          SDK band. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!-- Central Package Management is NOT declared here: the single declaration lives
+         in Directory.Packages.props (the file that owns the versions), so the flag and
+         the PackageVersion items can never be edited apart or disagree. -->
 
     <!-- Deterministic builds when CI=true -->
     <Deterministic>true</Deterministic>
@@ -70,6 +72,47 @@
 
     <!-- Default: don't pack unless opted in -->
     <IsPackable Condition="'$(IsPackable)' == ''">false</IsPackable>
+  </PropertyGroup>
+
+  <!-- ═══════════════════════════════════════════════════════
+       Restore must stay RID-neutral, or the lock files are not
+       host-independent
+       ═══════════════════════════════════════════════════════
+
+       PublishAot=true (set per tier in Directory.Build.targets) makes the SDK infer, AT
+       RESTORE TIME, a publish RID of
+
+         UseDefaultPublishRuntimeIdentifier = true
+         PublishRuntimeIdentifier = $(NETCoreSdkPortableRuntimeIdentifier)
+
+       and append it to RuntimeIdentifiers so the publish-time runtime pack gets a
+       restore. That single inference baked a "net10.0/win-x64" dependency group into
+       this repo's committed lock files: the lock then recorded whichever host last
+       refreshed it. CI is a five RID matrix, so a lock generated on win-x64 fails
+       locked restore on the linux/osx legs and the other way round, with NU1004
+       "the project's runtime identifiers have changed" — green on one leg, red on the
+       other, decided by whoever happened to run the refresh.
+
+       Setting it to false drops the inference: RuntimeIdentifiers stays empty unless a
+       RID is actually asked for, so restore resolves the same graph and writes the same
+       lock on every host, and no committed lock describes a RID at all.
+
+       Nothing loses its RID: every publish in this repo passes an explicit -r (ci.yml's
+       AOT step, once per matrix leg), and a publish that passes -r still restores that
+       RID's assets itself. A publish that forgets -r now fails loudly at publish time
+       instead of silently baking the host RID into a committed lock.
+
+       Consequence for CI: because the solution restore is RID-neutral, a publish step
+       must NOT use the no-restore flag — the assets for net10.0/<rid> are not there and
+       it would fail with NETSDK1047. Each publish carries its own -r and restores that
+       RID first. (That RID restore does rewrite the lock file beside the project, but
+       only on the runner; a committed RID group is rejected by the locked restore.)
+
+       (No literal double hyphen appears in this comment: XML comments may not contain
+       one, and a props file that does not parse silently loses every property it
+       declares — which reads as NU1015, not as a syntax error.) -->
+  <PropertyGroup>
+    <UseDefaultPublishRuntimeIdentifier>false</UseDefaultPublishRuntimeIdentifier>
   </PropertyGroup>
 
   <!-- ═══════════════════════════════════════════════════════

@@ -96,6 +96,15 @@ jobs:
         # re-resolved graph (or a float that moved under us) FAILS here instead of
         # silently building against versions nobody reviewed. Refreshing the lock
         # files is the job of .github/workflows/deps-refresh.yml, not of a build.
+        #
+        # This restore is deliberately RID-NEUTRAL and must stay that way: PublishAot
+        # would otherwise have the SDK infer the host publish RID at restore time and
+        # bake a "net10.0/<host-rid>" group into the committed lock files
+        # (UseDefaultPublishRuntimeIdentifier=false in Directory.Build.props). A lock
+        # refreshed on win-x64 would then fail NU1004 "runtime identifiers have
+        # changed" on every other matrix leg. Consequence: NO RID-specific assets are
+        # produced here, so the AOT publish below must not use the no-restore flag —
+        # it would fail with NETSDK1047 (no target for net10.0/<rid>).
         run: dotnet restore PicoActor.slnx -p:UseProjectReferences=true -p:RestoreLockedMode=true
 
       - name: Build
@@ -111,27 +120,23 @@ jobs:
       # size levers) in its csproj; Abs/Gen guard against inherited PublishAot
       # via the netstandard2.0 guard block and TreatAsLocalProperty.
       #
-      # The solution restore above is RID-less, so the sample's assets have no
-      # net10.0/<rid> target — the no-restore publish below would fail with
-      # NETSDK1047. Restore the publish graph with the matrix RID first.
-      - name: Restore (AOT RID)
-        # Locked mode is deliberately OFF for this step: a `-r <rid>` restore REPLACES
-        # the runtime section of every packages.lock.json in the graph (it does not
-        # accumulate RIDs), so one committed lock file can never cover a 5-RID matrix —
-        # locked mode here fails with NU1004 "runtime identifiers have changed".
-        # Nothing is unguarded by that: the compile graph is already pinned by the
-        # locked solution restore above, and this step only adds the RID-specific
-        # runtime packs. A float bump can therefore never slip in through this restore.
-        run: >
-          dotnet restore samples/PicoActor.Sample/PicoActor.Sample.csproj
-          -r ${{ matrix.rid }}
-          -p:UseProjectReferences=true
-          -p:RestoreLockedMode=false
-
+      # The restore above is RID-neutral, so this publish restores ITS OWN RID
+      # (no no-restore flag — the net10.0/<rid> target does not exist yet and
+      # publishing would fail with NETSDK1047). Same shape as the PicoNode / PicoSerDe /
+      # PicoAgent AOT steps.
+      #
+      # Locked mode stays out of that implicit restore: a `-r <rid>` restore REPLACES
+      # the runtime section of the sample's packages.lock.json (it does not accumulate
+      # RIDs), so one committed lock can never cover a five-RID matrix and locked mode
+      # would fail with NU1004 "runtime identifiers have changed". Nothing is unguarded
+      # by that: the compile graph is already pinned by the locked solution restore
+      # above, and this step only adds RID-specific runtime packs, so a float bump can
+      # never slip in here. The rewritten lock stays on the runner — it is never
+      # committed, and a committed RID group would be rejected by the locked restore.
       - name: AOT publish (Counter sample)
         run: >
           dotnet publish samples/PicoActor.Sample/PicoActor.Sample.csproj
-          --no-restore -c Release -r ${{ matrix.rid }}
+          -c Release -r ${{ matrix.rid }}
           --self-contained
           -o publish/${{ matrix.rid }}
 
