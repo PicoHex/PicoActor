@@ -189,6 +189,12 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
     /// APPLIED during recovery is only a lost accelerator, so the runtime downgrades it to a
     /// warning and replays everything — there is no caller to notify.
     /// </para>
+    /// <para>
+    /// CONTRACT for the fallback: validate the payload BEFORE writing any state, and let the
+    /// restore be a pure "set fields from payload". A restore that mutates and then throws
+    /// leaves residue that the full replay does not roll back — it only re-applies events, so
+    /// anything set here that no event rebuilds would survive into the recovered instance.
+    /// </para>
     /// </summary>
     protected virtual void RestoreSnapshot(ulong version, ReadOnlySpan<byte> payload) =>
         throw new NotSupportedException(
