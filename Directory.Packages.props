@@ -6,26 +6,55 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+    <!-- Opt-in (NU1011): CPM refuses floating PackageVersion items unless this is set.
+         Floating is deliberate here — see the versioning rules in the ItemGroup below. -->
+    <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
   </PropertyGroup>
   <ItemGroup>
-    <!-- PicoHex stack — released together, kept version-aligned (the generated
-         bridge code compiles against PicoMediator/PicoDI). Dependabot groups them:
-         see .github/dependabot.yml. -->
-    <PackageVersion Include="PicoDI" Version="2026.11.0" />
+    <!-- PicoHex stack — first-party, released together as <year>.<x>.<y>.
+         Versioning spec: x + 1 = public API changed, y + 1 = public API unchanged.
+         Hence `2026.<x>.*` is the ONLY safe float — it accepts "API did not change"
+         releases and refuses a breaking x bump. `2026.*` is forbidden (crosses x).
+
+         FLOAT RULE (mechanical, per package — not a judgement call):
+           · package carries NO analyzers/dotnet dll  -> float to 2026.<x>.*
+           · package carries an analyzers/dotnet dll  -> PIN the exact version.
+             A generator/analyzer injects code into the CONSUMER's compilation, so a
+             y bump can change generated output even when the public API is unchanged:
+             "semantics changed, API did not", which the y rule does not cover.
+
+         Evidence (analyzers/ entries in the 2026.11.0 .nupkg):
+           PicoDI              0  -> floats
+           PicoDI.Abs          1  (analyzers/dotnet/cs/PicoDI.Gen.dll)       -> pinned
+           PicoLog.Abs         1  (analyzers/dotnet/cs/PicoLog.Gen.dll)      -> pinned
+           PicoMediator        0  -> floats
+           PicoMediator.Abs    1  (analyzers/dotnet/cs/PicoMediator.Gen.dll) -> pinned
+           PicoMediator.DI     0  -> floats
+
+         Floats are only reproducible because every project ships a committed
+         packages.lock.json (RestorePackagesWithLockFile in Directory.Build.props) and
+         CI restores in locked mode; .github/workflows/deps-refresh.yml is what makes
+         the floats actually move (weekly force-evaluate restore + PR). Without that
+         job a float is a freeze.
+         Dependabot groups them: see .github/dependabot.yml. -->
+    <PackageVersion Include="PicoDI" Version="2026.11.*" />
     <PackageVersion Include="PicoDI.Abs" Version="2026.11.0" />
     <PackageVersion Include="PicoLog.Abs" Version="2026.11.0" />
-    <PackageVersion Include="PicoMediator" Version="2026.11.0" />
+    <PackageVersion Include="PicoMediator" Version="2026.11.*" />
     <PackageVersion Include="PicoMediator.Abs" Version="2026.11.0" />
-    <PackageVersion Include="PicoMediator.DI" Version="2026.11.0" />
+    <PackageVersion Include="PicoMediator.DI" Version="2026.11.*" />
     <!-- Own packages: consumed by PackageReference when UseProjectReferences=false -->
     <PackageVersion Include="PicoActor" Version="$(Version)" />
     <PackageVersion Include="PicoActor.Abs" Version="$(Version)" />
-    <!-- Source generators (PicoActor.Gen) and generator tests -->
+    <!-- Source generators (PicoActor.Gen) and generator tests.
+         PINNED on purpose: Microsoft.CodeAnalysis.CSharp follows the Roslyn/SDK band —
+         a float would drag the generator onto a compiler API the SDK does not ship. -->
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
     <!-- Packing -->
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="11.0.100" />
     <!-- Tests — TUnit is NOT frozen: it tracks the latest release (a newer major of
-         the PicoHex stack must not hold it back), which Dependabot keeps current. -->
+         the PicoHex stack must not hold it back), which Dependabot keeps current.
+         PINNED to an exact version anyway: a TUnit minor bump changes its API. -->
     <PackageVersion Include="TUnit" Version="1.83.8" />
   </ItemGroup>
 </Project>

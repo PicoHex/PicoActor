@@ -36,6 +36,25 @@
     <!-- Central Package Management -->
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
 
+    <!-- Committed NuGet lock files (one packages.lock.json per project).
+         Directory.Packages.props floats the analyzer-free first-party packages on
+         their 2026.<x>.* segment; the lock file is what makes that float reproducible
+         (identical graphs locally and in CI) and reviewable (a version move shows up
+         as a lock-file diff, not a silent restore-time upgrade).
+         CI restores with RestoreLockedMode=true — a stale lock file FAILS the build
+         instead of being regenerated. .github/workflows/deps-refresh.yml is the only
+         path that intentionally rewrites these files (the force-evaluate flag).
+
+         Caveat worth knowing on the first NU1004: PublishAot=true (see
+         Directory.Build.targets) makes the SDK contribute Microsoft.NET.ILLink.Tasks
+         and Microsoft.DotNet.ILCompiler as implicit DIRECT dependencies, so a lock
+         file also pins the SDK's bundled runtime patch (e.g. 10.0.15). A runner that
+         rolls onto a newer 10.0.x band than the lock file was generated on therefore
+         fails locked restore with "packages lock file is inconsistent". That is not a
+         dependency bug: dispatch deps-refresh.yml and merge its PR to re-stamp the
+         SDK band. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
     <!-- Deterministic builds when CI=true -->
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
