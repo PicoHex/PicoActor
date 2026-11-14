@@ -229,6 +229,24 @@ var system = new ActorSystem(new ActorSystemOptions
 - `IsReplaying` ist `protected`: überschreiben Sie die `Mutate`-gesteuerte Read-Model-Veröffentlichung
   mit `if (IsReplaying) return;`, um O(n)-Arbeit pro abgespieltem Ereignis zu vermeiden
   (andernfalls ist ein Neuaufbau O(n²)).
+- Schema-Tag: überschreiben Sie `SnapshotSchema` (Standard `null`) mit einer Versionszeichenfolge
+  wie `"CounterState/v1"` und **erhöhen Sie sie, sobald sich das Layout der Nutzlast oder deren
+  Bedeutung ändert**. Eine Änderung macht alle gespeicherten Snapshots einmal ungültig — ein
+  vollständiges Replay — und die normale Geschwindigkeit kehrt zurück, sobald das Aggregat
+  weitere `SnapshotEveryNEvents` Ereignisse schreibt. Halten Sie es als Typkonstante: ein
+  instanzbezogener Wert, der sich zwischen schreibendem und neu aufbauendem Actor unterscheidet,
+  degradiert jede Wiederherstellung stillschweigend zu einem vollständigen Replay.
+- Bei einem Nicht-`null`-Tag verpackt das Framework die Nutzlast in einen Umschlag und vergleicht
+  die Tags bei der Wiederherstellung; eine Abweichung (oder eine Nutzlast ohne Umschlag, obwohl
+  der Actor ein Tag deklariert) verwirft den Snapshot und spielt den gesamten Stream ab. Nur
+  `null` schaltet den Schutz ab — `""` ist ein echtes Tag. Ein Tag mit mehr als 255 UTF-8-Bytes
+  schreibt gar keinen Snapshot (gemeldet über `OnSnapshotFailed`).
+  Der Store muss die Nutzlast weiterhin als **undurchsichtige Bytes** behandeln: nicht parsen
+  und nicht annehmen, dass sie exakt der Ausgabe von `TakeSnapshot()` entspricht.
+
+```
+[PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
+```
 
 ### Idle Passivation (opt-in) (Idle-Passivierung, optional)
 

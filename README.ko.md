@@ -227,6 +227,23 @@ var system = new ActorSystem(new ActorSystemOptions
 - `IsReplaying`은 `protected`입니다: `Mutate` 기반 리드 모델 발행을
   `if (IsReplaying) return;`으로 재정의하여 리플레이된 이벤트마다 O(n) 작업을
   피하세요(그렇지 않으면 재구성은 O(n²)이 됩니다).
+- 스키마 태그: `SnapshotSchema`(기본값 `null`)를 `"CounterState/v1"` 같은 버전
+  문자열로 재정의하고 **페이로드의 레이아웃이나 의미가 바뀔 때마다 올리세요**.
+  값을 바꾸면 저장된 스냅샷이 한 번 무효화됩니다(전체 리플레이 한 번).
+  정상 속도로 돌아오는 시점은 해당 애그리거트가 `SnapshotEveryNEvents`개의 이벤트를
+  다시 기록한 뒤입니다. 반드시 타입 수준 상수로 두세요. 인스턴스마다 다른 값이 되어
+  기록 인스턴스와 재구성 인스턴스가 어긋나면 모든 복구가 조용히 전체 리플레이로 퇴화합니다.
+- 태그가 `null`이 아니면 프레임워크가 페이로드를 봉투로 감싸고 복원 시 태그를 비교합니다.
+  불일치이거나, actor가 태그를 선언했는데 페이로드에 봉투가 없으면
+  해당 스냅샷을 버리고 전체 스트림을 리플레이합니다. `null`만이 유일한 해제 값이며
+  `""`도 실제 태그입니다. 태그가 UTF-8로 255바이트를 넘으면 스냅샷을 아예 쓰지 않습니다
+  (`OnSnapshotFailed`로 보고됩니다).
+  스토어는 이 페이로드를 **불투명 바이트**로 다뤄야 합니다. 파싱하거나
+  `TakeSnapshot()`의 출력과 같다고 가정하지 마세요.
+
+```
+[PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
+```
 
 ### Idle Passivation (opt-in)(유휴 패시베이션, 선택 사항)
 
