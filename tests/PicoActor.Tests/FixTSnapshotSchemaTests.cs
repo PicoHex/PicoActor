@@ -176,4 +176,121 @@ public sealed class FixTSnapshotSchemaTests
         await Assert.That(snap!.Payload.Length).IsEqualTo(4);
         await Assert.That(BitConverter.ToInt32(snap.Payload)).IsEqualTo(4);
     }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task Envelope_IsApplied_ReplayingOnlyTheTail(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "v1");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // 12 events, snapshot at v10 (value 9)
+        await system.StopAsync(actor.Id);
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(2);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task LegacyRawPayload_WithNullSchema_IsApplied(
+        CancellationToken cancellationToken = default
+    ) // regression pin: green on base
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, null);
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        await system.StopAsync(actor.Id);
+        // v10's state value is 9 (value = version - 1); overwrite with a raw (unenveloped) payload
+        await store.SaveSnapshotAsync(actor.Id, new ActorSnapshot(10, BitConverter.GetBytes(9)));
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(2);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task EmptyTag_IsARealTag_WrittenWithZeroLength(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        var snap = await store.LoadSnapshotAsync(actor.Id);
+        await Assert.That(snap!.Payload.Length).IsEqualTo(5 + 4);
+        await Assert.That(snap.Payload[4]).IsEqualTo((byte)0);
+        await system.StopAsync(actor.Id);
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(2);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task Envelope_IsRestoredTwiceFromTheSameStoredSnapshot(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "v1");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // snapshot at v10
+        await system.StopAsync(actor.Id);
+        // Copy: the store hands out the same instance, so a mutating restore would be invisible
+        // in a comparison against a live view.
+        var before = (await store.LoadSnapshotAsync(actor.Id))!.Payload.ToArray();
+
+        var first = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(first!.MutateCalls).IsEqualTo(2);
+        await Assert.That(await system.AskAsync<int>(first.Id, new SchemaGet())).IsEqualTo(11);
+        await system.StopAsync(actor.Id);
+        var second = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(second!.MutateCalls).IsEqualTo(2);
+        await Assert.That(await system.AskAsync<int>(second.Id, new SchemaGet())).IsEqualTo(11);
+        await Assert
+            .That((await store.LoadSnapshotAsync(actor.Id))!.Payload.SequenceEqual(before))
+            .IsTrue();
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task TruncatedEnvelope_IsRejected_WithInvalidOperationException(
+        CancellationToken cancellationToken = default
+    )
+    {
+        // Deterministic: call the public interface directly on an unattached instance.
+        var probe = new SchemaCounter();
+        var truncated = new byte[] { 0x50, 0x41, 0x53, 0x31, 0x09, 0x01, 0x02 }; // magic + schemaLen 9, 2 bytes left
+        var ex = await Assert
+            .That(() => ((ISnapshotableActor)probe).RestoreSnapshot(10, truncated))
+            .Throws<InvalidOperationException>();
+        await Assert.That(ex!.Message).Contains("truncated");
+
+        // End-to-end: the stored truncated envelope degrades to a full replay.
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "v1");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        await system.StopAsync(actor.Id);
+        await store.SaveSnapshotAsync(actor.Id, new ActorSnapshot(10, truncated));
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
+    }
 }

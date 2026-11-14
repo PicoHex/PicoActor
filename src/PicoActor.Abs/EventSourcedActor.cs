@@ -582,8 +582,64 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
         // loop, Version = events.Count.
         ReplayEventsFrom(0, events);
 
-    void ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload) =>
-        RestoreSnapshot(version, payload.AsSpan());
+    void ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload)
+    {
+        if (TryUnwrapSnapshot(payload, out var actorPayload, out _))
+        {
+            // A WINDOW on the store's array, not a copy: RestoreSnapshot takes a span, and the
+            // stored payload is read-only, so nothing is shifted in place.
+            RestoreSnapshot(version, actorPayload);
+            return;
+        }
+
+        RestoreSnapshot(version, payload); // no envelope: the whole span, byte-for-byte as before
+    }
+
+    /// <summary>
+    /// Detect a framework-owned envelope (see <see cref="SnapshotSchema"/>) and hand back the part
+    /// that belongs to the actor.
+    /// <para>
+    /// Returns <see langword="false"/> when there is NO envelope — a payload shorter than the
+    /// header, or one whose first four bytes are not <see cref="SnapshotMagic"/>; then
+    /// <paramref name="actorPayload"/> is the WHOLE span (never <c>default</c>) and
+    /// <paramref name="schema"/> is <see langword="null"/>. Whether that raw payload may be
+    /// applied is the caller's decision.
+    /// </para>
+    /// <para>
+    /// The magic is taken at face value: a payload that merely STARTS with those four bytes is
+    /// indistinguishable from an envelope, so a length byte that exceeds the remaining bytes is
+    /// reported as corruption rather than guessed at.
+    /// </para>
+    /// </summary>
+    private static bool TryUnwrapSnapshot(
+        ReadOnlySpan<byte> payload,
+        out ReadOnlySpan<byte> actorPayload,
+        out string? schema
+    )
+    {
+        actorPayload = payload;
+        schema = null;
+
+        var headerLength = SnapshotMagic.Length + 1;
+        if (
+            payload.Length < headerLength
+            || !payload[..SnapshotMagic.Length].SequenceEqual(SnapshotMagic)
+        )
+            return false;
+
+        var schemaLength = payload[SnapshotMagic.Length];
+        headerLength += schemaLength;
+        if (payload.Length < headerLength)
+            throw new InvalidOperationException(
+                $"snapshot envelope is truncated: schemaLen={schemaLength}, payload={payload.Length}"
+            );
+
+        // Non-throwing decode (Encoding.UTF8 replaces invalid sequences): a corrupt tag must land
+        // in the mismatch comparison, never in a DecoderFallbackException out of a recovery.
+        schema = Encoding.UTF8.GetString(payload.Slice(SnapshotMagic.Length + 1, schemaLength));
+        actorPayload = payload[headerLength..];
+        return true;
+    }
 
     void ISnapshotableActor.ReplayEventsFrom(
         ulong baseVersion,
