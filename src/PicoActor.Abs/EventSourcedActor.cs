@@ -491,7 +491,24 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
         {
             var schema = SnapshotSchema;
             if (schema is not null)
+            {
+                // The envelope length-prefixes the tag with ONE byte, so a longer tag cannot be
+                // stored at all. Skipping beats truncating: a truncated tag is a corrupt envelope
+                // that would be rejected as garbage on every read. A build-time defect therefore
+                // repeats on every threshold — expected, and not transient.
+                var byteCount = Encoding.UTF8.GetByteCount(schema);
+                if (byteCount > 255)
+                {
+                    ReportSnapshotFailure(
+                        new InvalidOperationException(
+                            $"snapshot schema is too long: {byteCount} UTF-8 bytes (max 255)."
+                        )
+                    );
+                    return;
+                }
+
                 payload = WrapSnapshot(schema, payload); // non-null here (checked above)
+            }
         }
         catch (Exception ex)
         {

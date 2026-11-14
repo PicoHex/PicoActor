@@ -392,4 +392,57 @@ public sealed class FixTSnapshotSchemaTests
         await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
         await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
     }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task OversizedTag_SkipsSnapshot_ReportsOnce_CommandSucceeds(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var failures = new SnapshotFailureSink();
+        var system = NewSystem(store, snapshotEvery: 12);
+        RegisterSameTag(system, new string('汉', 100), failures); // 300 UTF-8 bytes
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // 12 events = one trigger
+        await Assert.That(await store.LoadSnapshotAsync(actor.Id)).IsNull();
+        await Assert.That(failures.Failures.Count).IsEqualTo(1);
+        await Assert.That(await system.AskAsync<int>(actor.Id, new SchemaGet())).IsEqualTo(11); // still usable
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task ThrowingSnapshotSchema_DoesNotFailTheCommand(
+        CancellationToken cancellationToken = default
+    ) // regression pin: green since Task 1
+    {
+        var store = new InMemoryEventStore();
+        var failures = new SnapshotFailureSink();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "v1", failures, throwOnSchema: true);
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0)); // must not throw
+        for (var i = 0; i < 4; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // must not throw
+        await Assert.That(await store.LoadSnapshotAsync(actor.Id)).IsNull();
+        await Assert.That(failures.Failures.Count).IsEqualTo(1);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task ThrowingTakeSnapshot_DoesNotFailTheCommand(
+        CancellationToken cancellationToken = default
+    ) // regression pin: green on base
+    {
+        var store = new InMemoryEventStore();
+        var failures = new SnapshotFailureSink();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, null, failures, throwOnTake: true);
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 4; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        await Assert.That(await store.LoadSnapshotAsync(actor.Id)).IsNull();
+        await Assert.That(failures.Failures.Count).IsEqualTo(1);
+        await Assert.That(await system.AskAsync<int>(actor.Id, new SchemaGet())).IsEqualTo(4);
+    }
 }
