@@ -1,31 +1,70 @@
 <Project>
-  <!-- Central Package Management.
-       Only packages this repo actually references are declared: CPM + transitive
-       pinning means every extra entry forces a dependency upgrade that the repo
-       does not consume. Shared build properties live in Directory.Build.props. -->
+  <!-- Central Package Management. Only the packages this repo actually references are
+       declared: CPM + transitive pinning means every extra entry forces a dependency
+       upgrade that the repo does not consume. Shared build properties live in
+       Directory.Build.props, except the CPM enable flag below — it is declared HERE and
+       only here, next to the versions it governs, so the two cannot be edited apart. -->
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+    <!-- Opt-in (NU1011): CPM refuses floating PackageVersion items unless this is set.
+         Floating is deliberate here — see the float rule in the ItemGroup below. -->
+    <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
   </PropertyGroup>
   <ItemGroup>
-    <!-- PicoHex stack — released together, kept version-aligned (the generated
-         bridge code compiles against PicoMediator/PicoDI). Dependabot groups them:
-         see .github/dependabot.yml. -->
-    <PackageVersion Include="PicoDI" Version="2026.10.0" />
-    <PackageVersion Include="PicoDI.Abs" Version="2026.10.0" />
-    <PackageVersion Include="PicoLog.Abs" Version="2026.10.0" />
-    <PackageVersion Include="PicoMediator" Version="2026.10.0" />
-    <PackageVersion Include="PicoMediator.Abs" Version="2026.10.0" />
-    <PackageVersion Include="PicoMediator.DI" Version="2026.10.0" />
-    <!-- Own packages: consumed by PackageReference when UseProjectReferences=false -->
+    <!-- ═══════════════════════════════════════════════════════
+         FLOAT RULE — sole authority, applied mechanically per package.
+
+         Float ONLY the segment that is promised not to break, i.e. the LAST one:
+
+           · first-party Pico*   <year>.<x>.<y>   ->   <year>.<x>.*
+             x + 1 = public API changed, y + 1 = public API unchanged,
+             so <year>.<x>.* accepts "API unchanged" releases and refuses a
+             breaking x bump. <year>.* is forbidden: it crosses x.
+
+           · official / third-party   x.y.z   ->   x.y.*
+             x = major (breaking), y = feature, z = fix,
+             so x.y.* accepts fixes and refuses a feature bump.
+
+           · Version="$(Version)" is exempt: those are the packages this repo
+             releases itself, versioned by the tag, not by a feed range.
+
+         Reproducibility comes from the lock files, not from pinning: every project
+         ships a committed packages.lock.json (RestorePackagesWithLockFile in
+         Directory.Build.props) and CI restores with RestoreLockedMode=true, so a
+         float is held to exactly what was reviewed. .github/workflows/deps-refresh.yml
+         is the only path that re-resolves the floats (a force-evaluate restore plus a
+         PR), which is what makes a float actually move instead of freezing.
+         Dependabot groups them: see .github/dependabot.yml.
+
+         Known consequence of floating PicoDI.Abs / PicoLog.Abs / PicoMediator.Abs:
+         each ships an analyzers/dotnet/cs dll, so a y release can change emitted
+         generated code even when the public API did not. The rule still floats them
+         (the promise is about the API and the source generator is where the ecosystem
+         ships its fixes); the committed lock file is what makes such a move visible in
+         review instead of arriving at restore time.
+         (No literal double hyphen appears in this comment: XML comments may not
+         contain one, and a props file that fails to parse loses every property it
+         declares — the symptom is NU1015 "no version for package", not a syntax
+         error.) -->
+    <PackageVersion Include="PicoDI" Version="2026.11.*" />
+    <PackageVersion Include="PicoDI.Abs" Version="2026.11.*" />
+    <PackageVersion Include="PicoLog.Abs" Version="2026.11.*" />
+    <PackageVersion Include="PicoMediator" Version="2026.11.*" />
+    <PackageVersion Include="PicoMediator.Abs" Version="2026.11.*" />
+    <PackageVersion Include="PicoMediator.DI" Version="2026.11.*" />
+    <!-- Own packages: consumed by PackageReference when UseProjectReferences=false.
+         Exempt from the float rule: $(Version) is this repo's own release version. -->
     <PackageVersion Include="PicoActor" Version="$(Version)" />
     <PackageVersion Include="PicoActor.Abs" Version="$(Version)" />
-    <!-- Source generators (PicoActor.Gen) and generator tests -->
-    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
-    <!-- Packing -->
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.401" />
-    <!-- Tests — TUnit is NOT frozen: it tracks the latest release (a newer major of
-         the PicoHex stack must not hold it back), which Dependabot keeps current. -->
-    <PackageVersion Include="TUnit" Version="1.68.4" />
+    <!-- Source generators (PicoActor.Gen) and generator tests.
+         5.9.* — the fix segment floats, the 5.9 band does not: a 5.10 would move the
+         generator onto a compiler API the pinned SDK does not ship. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.*" />
+    <!-- Packing: 11.0.* (fix segment floats) -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="11.0.*" />
+    <!-- Tests: 1.83.* (fix segment floats). A newer minor of TUnit changes its API,
+         so 1.83 is the ceiling until someone opens a PR for the next band. -->
+    <PackageVersion Include="TUnit" Version="1.83.*" />
   </ItemGroup>
 </Project>

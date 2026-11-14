@@ -1,0 +1,131 @@
+# PicoActor dependency refresh — the ONLY mechanism that lets the floats MOVE.
+#
+# Directory.Packages.props floats the analyzer-free first-party packages on their
+# 2026.<x>.* segment, and every project commits a packages.lock.json so the float stays
+# reproducible. A committed lock file is, by construction, frozen — ci.yml restores in
+# locked mode precisely so a build cannot drift. This job is the counterpart: it
+# re-resolves the floats against the live feeds on demand and opens a PR with the
+# lock-file diff, so a y release of PicoDI / PicoMediator / PicoMediator.DI can actually
+# reach consumers. Without this job, floating would be indistinguishable from pinning.
+
+name: Deps refresh (y float)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deps-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  DOTNET_VERSION: 10.0.x
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  refresh:
+    name: Re-evaluate floats
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # NuGet.config maps a local folder feed (artifacts/nupkg); it must exist before
+      # restore or NuGet fails with NU1301 — same as the build jobs in ci.yml.
+      - name: Prepare local feed
+        shell: bash
+        run: mkdir -p artifacts/nupkg
+
+      # --force-evaluate ignores the versions already recorded in packages.lock.json
+      # and re-resolves the floating ranges against the live feeds. --use-lock-file is
+      # implied (RestorePackagesWithLockFile=true in Directory.Build.props) and locked
+      # mode is deliberately NOT requested: this step exists to rewrite the lock files.
+      - name: Re-resolve floating versions
+        run: >
+          dotnet restore PicoActor.slnx
+          --force-evaluate
+          -p:UseProjectReferences=true
+
+      # scripts/api-surface is not part of PicoActor.slnx; restore it too so a lock file
+      # it gains later is never left stale by the refresh.
+      - name: Re-resolve floating versions (dev tool)
+        run: >
+          dotnet restore scripts/api-surface/ApiSurface.csproj
+          --force-evaluate
+
+      # Exact add: only lock files, nothing else — a refresh PR that also carries
+      # source or csproj churn would hide the version move it is supposed to expose.
+      - name: Stage lock files
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -name packages.lock.json -not -path '*/obj/*' -print0 | xargs -0 git add --
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Lock files already current — no y release moved under the floats."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo '### packages.lock.json diff'
+            echo '```'
+            git diff --cached --stat
+            echo '```'
+            echo
+            echo 'Resolved versions now in the lock files:'
+            echo
+            echo '```'
+            git diff --cached -- '*.lock.json' | grep -E '^[+-].*"resolved"' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit and open PR
+        if: steps.stage.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # Single bot-owned branch, rewritten every run: the refresh is idempotent, so
+          # "latest resolution" is the only state worth keeping.
+          branch="chore/deps-refresh"
+          short_sha="$(git rev-parse --short HEAD)"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$branch"
+          git commit -m "build(deps): refresh packages.lock.json (y-segment floats)"
+          git push --force origin "$branch"
+
+          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
+            echo "PR for $branch is already open — the force push updated it."
+            exit 0
+          fi
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$branch" \
+            --title 'build(deps): refresh lock files (y-segment floats)' \
+            --body "$(cat <<EOF
+          Automated re-resolution of the \`2026.<x>.*\` floats declared in
+          \`Directory.Packages.props\` (\`dotnet restore --force-evaluate\`, lock files only).
+
+          Only analyzer-free first-party packages float; packages that ship an
+          \`analyzers/dotnet\` dll (PicoDI.Abs, PicoLog.Abs, PicoMediator.Abs) stay pinned,
+          and so do Microsoft.CodeAnalysis.CSharp and TUnit.
+
+          Generated from ${short_sha} by \`.github/workflows/deps-refresh.yml\`.
+          Review the version moves above, then let CI (locked mode) validate them.
+          EOF
+          )"
