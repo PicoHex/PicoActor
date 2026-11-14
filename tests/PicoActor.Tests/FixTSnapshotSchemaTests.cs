@@ -444,6 +444,7 @@ public sealed class FixTSnapshotSchemaTests
             await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // 12 events = one trigger
         await Assert.That(await store.LoadSnapshotAsync(actor.Id)).IsNull();
         await Assert.That(failures.Failures.Count).IsEqualTo(1);
+        await Assert.That(failures.Failures[0].Message).Contains("255"); // the max is part of the diagnosis
         await Assert.That(await system.AskAsync<int>(actor.Id, new SchemaGet())).IsEqualTo(11); // still usable
     }
 
@@ -505,6 +506,12 @@ public sealed class FixTSnapshotSchemaTests
         await Assert.That(payload[4]).IsEqualTo((byte)255); // the prefix survives as 255, not 0
         await Assert.That(payload[5..260].SequenceEqual(tagBytes)).IsTrue();
         await Assert.That(BitConverter.ToInt32(payload, 260)).IsEqualTo(4);
+
+        // read side of the max-length tag: v5 snapshot, no tail -> zero Mutate calls
+        await system.StopAsync(actor.Id);
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(0);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(4);
     }
 
     [Test]
