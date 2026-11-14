@@ -132,6 +132,7 @@ P:PicoActor.Abs.Envelope.Command : PicoActor.Abs.ICommand { get; init; }
 P:PicoActor.Abs.Envelope.Tcs : System.Threading.Tasks.TaskCompletionSource`1<object> { get; init; }
 P:PicoActor.Abs.EventSourcedActor.CanBePassivated : bool { get; }
 P:PicoActor.Abs.EventSourcedActor.IsReplaying : bool { get; }
+P:PicoActor.Abs.EventSourcedActor.SnapshotSchema : string { get; }
 P:PicoActor.Abs.EventSourcedActor.Version : ulong { get; protected set; }
 P:PicoActor.Abs.IActor.Id : System.Guid { get; }
 P:PicoActor.Abs.IEventSourcedActor.Version : ulong { get; }
