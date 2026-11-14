@@ -190,6 +190,19 @@ public sealed class FixTSnapshotSchemaTests
         for (var i = 0; i < 11; i++)
             await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // 12 events, snapshot at v10 (value 9)
         await system.StopAsync(actor.Id);
+        // Pin the refusal MESSAGE: through the system a mismatch is only a logged warning, so the
+        // wording has no other witness. It must name BOTH tags — a message that only says
+        // "mismatch" leaves the operator unable to tell which side changed.
+        var stored = (await store.LoadSnapshotAsync(actor.Id))!;
+        var v2Probe = new SchemaCounter { Tag = "v2" };
+        var mismatch = await Assert
+            .That(() =>
+                ((ISnapshotableActor)v2Probe).RestoreSnapshot(stored.Version, stored.Payload)
+            )
+            .Throws<InvalidOperationException>();
+        await Assert.That(mismatch!.Message).Contains("stored 'v1'");
+        await Assert.That(mismatch!.Message).Contains("current 'v2'");
+
         var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
         await Assert.That(rebuilt).IsNotNull();
         await Assert.That(rebuilt!.MutateCalls).IsEqualTo(2);
@@ -333,6 +346,16 @@ public sealed class FixTSnapshotSchemaTests
         // A VALID raw payload the actor would accept: v10 = 9. Nothing in the bytes says which
         // shape wrote them, so a declared-tag actor cannot prove they are its own.
         await store.SaveSnapshotAsync(actor.Id, new ActorSnapshot(10, BitConverter.GetBytes(9)));
+        // Bare payload + a declared tag is the OTHER refusal, and it must say so: nothing in these
+        // bytes identifies the shape that wrote them, so this is not a mismatch (there is no tag to
+        // compare) and the message must not pretend otherwise.
+        var tagged = new SchemaCounter { Tag = "v1" };
+        var unversioned = await Assert
+            .That(() => ((ISnapshotableActor)tagged).RestoreSnapshot(10, BitConverter.GetBytes(9)))
+            .Throws<InvalidOperationException>();
+        await Assert.That(unversioned!.Message).Contains("unversioned");
+        await Assert.That(unversioned!.Message).Contains("'v1'");
+
         var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
         await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
         await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
@@ -351,6 +374,19 @@ public sealed class FixTSnapshotSchemaTests
         for (var i = 0; i < 11; i++)
             await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
         await system.StopAsync(actor.Id);
+        // The same v1 envelope against a rebuild that declares NO tag still takes the MISMATCH
+        // branch (an envelope exists and carries a stored tag), so null is rendered explicitly:
+        // "current ''" would hide the cause behind an empty string.
+        var stored = (await store.LoadSnapshotAsync(actor.Id))!;
+        var nullProbe = new SchemaCounter { Tag = null };
+        var mismatch = await Assert
+            .That(() =>
+                ((ISnapshotableActor)nullProbe).RestoreSnapshot(stored.Version, stored.Payload)
+            )
+            .Throws<InvalidOperationException>();
+        await Assert.That(mismatch!.Message).Contains("stored 'v1'");
+        await Assert.That(mismatch!.Message).Contains("current '<null>'");
+
         var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
         await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
         for (var i = 0; i < 5; i++)
@@ -444,5 +480,50 @@ public sealed class FixTSnapshotSchemaTests
         await Assert.That(await store.LoadSnapshotAsync(actor.Id)).IsNull();
         await Assert.That(failures.Failures.Count).IsEqualTo(1);
         await Assert.That(await system.AskAsync<int>(actor.Id, new SchemaGet())).IsEqualTo(4);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task TagOf255Bytes_IsWritten(CancellationToken cancellationToken = default)
+    {
+        // 255 is the LAST tag that fits: the envelope length-prefixes it with ONE byte. ASCII keeps
+        // bytes == chars, so this isolates the boundary from any encoding question.
+        var tag = new string('a', 255);
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, tag);
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 4; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // 5 events -> snapshot at v5
+
+        var snap = await store.LoadSnapshotAsync(actor.Id);
+        await Assert.That(snap).IsNotNull();
+        var payload = snap!.Payload;
+        var tagBytes = System.Text.Encoding.UTF8.GetBytes(tag);
+        await Assert.That(tagBytes.Length).IsEqualTo(255);
+        await Assert.That(payload.Length).IsEqualTo(5 + 255 + 4);
+        await Assert.That(payload[4]).IsEqualTo((byte)255); // the prefix survives as 255, not 0
+        await Assert.That(payload[5..260].SequenceEqual(tagBytes)).IsTrue();
+        await Assert.That(BitConverter.ToInt32(payload, 260)).IsEqualTo(4);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task TagOf256Bytes_SkipsSnapshot(CancellationToken cancellationToken = default)
+    {
+        // 256 does NOT fit in the one-byte prefix. Skipping beats truncating (a truncated tag is a
+        // corrupt envelope, rejected on every read), and it must never fail the flushed command.
+        var tag = new string('a', 256);
+        var store = new InMemoryEventStore();
+        var failures = new SnapshotFailureSink();
+        var system = NewSystem(store, snapshotEvery: 12);
+        RegisterSameTag(system, tag, failures);
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // 12 events = one trigger
+
+        await Assert.That(await store.LoadSnapshotAsync(actor.Id)).IsNull();
+        await Assert.That(failures.Failures.Count).IsEqualTo(1);
+        await Assert.That(await system.AskAsync<int>(actor.Id, new SchemaGet())).IsEqualTo(11); // usable
     }
 }
