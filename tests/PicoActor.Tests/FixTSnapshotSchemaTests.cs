@@ -293,4 +293,103 @@ public sealed class FixTSnapshotSchemaTests
         await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
         await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
     }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task ChangedTag_IsRejected_AndFullReplay_ThenSelfHealsAtNextThreshold(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterTagChange(system, createTag: "v1", rebuildTag: "v2");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1)); // v10 snapshot, value 9
+        await system.StopAsync(actor.Id);
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12); // full replay
+        for (var i = 0; i < 5; i++)
+            await system.AskAsync<object?>(rebuilt.Id, new SchemaAdd(1)); // v17: one more snapshot
+        var snap = await store.LoadSnapshotAsync(rebuilt.Id);
+        var tagBytes = System.Text.Encoding.UTF8.GetBytes("v2");
+        await Assert.That(snap!.Payload[0..4].SequenceEqual("PAS1"u8.ToArray())).IsTrue();
+        await Assert.That(snap.Payload[5..(5 + tagBytes.Length)].SequenceEqual(tagBytes)).IsTrue();
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task LegacyRawPayload_WithDeclaredSchema_IsRejected_FullReplay(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "v1");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        await system.StopAsync(actor.Id);
+        // A VALID raw payload the actor would accept: v10 = 9. Nothing in the bytes says which
+        // shape wrote them, so a declared-tag actor cannot prove they are its own.
+        await store.SaveSnapshotAsync(actor.Id, new ActorSnapshot(10, BitConverter.GetBytes(9)));
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task Envelope_WithNullSchema_IsRejected(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterTagChange(system, createTag: "v1", rebuildTag: null);
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        await system.StopAsync(actor.Id);
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
+        for (var i = 0; i < 5; i++)
+            await system.AskAsync<object?>(rebuilt.Id, new SchemaAdd(1));
+        var snap = await store.LoadSnapshotAsync(rebuilt.Id);
+        await Assert.That(snap!.Payload[0..4].SequenceEqual("PAS1"u8.ToArray())).IsFalse(); // self-heal: raw again
+    }
+
+    [Test]
+    [Timeout(15000)]
+    public async Task LegacyPayloadStartingWithMagic_IsRejected(
+        CancellationToken cancellationToken = default
+    )
+    {
+        var store = new InMemoryEventStore();
+        var system = NewSystem(store, snapshotEvery: 5);
+        RegisterSameTag(system, "v1");
+        var actor = await system.CreateAsync<SchemaCounter>(new SchemaCreate(0));
+        for (var i = 0; i < 11; i++)
+            await system.AskAsync<object?>(actor.Id, new SchemaAdd(1));
+        await system.StopAsync(actor.Id);
+        var payload = new byte[]
+        {
+            0x50,
+            0x41,
+            0x53,
+            0x31,
+            0x03,
+            (byte)'a',
+            (byte)'b',
+            (byte)'c',
+            9,
+            0,
+            0,
+            0,
+        };
+        await store.SaveSnapshotAsync(actor.Id, new ActorSnapshot(10, payload));
+        var rebuilt = await system.GetAsync<SchemaCounter>(actor.Id);
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(12);
+        await Assert.That(await system.AskAsync<int>(rebuilt.Id, new SchemaGet())).IsEqualTo(11);
+    }
 }

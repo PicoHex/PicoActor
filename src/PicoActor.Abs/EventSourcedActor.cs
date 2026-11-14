@@ -584,15 +584,29 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
 
     void ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload)
     {
-        if (TryUnwrapSnapshot(payload, out var actorPayload, out _))
+        if (!TryUnwrapSnapshot(payload, out var actorPayload, out var stored))
         {
-            // A WINDOW on the store's array, not a copy: RestoreSnapshot takes a span, and the
-            // stored payload is read-only, so nothing is shifted in place.
-            RestoreSnapshot(version, actorPayload);
+            // No envelope. Backward compatible ONLY while this actor declares no shape: without a
+            // tag there is nothing to compare, so the payload was produced by whatever shape wrote
+            // it and applying it would be exactly the silent mismatch this feature exists to stop.
+            var current = SnapshotSchema;
+            if (current is not null)
+                throw new InvalidOperationException(
+                    $"unversioned snapshot ignored because the actor declares schema '{current}'."
+                );
+
+            RestoreSnapshot(version, actorPayload); // the whole span, byte-for-byte as before
             return;
         }
 
-        RestoreSnapshot(version, payload); // no envelope: the whole span, byte-for-byte as before
+        if (!string.Equals(stored, SnapshotSchema, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"snapshot schema mismatch: stored '{stored}' vs current '{SnapshotSchema ?? "<null>"}'."
+            );
+
+        // A WINDOW on the store's array, not a copy: RestoreSnapshot takes a span, and the stored
+        // payload is read-only, so nothing is shifted in place.
+        RestoreSnapshot(version, actorPayload);
     }
 
     /// <summary>
