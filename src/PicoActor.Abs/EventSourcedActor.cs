@@ -145,6 +145,74 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
     public virtual bool CanBePassivated => true;
 
     /// <summary>
+    /// State-shape tag stamped into the snapshot payload, so recovery never applies bytes
+    /// written by a DIFFERENT shape. <see langword="null"/> (the base default) disables the
+    /// envelope: the payload is stored and restored byte-for-byte, exactly as before.
+    /// <para>
+    /// <b>Bump this whenever the state shape changes</b> (a field added, removed, or re-typed, or
+    /// an existing field whose meaning changed). Changing it invalidates older snapshots ONCE:
+    /// the next rebuild replays the whole stream, and normal speed returns after the aggregate
+    /// has flushed another <c>SnapshotEveryNEvents</c> events, which overwrites the stale
+    /// payload. Nothing is deleted and nothing is lost — history is never truncated.
+    /// </para>
+    /// <para>
+    /// Only <see langword="null"/> disables the envelope. <c>""</c> is a REAL tag: it is written
+    /// with <c>schemaLen = 0</c> and validated like any other, so <c>string.IsNullOrEmpty</c> must
+    /// never stand in for the null check on either side (that would write raw and then reject its
+    /// own payload forever).
+    /// </para>
+    /// <para>
+    /// <b>The tag must be a property of the TYPE, not of per-instance injected state.</b> The
+    /// value read by a rebuild instance is compared with the value the writing instance
+    /// produced, so when it does come from a field, the create factory and the rebuild factory
+    /// must set it identically — a mismatch turns EVERY recovery into a full replay, with only a
+    /// warning as evidence.
+    /// </para>
+    /// <para>
+    /// The envelope is framework-owned and lives inside the opaque payload
+    /// (<c>"PAS1" + 1-byte UTF-8 length + tag + payload</c>), so stores and
+    /// <see cref="ActorSnapshot"/> are unchanged. An <see cref="ISnapshotableActor"/> implemented
+    /// OUTSIDE this base class gets no help here: it would have to unwrap the envelope itself,
+    /// i.e. slice past the header before handing the bytes to its own restore logic.
+    /// </para>
+    /// <para>
+    /// Keep tags plain ASCII/UTF-8 text of at most 255 UTF-8 bytes: a longer tag cannot be
+    /// length-prefixed in one byte, so snapshotting is skipped for that type (and the failure is
+    /// reported through <see cref="OnSnapshotFailed"/> on every threshold). A tag containing a
+    /// lone surrogate never round-trips, because encoding replaces it.
+    /// </para>
+    /// </summary>
+    protected virtual string? SnapshotSchema => null;
+
+    /// <summary>
+    /// The 4-byte marker that opens a framework-owned snapshot envelope. It is the CONTAINER
+    /// version and never changes: a future format revision adds fields inside the tag, so an
+    /// older binary keeps reading an unknown payload as "no envelope" instead of half-parsing
+    /// it.
+    /// </summary>
+    private static ReadOnlySpan<byte> SnapshotMagic => "PAS1"u8;
+
+    /// <summary>
+    /// Wrap <paramref name="payload"/> into <c>[magic][schemaLen][schema][payload]</c>, where
+    /// <paramref name="schema"/> is encoded as UTF-8 and <c>schemaLen</c> is its BYTE count
+    /// (0..255).
+    /// <para>
+    /// Returns a NEW array: the buffer <see cref="TakeSnapshot"/> returned may be a reusable one,
+    /// and shifting its bytes in place would corrupt the producer's next payload.
+    /// </para>
+    /// </summary>
+    private static byte[] WrapSnapshot(string schema, byte[] payload)
+    {
+        var schemaLength = Encoding.UTF8.GetByteCount(schema);
+        var wrapped = new byte[SnapshotMagic.Length + 1 + schemaLength + payload.Length];
+        SnapshotMagic.CopyTo(wrapped);
+        wrapped[SnapshotMagic.Length] = (byte)schemaLength;
+        Encoding.UTF8.GetBytes(schema, wrapped.AsSpan(SnapshotMagic.Length + 1, schemaLength));
+        payload.CopyTo(wrapped, SnapshotMagic.Length + 1 + schemaLength);
+        return wrapped;
+    }
+
+    /// <summary>
     /// Produce the state this aggregate is fully described by, at the current
     /// <see cref="Version"/>. Return null (the base default) to opt out: the type does not
     /// snapshot, and recovery keeps replaying the whole stream.
@@ -415,6 +483,39 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
         if (payload is null)
             return; // The type opts out of snapshotting.
 
+        // A separate failure scope from the TakeSnapshot try above (that one has closed): the tag
+        // read and its encoding are subclass code, and an exception here must not escape as a
+        // failed AskAsync — the command's batch is already durable and already applied, so a
+        // caller-visible failure would make it retry a command that succeeded.
+        try
+        {
+            var schema = SnapshotSchema;
+            if (schema is not null)
+            {
+                // The envelope length-prefixes the tag with ONE byte, so a longer tag cannot be
+                // stored at all. Skipping beats truncating: a truncated tag is a corrupt envelope
+                // that would be rejected as garbage on every read. A build-time defect therefore
+                // repeats on every threshold — expected, and not transient.
+                var byteCount = Encoding.UTF8.GetByteCount(schema);
+                if (byteCount > 255)
+                {
+                    ReportSnapshotFailure(
+                        new InvalidOperationException(
+                            $"snapshot schema is too long: {byteCount} UTF-8 bytes (max 255)."
+                        )
+                    );
+                    return;
+                }
+
+                payload = WrapSnapshot(schema, payload); // non-null here (checked above)
+            }
+        }
+        catch (Exception ex)
+        {
+            ReportSnapshotFailure(ex);
+            return;
+        }
+
         try
         {
             // The write observes the actor's stop token like any other I/O of this actor: a
@@ -498,8 +599,81 @@ public abstract class EventSourcedActor : Actor, IEventSourcedActor, ISnapshotab
         // loop, Version = events.Count.
         ReplayEventsFrom(0, events);
 
-    void ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload) =>
-        RestoreSnapshot(version, payload.AsSpan());
+    void ISnapshotableActor.RestoreSnapshot(ulong version, byte[] payload)
+    {
+        // Read the declared tag ONCE: it is subclass code, so the comparison and the message must
+        // not be able to disagree (or to throw from inside the message instead of the comparison).
+        var current = SnapshotSchema;
+
+        if (!TryUnwrapSnapshot(payload, out var actorPayload, out var stored))
+        {
+            // No envelope. Backward compatible ONLY while this actor declares no shape: without a
+            // tag there is nothing to compare, so the payload was produced by whatever shape wrote
+            // it and applying it would be exactly the silent mismatch this feature exists to stop.
+            if (current is not null)
+                throw new InvalidOperationException(
+                    $"unversioned snapshot ignored because the actor declares schema '{current}'."
+                );
+
+            RestoreSnapshot(version, actorPayload); // the whole span, byte-for-byte as before
+            return;
+        }
+
+        if (!string.Equals(stored, current, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"snapshot schema mismatch: stored '{stored}' vs current '{current ?? "<null>"}'."
+            );
+
+        // A WINDOW on the store's array, not a copy: RestoreSnapshot takes a span, and the stored
+        // payload is read-only, so nothing is shifted in place.
+        RestoreSnapshot(version, actorPayload);
+    }
+
+    /// <summary>
+    /// Detect a framework-owned envelope (see <see cref="SnapshotSchema"/>) and hand back the part
+    /// that belongs to the actor.
+    /// <para>
+    /// Returns <see langword="false"/> when there is NO envelope — a payload shorter than the
+    /// header, or one whose first four bytes are not <see cref="SnapshotMagic"/>; then
+    /// <paramref name="actorPayload"/> is the WHOLE span (never <c>default</c>) and
+    /// <paramref name="schema"/> is <see langword="null"/>. Whether that raw payload may be
+    /// applied is the caller's decision.
+    /// </para>
+    /// <para>
+    /// The magic is taken at face value: a payload that merely STARTS with those four bytes is
+    /// indistinguishable from an envelope, so a length byte that exceeds the remaining bytes is
+    /// reported as corruption rather than guessed at.
+    /// </para>
+    /// </summary>
+    private static bool TryUnwrapSnapshot(
+        ReadOnlySpan<byte> payload,
+        out ReadOnlySpan<byte> actorPayload,
+        out string? schema
+    )
+    {
+        actorPayload = payload;
+        schema = null;
+
+        var headerLength = SnapshotMagic.Length + 1;
+        if (
+            payload.Length < headerLength
+            || !payload[..SnapshotMagic.Length].SequenceEqual(SnapshotMagic)
+        )
+            return false;
+
+        var schemaLength = payload[SnapshotMagic.Length];
+        headerLength += schemaLength;
+        if (payload.Length < headerLength)
+            throw new InvalidOperationException(
+                $"snapshot envelope is truncated: schemaLen={schemaLength}, payload={payload.Length}"
+            );
+
+        // Non-throwing decode (Encoding.UTF8 replaces invalid sequences): a corrupt tag must land
+        // in the mismatch comparison, never in a DecoderFallbackException out of a recovery.
+        schema = Encoding.UTF8.GetString(payload.Slice(SnapshotMagic.Length + 1, schemaLength));
+        actorPayload = payload[headerLength..];
+        return true;
+    }
 
     void ISnapshotableActor.ReplayEventsFrom(
         ulong baseVersion,
