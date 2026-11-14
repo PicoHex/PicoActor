@@ -241,6 +241,8 @@ var system = new ActorSystem(new ActorSystemOptions
   descarta la instantánea y reproduce el flujo completo. Solo `null` desactiva la protección —
   `""` es una etiqueta real. Una etiqueta de más de 255 bytes UTF-8 no escribe ninguna
   instantánea (se reporta mediante `OnSnapshotFailed`).
+  El store debe seguir tratando la carga como **bytes opacos**: no la analice ni asuma que es
+  exactamente la salida de `TakeSnapshot()`.
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

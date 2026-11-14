@@ -241,6 +241,8 @@ var system = new ActorSystem(new ActorSystemOptions
   der Actor ein Tag deklariert) verwirft den Snapshot und spielt den gesamten Stream ab. Nur
   `null` schaltet den Schutz ab — `""` ist ein echtes Tag. Ein Tag mit mehr als 255 UTF-8-Bytes
   schreibt gar keinen Snapshot (gemeldet über `OnSnapshotFailed`).
+  Der Store muss die Nutzlast weiterhin als **undurchsichtige Bytes** behandeln: nicht parsen
+  und nicht annehmen, dass sie exakt der Ausgabe von `TakeSnapshot()` entspricht.
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

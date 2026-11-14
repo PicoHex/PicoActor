@@ -234,6 +234,8 @@ var system = new ActorSystem(new ActorSystemOptions
   while the actor declares a tag) discards the snapshot and replays the whole
   stream. Only `null` opts out — `""` is a real tag. A tag longer than 255 UTF-8
   bytes writes no snapshot at all (reported through `OnSnapshotFailed`).
+  Stores must keep treating the payload as **opaque bytes**: never parse it, and never
+  assume it equals your `TakeSnapshot()` output.
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

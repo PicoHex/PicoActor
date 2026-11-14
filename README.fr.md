@@ -241,6 +241,8 @@ var system = new ActorSystem(new ActorSystemOptions
   l'acteur déclare une étiquette) écarte l'instantané et rejoue le flux entier. Seul `null`
   désactive la protection — `""` est une vraie étiquette. Une étiquette de plus de 255 octets
   UTF-8 n'écrit aucun instantané (signalé via `OnSnapshotFailed`).
+  Le store doit continuer à traiter la charge comme des **octets opaques** : ne l'analysez pas
+  et ne supposez pas qu'elle est exactement la sortie de `TakeSnapshot()`.
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

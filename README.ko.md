@@ -238,6 +238,8 @@ var system = new ActorSystem(new ActorSystemOptions
   해당 스냅샷을 버리고 전체 스트림을 리플레이합니다. `null`만이 유일한 해제 값이며
   `""`도 실제 태그입니다. 태그가 UTF-8로 255바이트를 넘으면 스냅샷을 아예 쓰지 않습니다
   (`OnSnapshotFailed`로 보고됩니다).
+  스토어는 이 페이로드를 **불투명 바이트**로 다뤄야 합니다. 파싱하거나
+  `TakeSnapshot()`의 출력과 같다고 가정하지 마세요.
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

@@ -237,6 +237,8 @@ var system = new ActorSystem(new ActorSystemOptions
   そのスナップショットを破棄し、ストリーム全体をリプレイします。
   `null` だけが無効化の指定で、`""` も実際のタグです。タグが UTF-8 で 255 バイトを超えると
   スナップショットは一切書き込まれません(`OnSnapshotFailed` で報告されます)。
+  ストアはこのペイロードを**不透明なバイト列**として扱ってください。解析したり、
+  `TakeSnapshot()` の出力そのものだと仮定したりしないでください。
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

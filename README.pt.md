@@ -240,6 +240,8 @@ var system = new ActorSystem(new ActorSystemOptions
   descarta o snapshot e reproduz o fluxo inteiro. Apenas `null` desativa a proteção — `""` é uma
   etiqueta real. Uma etiqueta com mais de 255 bytes UTF-8 não grava snapshot algum
   (reportado por `OnSnapshotFailed`).
+  O store deve continuar tratando o payload como **bytes opacos**: não o analise nem presuma
+  que seja exatamente a saída de `TakeSnapshot()`.
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]

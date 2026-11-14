@@ -233,6 +233,8 @@ var system = new ActorSystem(new ActorSystemOptions
   （或載荷沒有信封、而 Actor 宣告了標籤）就丟棄該快照並重放整個事件流。
   只有 `null` 是關閉開關——`""` 也算真實標籤。標籤超過 255 個 UTF-8 位元組時
   乾脆不寫快照（透過 `OnSnapshotFailed` 上報）。
+  存放區必須始終把載荷當作**不透明位元組**：不要解析它，也不要假設它等於
+  `TakeSnapshot()` 的輸出。
 
 ```
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
