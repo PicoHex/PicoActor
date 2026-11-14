@@ -4,16 +4,13 @@
 # 2026.<x>.* segment, and every project commits a packages.lock.json so the float stays
 # reproducible. A committed lock file is, by construction, frozen — ci.yml restores in
 # locked mode precisely so a build cannot drift. This job is the counterpart: it
-# re-resolves the floats against the live feeds on a schedule and opens a PR with the
+# re-resolves the floats against the live feeds on demand and opens a PR with the
 # lock-file diff, so a y release of PicoDI / PicoMediator / PicoMediator.DI can actually
 # reach consumers. Without this job, floating would be indistinguishable from pinning.
 
 name: Deps refresh (y float)
 
 on:
-  schedule:
-    # Mondays 04:10 UTC — off the hour so it does not pile up with the cron crunch.
-    - cron: '10 4 * * 1'
   workflow_dispatch:
 
 concurrency:
@@ -100,7 +97,7 @@ jobs:
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          # Single bot-owned branch, rewritten every run: the schedule is idempotent, so
+          # Single bot-owned branch, rewritten every run: the refresh is idempotent, so
           # "latest resolution" is the only state worth keeping.
           branch="chore/deps-refresh"
           short_sha="$(git rev-parse --short HEAD)"
