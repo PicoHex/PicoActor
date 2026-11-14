@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/picohex.svg" alt="PicoHex" width="120"></p>
+
 # PicoActor
 
 AOT 호환 인메모리 Actor 프레임워크, Event Sourcing 지원.

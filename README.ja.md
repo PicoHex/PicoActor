@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/picohex.svg" alt="PicoHex" width="120"></p>
+
 # PicoActor
 
 AOT互換のインメモリ Actor フレームワーク。Event Sourcing 対応。

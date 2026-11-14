@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/picohex.svg" alt="PicoHex" width="120"></p>
+
 # PicoActor
 
 Framework de Actores en memoria compatible con AOT y Event Sourcing para .NET.

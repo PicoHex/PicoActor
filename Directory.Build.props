@@ -121,4 +121,33 @@
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
   </ItemGroup>
+
+  <!-- ═══════════════════════════════════════════════════════
+       NuGet package icon (the PicoHex family logo)
+
+       The two halves below are a pair and must stay together: PackageIcon
+       names the entry inside the package, the None item actually puts the
+       file there at the package root. Remove either one and `dotnet pack`
+       fails with NU5046 (the icon file does not exist in the package).
+
+       $(MSBuildThisFileDirectory) resolves against THIS file, so the icon is
+       always the repository root icon.png, no matter how deep the packing
+       project sits. Guarding the item on IsPackable is safe in a props file:
+       MSBuild evaluates every item in a pass after every property, so the
+       condition already sees the value the csproj body declares.
+
+       PNG here and not the SVG the READMEs use: PackageIcon accepts only PNG
+       and JPG. The vector logo lives at assets/picohex.svg.
+
+       (No literal double hyphen appears above: XML comments may not contain
+       one, and a props file that does not parse loses every property it
+       declares, which surfaces as NU1015, not as a syntax error.)
+       ═══════════════════════════════════════════════════════ -->
+  <PropertyGroup>
+    <PackageIcon>icon.png</PackageIcon>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>

@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/picohex.svg" alt="PicoHex" width="120"></p>
+
 # PicoActor
 
 AOT 兼容的内存 Actor 框架，支持事件溯源（Event Sourcing）。轻量、零反射，专为 AI Agent 系统和工作流编排设计。可在 NativeAOT 和裁剪环境下运行。
