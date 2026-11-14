@@ -224,6 +224,19 @@ var system = new ActorSystem(new ActorSystemOptions
 - `IsReplaying` 是 `protected`：用 `if (IsReplaying) return;` 覆寫由
   `Mutate` 驅動的讀模型發佈邏輯，避免每個重放事件都做 O(n) 的工作
   （否則一次重建就是 O(n²)）。
+- Schema 標籤：覆寫 `SnapshotSchema`（預設 `null`），回傳一個版本字串，例如
+  `"CounterState/v1"`；**只要載荷的佈局或其含義改變就必須遞增它**。
+  變更它會讓已存的快照作廢一次——也就是一次完整重放——等該聚合再落盤
+  `SnapshotEveryNEvents` 個事件後恢復正常速度。它必須是**型別層級常數**：
+  若寫成執行個體的取值，且寫入執行個體與重建執行個體取值不同，每次復原都會靜默退化為完整重放。
+- 標籤非 `null` 時，框架會把載荷包進信封，並在還原時比對標籤；不一致
+  （或載荷沒有信封、而 Actor 宣告了標籤）就丟棄該快照並重放整個事件流。
+  只有 `null` 是關閉開關——`""` 也算真實標籤。標籤超過 255 個 UTF-8 位元組時
+  乾脆不寫快照（透過 `OnSnapshotFailed` 上報）。
+
+```
+[PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
+```
 
 ### Idle Passivation (opt-in)（閒置鈍化，可選）
 

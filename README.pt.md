@@ -229,6 +229,21 @@ var system = new ActorSystem(new ActorSystemOptions
 - `IsReplaying` é `protected`: sobrescreva a publicação do read model guiada por `Mutate`
   com `if (IsReplaying) return;` para evitar trabalho O(n) por evento reproduzido
   (caso contrário, uma reconstrução é O(n²)).
+- Etiqueta de esquema: sobrescreva `SnapshotSchema` (padrão `null`) com uma string de versão
+  como `"CounterState/v1"` e **incremente-a sempre que o layout do payload ou seu significado
+  mudar**. Alterá-la invalida uma vez todos os snapshots gravados — uma reprodução completa — e
+  a velocidade normal volta quando o agregado persiste mais `SnapshotEveryNEvents` eventos.
+  Mantenha-a como constante de tipo: um valor por instância que difira entre o ator que grava e
+  o que reconstrói degrada silenciosamente toda recuperação para uma reprodução completa.
+- Com uma etiqueta não nula o framework envolve o payload num envelope e compara as etiquetas
+  na restauração; uma divergência (ou um payload sem envelope quando o ator declara etiqueta)
+  descarta o snapshot e reproduz o fluxo inteiro. Apenas `null` desativa a proteção — `""` é uma
+  etiqueta real. Uma etiqueta com mais de 255 bytes UTF-8 não grava snapshot algum
+  (reportado por `OnSnapshotFailed`).
+
+```
+[PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
+```
 
 ### Idle Passivation (opt-in) (Passivação por inatividade, opcional)
 

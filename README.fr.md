@@ -229,6 +229,22 @@ var system = new ActorSystem(new ActorSystemOptions
 - `IsReplaying` est `protected` : surchargez la publication du read model pilotée par `Mutate`
   avec `if (IsReplaying) return;` pour éviter un travail O(n) par événement rejoué
   (sinon une reconstruction est O(n²)).
+- Étiquette de schéma : surchargez `SnapshotSchema` (par défaut `null`) avec une chaîne de
+  version comme `"CounterState/v1"` et **incrémentez-la dès que la disposition de la charge ou
+  sa signification change**. La modifier invalide une fois tous les instantanés enregistrés —
+  un rejeu complet — et la vitesse normale revient quand l'agrégat persiste à nouveau
+  `SnapshotEveryNEvents` événements. Gardez-la constante au niveau du type : une valeur par
+  instance qui diffère entre l'acteur qui écrit et celui qui reconstruit dégrade silencieusement
+  chaque récupération en rejeu complet.
+- Avec une étiquette non nulle, le framework enveloppe la charge dans une enveloppe et compare
+  les étiquettes à la restauration ; une divergence (ou une charge sans enveloppe alors que
+  l'acteur déclare une étiquette) écarte l'instantané et rejoue le flux entier. Seul `null`
+  désactive la protection — `""` est une vraie étiquette. Une étiquette de plus de 255 octets
+  UTF-8 n'écrit aucun instantané (signalé via `OnSnapshotFailed`).
+
+```
+[PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
+```
 
 ### Idle Passivation (opt-in) (Passivation par inactivité, optionnel)
 

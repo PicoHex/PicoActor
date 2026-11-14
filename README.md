@@ -222,6 +222,22 @@ var system = new ActorSystem(new ActorSystemOptions
 - `IsReplaying` is `protected`: override `Mutate`-driven read-model publication
   with `if (IsReplaying) return;` to avoid O(n) work per replayed event
   (otherwise a rebuild is O(n²)).
+- Schema tag: override `SnapshotSchema` (default `null`) with a version string
+  such as `"CounterState/v1"` and **bump it whenever the payload layout or its
+  meaning changes**. Changing it invalidates every stored snapshot once — one
+  full replay — and normal speed returns after the aggregate flushes another
+  `SnapshotEveryNEvents` events. Keep it a type-level constant: a per-instance
+  value that differs between the writing and the rebuilding actor silently
+  degrades every recovery to a full replay.
+- With a non-null tag the framework wraps the payload in an envelope and
+  compares the tags on restore; a mismatch (or a payload without an envelope
+  while the actor declares a tag) discards the snapshot and replays the whole
+  stream. Only `null` opts out — `""` is a real tag. A tag longer than 255 UTF-8
+  bytes writes no snapshot at all (reported through `OnSnapshotFailed`).
+
+```
+[PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
+```
 
 ### Idle Passivation (opt-in)
 
