@@ -250,6 +250,36 @@ var system = new ActorSystem(new ActorSystemOptions
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
 ```
 
+### Event Log Reader (IEventLogReader) (Lector del registro de eventos)
+
+El código de negocio se escribe contra `IActorSystem` y recibe actores; ningún miembro de la
+superficie de negocio devuelve una colección de eventos. `IEventStore` es la SPI de persistencia
+del **autor del store**: persistir los eventos anexados y devolverlos, con `LoadAsync` conservado
+como lectura de reserva del runtime. Las herramientas y proyecciones leen mediante
+`IEventLogReader` — `GetVersionAsync`, `OpenAsync`, `PeekFirstAsync` — y `OpenAsync` devuelve un
+cursor solo hacia adelante:
+
+```csharp
+await using var cursor = await reader.OpenAsync(id, fromVersion);  // 1-based, inclusive
+ulong end = cursor.End;                    // stream length observed by this open
+while (await cursor.MoveNextAsync())
+{
+    var version = cursor.CurrentVersion;   // strictly ascending
+    var @event = cursor.Current;
+}
+```
+
+- Una sola observación: `End` es la longitud del flujo tomada en `OpenAsync` y no cambia durante
+  la vida del cursor, así que la guarda de rollback y la longitud de la cola provienen de una
+  única apertura, y el cursor nunca entrega más de `End`.
+- La detección de capacidad es una sola regla — `eventStore is IEventLogReader`. Un store que
+  implementa el lector permite que una reconstrucción acelerada por instantánea lea solo la cola
+  posterior a la instantánea (un store de ficheros puede clasificar la cabeza y deserializar solo
+  la cola); un store que no lo implementa sigue funcionando mediante `LoadAsync`, que lee y
+  deserializa el flujo completo.
+- `InMemoryEventStore` implementa `IEventLogReader`; para cualquier otro store es opcional y
+  puramente aditivo.
+
 ### Idle Passivation (opt-in) (Pasivación por inactividad, opcional)
 
 Los actores permanecen en memoria hasta que se detienen. Para cargas de trabajo con muchos

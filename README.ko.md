@@ -247,6 +247,34 @@ var system = new ActorSystem(new ActorSystemOptions
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
 ```
 
+### Event Log Reader (IEventLogReader)(이벤트 로그 읽기 인터페이스)
+
+비즈니스 코드는 `IActorSystem`에 대고 작성하며 돌려받는 것은 액터입니다. 비즈니스용 멤버가
+이벤트 컬렉션을 반환하는 일은 없습니다. `IEventStore`는 **스토어 작성자**를 위한 영속화 SPI로,
+추가된 이벤트를 영속화하고 필요할 때 돌려주며, `LoadAsync`는 런타임 재구성의 폴백 읽기로
+남습니다. 도구와 프로젝션은 대신 `IEventLogReader`(`GetVersionAsync`, `OpenAsync`,
+`PeekFirstAsync`)로 읽으며, `OpenAsync`는 전방 전용 커서를 반환합니다:
+
+```csharp
+await using var cursor = await reader.OpenAsync(id, fromVersion);  // 1-based, inclusive
+ulong end = cursor.End;                    // stream length observed by this open
+while (await cursor.MoveNextAsync())
+{
+    var version = cursor.CurrentVersion;   // strictly ascending
+    var @event = cursor.Current;
+}
+```
+
+- 단일 관측: `End`는 `OpenAsync` 시점에 얻은 스트림 길이이며 커서 수명 동안 바뀌지 않습니다.
+  따라서 롤백 가드와 꼬리 길이가 같은 한 번의 열기에서 나오고, 커서가 내놓는 수가 `End`를
+  넘지 않습니다.
+- 능력 판별은 규칙 하나입니다 — `eventStore is IEventLogReader`. 읽기 인터페이스를 구현한
+  스토어에서는 스냅샷 가속 재구성이 스냅샷 이후의 꼬리만 읽습니다(파일 스토어라면 머리를
+  분류하고 꼬리만 역직렬화할 수 있습니다). 구현하지 않은 스토어는 `LoadAsync`로 폴백하며
+  스트림 전체를 읽어 역직렬화합니다.
+- `InMemoryEventStore`는 `IEventLogReader`를 구현합니다. 다른 스토어에게 구현은 선택 사항이며
+  순수하게 추가적인 변경입니다.
+
 ### Idle Passivation (opt-in)(유휴 패시베이션, 선택 사항)
 
 액터는 중지될 때까지 메모리에 남아 있습니다. 수명이 긴 애그리거트가 많은

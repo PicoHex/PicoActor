@@ -246,6 +246,35 @@ var system = new ActorSystem(new ActorSystemOptions
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
 ```
 
+### Event Log Reader (IEventLogReader)（イベントログ読み取り面）
+
+業務コードは `IActorSystem` に対してのみ書き、受け取るのはアクターです。業務向けのメンバーが
+イベントのコレクションを返すことはありません。`IEventStore` は**ストア作者**の永続化 SPI で、
+追加されたイベントを永続化して必要に応じて返します。`LoadAsync` はランタイムの再構築における
+フォールバック読み取りとして残ります。ツールとプロジェクションは代わりに `IEventLogReader`
+（`GetVersionAsync`、`OpenAsync`、`PeekFirstAsync`）で読み取ります。`OpenAsync` は前向きのみの
+カーソルを返します:
+
+```csharp
+await using var cursor = await reader.OpenAsync(id, fromVersion);  // 1-based, inclusive
+ulong end = cursor.End;                    // stream length observed by this open
+while (await cursor.MoveNextAsync())
+{
+    var version = cursor.CurrentVersion;   // strictly ascending
+    var @event = cursor.Current;
+}
+```
+
+- 単一の観測: `End` は `OpenAsync` の時点で取得したストリーム長で、カーソルの生存期間中は
+  変化しません。したがってロールバック用のガードと末尾の長さは同じ 1 回のオープンから得られ、
+  カーソルが返す数が `End` を超えることはありません。
+- 能力の判定は 1 つのルールだけです — `eventStore is IEventLogReader`。読み取り面を実装した
+  ストアでは、スナップショットを使った再構築がスナップショット以降の末尾だけを読めます
+  （ファイルストアなら先頭を分類し、末尾だけをデシリアライズできます）。実装していない
+  ストアは `LoadAsync` にフォールバックし、ストリーム全体を読み取ってデシリアライズします。
+- `InMemoryEventStore` は `IEventLogReader` を実装済みです。他のストアにとって実装は任意で、
+  追加のみの変更です。
+
 ### Idle Passivation (opt-in)（アイドルパッシベーション、オプション）
 
 アクターは停止されるまでメモリ上に残ります。寿命の長い集約が多数ある
