@@ -36,8 +36,12 @@ public interface IEventCursor : IAsyncDisposable
 
     /// <summary>
     /// The event produced by the last successful <see cref="MoveNextAsync"/> call.
-    /// Throws <see cref="System.InvalidOperationException"/> before the first successful move,
-    /// after the end of the stream and after a cancelled/failed move.
+    /// Throws <see cref="System.InvalidOperationException"/> only when no move has ever succeeded:
+    /// before the first one, and after the cursor is exhausted.
+    /// <para>
+    /// A cancelled or failed move KEEPS the last successfully produced event readable — the failure
+    /// belongs to the move attempt, not to what was already read (the same rule as disposal).
+    /// </para>
     /// </summary>
     IDomainEvent Current { get; }
 

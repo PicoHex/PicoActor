@@ -195,6 +195,40 @@ public abstract class EventLogReaderConformanceBase
     }
 
     [Test, Timeout(15000)]
+    public async Task OpenAsync_HonorsCancellation(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        var (store, reader) = Create();
+        var id = await SeedAsync(store, Seeded);
+
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        // Open is the FIRST read of a rebuild: a cancelled caller must not be handed a cursor
+        // (nor leave one holding the store's per-actor gate).
+        await Assert
+            .That(async () => await reader.OpenAsync(id, 1, cancelled.Token))
+            .Throws<OperationCanceledException>();
+    }
+
+    [Test, Timeout(15000)]
+    public async Task PeekFirst_ReturnsFirstEvent(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        var (store, reader) = Create();
+        var id = await SeedAsync(store, Seeded);
+        var expected = await store.LoadAsync(id);
+
+        // Recovery enumeration reads the FIRST event of a stream: the reader must answer that
+        // without materializing the stream, and agree with the store's own first element.
+        var first = await reader.PeekFirstAsync(id);
+
+        await Assert.That(first).IsNotNull();
+        await Assert.That(first).IsEqualTo(expected[0]);
+        await Assert.That(await reader.PeekFirstAsync(Guid.NewGuid())).IsNull();
+    }
+
+    [Test, Timeout(15000)]
     public async Task MoveNext_HonorsCancellation(CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;

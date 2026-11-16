@@ -409,6 +409,18 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     /// Nothing here throws for a rolled back or shrinking stream: an open past the end is legal,
     /// and a short drain is a mismatch that degrades to the full replay on the SAME instance.
     /// </para>
+    /// <para>
+    /// Snapshots are acceleration only on this path too: an UNREADABLE snapshot costs a warning
+    /// and a full replay, never a failed rebuild — the same degradation contract the
+    /// <c>LoadAsync</c> path gives. And <c>ulong.MaxValue</c> has no successor version, so the
+    /// open position is CLAMPED instead of wrapping to 0 (which the store rejects as an
+    /// out-of-range version); the rollback guard then takes over and the stream is replayed.
+    /// </para>
+    /// <para>
+    /// The cursor never outlives the read: it is released inside its own scope, BEFORE anything is
+    /// constructed and before the full-replay re-open — a cursor still held across the second open
+    /// would queue behind it on the store's per-actor gate.
+    /// </para>
     /// </summary>
     private async ValueTask<T?> RebuildFromReaderAsync<T>(
         IEventLogReader reader,
@@ -419,28 +431,61 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     {
         // The snapshot decides the OPEN POSITION only (v + 1). It never decides the guard: that
         // is compared against the End of the one open below.
-        var snapshot = _eventStore is IEventStoreSnapshot snapshotStore
-            ? await snapshotStore.LoadSnapshotAsync(id).ConfigureAwait(false)
-            : null;
+        //
+        // Reading the snapshot is part of the degradation contract, not an escape from it: an
+        // unreadable snapshot leaves v at 0, i.e. the whole stream is replayed. It must never
+        // fail the rebuild — the event stream is complete and authoritative.
+        ActorSnapshot? snapshot = null;
+        if (_eventStore is IEventStoreSnapshot snapshotStore)
+        {
+            try
+            {
+                snapshot = await snapshotStore.LoadSnapshotAsync(id).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                TryLog(l =>
+                    l.Warning(
+                        $"Actor {typeof(T).Name} {id}: snapshot ignored, replaying the full stream "
+                            + $"({ex.Message})"
+                    )
+                );
+            }
+        }
+
         var v = snapshot?.Version ?? 0;
 
-        await using var cursor = await reader
-            .OpenAsync(id, v == 0 ? 1UL : v + 1UL)
-            .ConfigureAwait(false);
+        // v + 1 does not exist for ulong.MaxValue (it wraps to 0, and version 0 is not a legal
+        // open position): clamp to MaxValue. That open is past the end of any real stream, so the
+        // rollback guard below takes over and the stream is replayed in full — degrading instead
+        // of throwing ArgumentOutOfRangeException out of a recovery path.
+        var openAt =
+            v == 0 ? 1UL
+            : v == ulong.MaxValue ? ulong.MaxValue
+            : v + 1UL;
 
-        // Nothing to rebuild FROM: no factory call, no initialization, not even a Version-0 actor.
-        if (cursor.End == 0)
-            return default;
+        List<IDomainEvent> tail;
+        ulong end;
 
-        var tail = await DrainAsync(cursor).ConfigureAwait(false);
+        // The cursor lives in THIS scope only: released before anything is constructed, and
+        // before the full-replay re-open of the same stream.
+        await using (var cursor = await reader.OpenAsync(id, openAt).ConfigureAwait(false))
+        {
+            end = cursor.End;
+
+            // Nothing to rebuild FROM: no factory call, no initialization, not even a Version-0
+            // actor.
+            if (end == 0)
+                return default;
+
+            tail = await DrainAsync(cursor).ConfigureAwait(false);
+        }
 
         // Rollback (a snapshot newer than the stream) and shrink (the drain delivered less than
         // End) are MISMATCHES, not exceptions: discard the snapshot, replay from version 1.
-        if (v > cursor.End || v + (ulong)tail.Count != cursor.End)
-        {
-            await cursor.DisposeAsync().ConfigureAwait(false); // release before the second open
+        // The `v > end` clause is defensive, subsumed by the count check; kept for readability.
+        if (v > end || v + (ulong)tail.Count != end)
             return await FullReplayAsync<T>(reader, id, rebuildFactory).ConfigureAwait(false);
-        }
 
         var actor = (ActorBase)(IActor)rebuildFactory();
         WireActor(actor, id);
@@ -459,26 +504,29 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             }
             else if (
                 es is ISnapshotableActor snap
-                && TryApplySnapshot(snap, snapshot, cursor.End, out failure)
+                && TryApplySnapshot(snap, snapshot, end, out failure)
             )
             {
                 snap.ReplayEventsFrom(v, tail);
                 TryLog(l =>
                     l.Info(
                         $"Actor {typeof(T).Name} {id} restored from snapshot v{v}, "
-                            + $"replayed {tail.Count} of {cursor.End} events"
+                            + $"replayed {tail.Count} of {end} events"
                     )
                 );
             }
             else
             {
                 // Snapshot rejected (schema, format, throw) or the aggregate cannot restore one:
-                // replay the WHOLE stream on THIS instance — never build a second actor.
-                await cursor.DisposeAsync().ConfigureAwait(false); // release before the second open
+                // replay the WHOLE stream on THIS instance — never build a second actor. The tail
+                // cursor is already released (its scope ended above), so this second open cannot
+                // queue behind it.
                 var all = await DrainAllAsync(reader, id).ConfigureAwait(false);
                 if (all.Count == 0)
                 {
-                    // The stream vanished between the two opens.
+                    // Defensive/unreachable: end > 0 was observed above, so only a stream that
+                    // vanished between the two opens lands here (FullReplayAsync has the
+                    // equivalent guard for the other caller).
                     await DiscardDuplicateAsync(actor).ConfigureAwait(false);
                     return default;
                 }

@@ -33,6 +33,24 @@ internal class ReaderOnlyStore
     /// <summary>Apply the knobs to EVERY open: a stream that is gone for good.</summary>
     public bool KnobsOnEveryOpen { get; set; }
 
+    /// <summary>
+    /// An UNREADABLE snapshot: <see cref="LoadSnapshotAsync"/> throws while the stream itself is
+    /// perfectly intact. Snapshots are acceleration only, so this must cost a warning, never the
+    /// rebuild.
+    /// </summary>
+    public bool ThrowOnSnapshotLoad { get; set; }
+
+    /// <summary>
+    /// Journal every cursor lifetime: <c>("open", n)</c> when a cursor is handed out and
+    /// <c>("dispose", n)</c> when that same cursor is released, <c>n</c> being its 1-based open
+    /// number. The ORDER in this list is the assertion: a cursor must be released before the next
+    /// open of the same stream may happen at all.
+    /// </summary>
+    public List<(string Kind, int Open)> Journal { get; } = new();
+
+    /// <summary>Record every cursor open/dispose into <see cref="Journal"/>.</summary>
+    public bool JournalCursors { get; set; }
+
     /// <summary>Versions the first open yielded, in order (the tail-only cost probe).</summary>
     public List<ulong> FirstOpenVersions { get; } = new();
 
@@ -63,7 +81,10 @@ internal class ReaderOnlyStore
     public ValueTask<ActorSnapshot?> LoadSnapshotAsync(
         Guid actorId,
         CancellationToken ct = default
-    ) => _inner.LoadSnapshotAsync(actorId, ct);
+    ) =>
+        ThrowOnSnapshotLoad
+            ? throw new IOException("unreadable snapshot")
+            : _inner.LoadSnapshotAsync(actorId, ct);
 
     public ValueTask SaveSnapshotAsync(
         Guid actorId,
@@ -88,13 +109,19 @@ internal class ReaderOnlyStore
 
         // The knobs are per-CALL state (a stream that shrinks/vanishes between the first open and
         // the full-replay re-open), so they only touch the opens this probe opted into.
-        var first = Interlocked.Increment(ref _opens) == 1;
+        var opens = Interlocked.Increment(ref _opens);
+        var first = opens == 1;
         var knobbed = first || KnobsOnEveryOpen;
 
         var end = knobbed && EndOverride is { } reportedEnd ? reportedEnd : inner.End;
         var yieldLimit = knobbed && YieldLimit is { } limit ? limit : int.MaxValue;
+        var cursor = new ProbeCursor(inner, end, yieldLimit, first ? FirstOpenVersions : null);
 
-        return new ProbeCursor(inner, end, yieldLimit, first ? FirstOpenVersions : null);
+        if (!JournalCursors)
+            return cursor;
+
+        Journal.Add(("open", opens));
+        return new JournalledCursor(cursor, opens, Journal);
     }
 }
 
@@ -145,6 +172,32 @@ internal sealed class ProbeCursor(
     }
 
     public ValueTask DisposeAsync() => inner.DisposeAsync();
+}
+
+/// <summary>
+/// Wraps a cursor and journals its lifetime, so a test can prove WHEN it is released relative to
+/// the next open of the same stream — and that it is released exactly once.
+/// </summary>
+internal sealed class JournalledCursor(
+    IEventCursor inner,
+    int open,
+    List<(string Kind, int Open)> journal
+) : IEventCursor
+{
+    public ulong End => inner.End;
+
+    public IDomainEvent Current => inner.Current;
+
+    public ulong CurrentVersion => inner.CurrentVersion;
+
+    public ValueTask<bool> MoveNextAsync(CancellationToken ct = default) => inner.MoveNextAsync(ct);
+
+    public ValueTask DisposeAsync()
+    {
+        // Journaled unconditionally: a DOUBLE dispose must be visible here, not swallowed.
+        journal.Add(("dispose", open));
+        return inner.DisposeAsync();
+    }
 }
 
 /// <summary>
@@ -206,6 +259,8 @@ public sealed class RebuildReaderPathTests
         await Assert.That(rebuilt!.Value).IsEqualTo(4);
         await Assert.That(rebuilt.MutateCalls).IsEqualTo(4);
         await Assert.That(rebuilt.Version).IsEqualTo(4UL);
+        // The whole rebuild is ONE observation of the stream (the single-observation contract).
+        await Assert.That(store.Opens).IsEqualTo(1);
 
         await system.StopAsync(id);
     }
@@ -331,6 +386,124 @@ public sealed class RebuildReaderPathTests
         await Assert.That(rebuilt.MutateCalls).IsEqualTo(10);
         await Assert.That(store.FirstOpenVersions.Count).IsEqualTo(10);
         await Assert.That(store.FirstOpenVersions.Min()).IsEqualTo(91UL);
+
+        await system.StopAsync(id);
+    }
+
+    [Test, Timeout(15000)]
+    public async Task ReaderOnlyStore_ThrowingSnapshotLoad_FallsBackToFullReplay(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var store = new ReaderOnlyStore { ThrowOnSnapshotLoad = true };
+        var system = NewSystem(store);
+        Register(system);
+        var id = await SeedStoppedAsync(system, events: 4);
+
+        // An UNREADABLE snapshot is lost acceleration, never a failed rebuild: the stream is
+        // complete and authoritative, so the rebuild must degrade to replaying all of it.
+        var rebuilt = await system.GetAsync<SSnapshotCounter>(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(4);
+        await Assert.That(rebuilt.Value).IsEqualTo(4);
+        await Assert.That(rebuilt.Version).IsEqualTo(4UL);
+
+        await system.StopAsync(id);
+    }
+
+    [Test, Timeout(15000)]
+    public async Task MaxValueSnapshot_ReplaysFully_NoThrow(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var store = new ReaderOnlyStore();
+        var system = NewSystem(store);
+        Register(system);
+        var id = await SeedStoppedAsync(system, events: 6);
+
+        // ulong.MaxValue has no "next" version: v + 1 wraps to 0, and opening at version 0 is an
+        // ArgumentOutOfRangeException. The clamp must turn that into a past-the-end open and let
+        // the rollback guard degrade to the full replay.
+        await store.SaveSnapshotAsync(id, Snapshot(version: ulong.MaxValue, value: 6));
+
+        var rebuilt = await system.GetAsync<SSnapshotCounter>(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(6);
+        await Assert.That(rebuilt.Value).IsEqualTo(6);
+        await Assert.That(rebuilt.Version).IsEqualTo(6UL);
+
+        await system.StopAsync(id);
+    }
+
+    [Test, Timeout(15000)]
+    public async Task ReaderOnlyStore_EmptyStream_ReturnsNull_WithoutConstructing(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var store = new ReaderOnlyStore();
+        var system = NewSystem(store);
+        var factoryCalls = new int[1];
+        Register(
+            system,
+            () =>
+            {
+                Interlocked.Increment(ref factoryCalls[0]);
+                return new SSnapshotCounter();
+            }
+        );
+
+        // A stream that never existed has nothing to rebuild FROM: no actor, no initialization,
+        // not even a Version-0 instance — and ONE open, because End alone decides it.
+        var rebuilt = await system.GetAsync<SSnapshotCounter>(Guid.NewGuid());
+
+        await Assert.That(rebuilt).IsNull();
+        await Assert.That(factoryCalls[0]).IsEqualTo(0);
+        await Assert.That(store.Opens).IsEqualTo(1);
+    }
+
+    [Test, Timeout(15000)]
+    public async Task Cursor_IsDisposed_BeforeSecondOpen(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var store = new ReaderOnlyStore { JournalCursors = true };
+        var system = NewSystem(store);
+        Register(system);
+        var id = await SeedStoppedAsync(system, events: 3);
+
+        // A snapshot from a stream that no longer exists forces the mismatch path, i.e. a SECOND
+        // open of the same stream while the first cursor's read snapshot is still alive. If the
+        // first cursor were still held, the second open would queue behind it on the store's
+        // per-actor gate — exactly the deadlock a leaked cursor risks in a file store.
+        await store.SaveSnapshotAsync(id, Snapshot(version: 5, value: 4));
+        store.Journal.Clear();
+
+        var rebuilt = await system.GetAsync<SSnapshotCounter>(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.MutateCalls).IsEqualTo(3);
+
+        // Exactly two cursors, each opened once and released exactly once.
+        await Assert.That(store.Journal.Count).IsEqualTo(4);
+        var first = store.Journal[0].Open;
+        var second = store.Journal[2].Open;
+
+        // (a) the first cursor was released BEFORE the second open happened.
+        await Assert.That(store.Journal[0]).IsEqualTo(("open", first));
+        await Assert.That(store.Journal[1]).IsEqualTo(("dispose", first));
+        await Assert.That(store.Journal[2]).IsEqualTo(("open", second));
+        await Assert.That(store.Journal[3]).IsEqualTo(("dispose", second));
+        await Assert.That(second).IsNotEqualTo(first);
+
+        // (b) each cursor was disposed exactly once (a double release would journal twice).
+        await Assert.That(store.Journal.Count(e => e == ("dispose", first))).IsEqualTo(1);
+        await Assert.That(store.Journal.Count(e => e == ("dispose", second))).IsEqualTo(1);
 
         await system.StopAsync(id);
     }
