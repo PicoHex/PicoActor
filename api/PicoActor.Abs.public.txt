@@ -19,6 +19,7 @@ I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.IEventSourcedActor
 I:PicoActor.Abs.EventSourcedActor : PicoActor.Abs.ISnapshotableActor
 I:PicoActor.Abs.IDomainEvent : PicoMediator.Abs.IEvent
 I:PicoActor.Abs.IDomainEvent : PicoMediator.Abs.IMessage
+I:PicoActor.Abs.IEventCursor : System.IAsyncDisposable
 I:PicoActor.Abs.IEventSourcedActor : PicoActor.Abs.IActor
 I:PicoActor.Abs.ISnapshotableActor : PicoActor.Abs.IActor
 I:PicoActor.Abs.ISnapshotableActor : PicoActor.Abs.IEventSourcedActor
@@ -82,6 +83,10 @@ M:PicoActor.Abs.ICommandSender.ExecuteSaga``2(PicoActor.Abs.ICommand command) : 
 M:PicoActor.Abs.ICommandSender.Send(System.Guid actorId, PicoActor.Abs.ICommand command) : void abstract
 M:PicoActor.Abs.IDomainEventPublisher.PublishAsync(System.Guid actorId, ulong version, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask abstract
 M:PicoActor.Abs.IDomainEventSubscriber`1.Handle(PicoActor.Abs.DomainEventEnvelope`1<TEvent> envelope, PicoActor.Abs.ICommandSender sender, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask abstract
+M:PicoActor.Abs.IEventCursor.MoveNextAsync(System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<bool> abstract
+M:PicoActor.Abs.IEventLogReader.GetVersionAsync(System.Guid actorId, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<ulong> abstract
+M:PicoActor.Abs.IEventLogReader.OpenAsync(System.Guid actorId, ulong fromVersion, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IEventCursor> abstract
+M:PicoActor.Abs.IEventLogReader.PeekFirstAsync(System.Guid actorId, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> abstract
 M:PicoActor.Abs.IEventSourcedActor.CommitEvents() : void abstract
 M:PicoActor.Abs.IEventSourcedActor.ReplayEvents(System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : void abstract
 M:PicoActor.Abs.IEventStore.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> abstract
@@ -135,6 +140,9 @@ P:PicoActor.Abs.EventSourcedActor.IsReplaying : bool { get; }
 P:PicoActor.Abs.EventSourcedActor.SnapshotSchema : string { get; }
 P:PicoActor.Abs.EventSourcedActor.Version : ulong { get; protected set; }
 P:PicoActor.Abs.IActor.Id : System.Guid { get; }
+P:PicoActor.Abs.IEventCursor.Current : PicoActor.Abs.IDomainEvent { get; }
+P:PicoActor.Abs.IEventCursor.CurrentVersion : ulong { get; }
+P:PicoActor.Abs.IEventCursor.End : ulong { get; }
 P:PicoActor.Abs.IEventSourcedActor.Version : ulong { get; }
 P:PicoActor.Abs.SagaActor.CanBePassivated : bool { get; }
 P:PicoActor.Abs.SagaActor.FailedReason : string { get; }
@@ -173,6 +181,8 @@ T:interface PicoActor.Abs.ICommandSender
 T:interface PicoActor.Abs.IDomainEvent
 T:interface PicoActor.Abs.IDomainEventPublisher
 T:interface PicoActor.Abs.IDomainEventSubscriber`1
+T:interface PicoActor.Abs.IEventCursor
+T:interface PicoActor.Abs.IEventLogReader
 T:interface PicoActor.Abs.IEventSourcedActor
 T:interface PicoActor.Abs.IEventStore
 T:interface PicoActor.Abs.IEventStoreEnumerator
