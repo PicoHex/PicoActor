@@ -242,6 +242,30 @@ var system = new ActorSystem(new ActorSystemOptions
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
 ```
 
+### Event Log Reader (IEventLogReader)（事件日誌讀取面）
+
+業務程式碼只面向 `IActorSystem`，拿到的是 Actor——沒有任何面向業務的成員會回傳事件集合。
+`IEventStore` 是**存放區作者**的持久化 SPI：把追加的事件落盤、按需取回，
+它的 `LoadAsync` 保留為執行時重建的回退讀取。工具與投影改用 `IEventLogReader` 讀取——
+`GetVersionAsync`、`OpenAsync`、`PeekFirstAsync`——其中 `OpenAsync` 回傳一個前向游標：
+
+```csharp
+await using var cursor = await reader.OpenAsync(id, fromVersion);  // 1-based, inclusive
+ulong end = cursor.End;                    // stream length observed by this open
+while (await cursor.MoveNextAsync())
+{
+    var version = cursor.CurrentVersion;   // strictly ascending
+    var @event = cursor.Current;
+}
+```
+
+- 單次觀察：`End` 是 `OpenAsync` 時取得的串流長度，在游標的整個生命週期內不再變動，
+  因此回滾護欄與尾端長度來自同一次開啟，游標產出的數量永不超過 `End`。
+- 能力探索只有一條規則——`eventStore is IEventLogReader`。實作了讀取面的存放區，
+  讓帶快照的重建只讀快照之後的尾端（檔案存放區可以只分類頭部、只反序列化尾端）；
+  沒有實作讀取面的存放區繼續走 `LoadAsync`，即讀出並反序列化整條事件串流。
+- `InMemoryEventStore` 已實作 `IEventLogReader`；對其它存放區而言，實作它是可選的、純增量的。
+
 ### Idle Passivation (opt-in)（閒置鈍化，可選）
 
 Actor 會一直駐留記憶體，直到被停止。對於擁有大量長期存活聚合的工作負載，

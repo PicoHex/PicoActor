@@ -251,6 +251,36 @@ var system = new ActorSystem(new ActorSystemOptions
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
 ```
 
+### Event Log Reader (IEventLogReader) (интерфейс чтения журнала событий)
+
+Прикладной код пишется против `IActorSystem` и получает актеров; ни один член прикладной
+поверхности не возвращает коллекцию событий. `IEventStore` — это SPI персистентности для
+**авторов хранилища**: сохранить добавленные события и вернуть их, а `LoadAsync` остаётся
+резервным чтением рантайма. Инструменты и проекции читают через `IEventLogReader` —
+`GetVersionAsync`, `OpenAsync`, `PeekFirstAsync` — где `OpenAsync` возвращает курсор только
+вперёд:
+
+```csharp
+await using var cursor = await reader.OpenAsync(id, fromVersion);  // 1-based, inclusive
+ulong end = cursor.End;                    // stream length observed by this open
+while (await cursor.MoveNextAsync())
+{
+    var version = cursor.CurrentVersion;   // strictly ascending
+    var @event = cursor.Current;
+}
+```
+
+- Одно наблюдение: `End` — длина потока, полученная в `OpenAsync`, и она не меняется за время
+  жизни курсора. Поэтому защита от отката и длина хвоста берутся из одного открытия, а курсор
+  никогда не отдаёт больше `End`.
+- Определение возможности — одно правило: `eventStore is IEventLogReader`. Хранилище,
+  реализующее интерфейс чтения, позволяет пересборке с ускорением снимком читать только хвост
+  после снимка (файловое хранилище может классифицировать голову и десериализовать только
+  хвост); хранилище без него продолжает работать через `LoadAsync`, который читает и
+  десериализует весь поток.
+- `InMemoryEventStore` реализует `IEventLogReader`; для любого другого хранилища это
+  необязательно и чисто аддитивно.
+
 ### Idle Passivation (opt-in) (Пассивация простоя, опционально)
 
 Акторы остаются в памяти до остановки. Для нагрузок со множеством долгоживущих

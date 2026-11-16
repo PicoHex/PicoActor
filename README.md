@@ -243,6 +243,34 @@ var system = new ActorSystem(new ActorSystemOptions
 [PAS1][1-byte UTF-8 schema length][UTF-8 schema][your payload]
 ```
 
+### Event Log Reader (IEventLogReader)
+
+Business code is written against `IActorSystem` and receives actors; no business-facing member
+returns a collection of events. `IEventStore` is the **store author's** persistence SPI: persist
+the appended events and serve them back, with `LoadAsync` kept as the runtime's fallback read.
+Tools and projections read through `IEventLogReader` instead — `GetVersionAsync`, `OpenAsync`,
+`PeekFirstAsync` — where `OpenAsync` returns a forward-only cursor:
+
+```csharp
+await using var cursor = await reader.OpenAsync(id, fromVersion);  // 1-based, inclusive
+ulong end = cursor.End;                    // stream length observed by this open
+while (await cursor.MoveNextAsync())
+{
+    var version = cursor.CurrentVersion;   // strictly ascending
+    var @event = cursor.Current;
+}
+```
+
+- One observation: `End` is the stream length taken at `OpenAsync` and never changes for the
+  cursor's lifetime, so the rollback guard and the tail length come from a single open, and the
+  cursor never yields more than `End`.
+- Capability discovery is one rule — `eventStore is IEventLogReader`. A store that implements the
+  reader lets a snapshot-accelerated rebuild read only the tail after the snapshot (a file store
+  can classify the head and deserialize only the tail); a store without it keeps working through
+  `LoadAsync`, which reads and deserializes the whole stream.
+- `InMemoryEventStore` implements `IEventLogReader`; for any other store it is optional and
+  purely additive.
+
 ### Idle Passivation (opt-in)
 
 Actors stay in memory until stopped. For workloads with many long-lived
