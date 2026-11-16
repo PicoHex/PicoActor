@@ -17,6 +17,9 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     /// </summary>
     private readonly ConcurrentDictionary<Guid, RebuildGate> _rebuildGates = new();
 
+    /// <summary>Number of per-id rebuild gates currently tracked (diagnostic/test hook).</summary>
+    internal int RebuildGateCount => _rebuildGates.Count;
+
     /// <summary>
     /// Number of <see cref="StopAllAsync"/> calls currently running: while it is above zero,
     /// new work is refused and lookups miss. A counter, not a flag — concurrent mass stops

@@ -88,10 +88,10 @@ internal sealed class FixBStaleSnapshotStore : IEventStore
     );
     private int _loads;
 
-    /// <summary>Completes when the pre-gate prefetch is parked with its stale snapshot.</summary>
+    /// <summary>Completes when the in-gate read is parked BEFORE it reads the stream.</summary>
     public Task FirstLoadEntered => _firstLoadEntered.Task;
 
-    /// <summary>Hand the stale snapshot to the caller that is waiting inside the prefetch.</summary>
+    /// <summary>Release the parked read; it then observes the stream's CURRENT contents.</summary>
     public void ReleaseFirstLoad() => _releaseFirstLoad.TrySetResult(true);
 
     public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
@@ -99,10 +99,11 @@ internal sealed class FixBStaleSnapshotStore : IEventStore
         if (Interlocked.Increment(ref _loads) > 1)
             return await _inner.LoadAsync(actorId).ConfigureAwait(false);
 
-        var snapshot = await _inner.LoadAsync(actorId).ConfigureAwait(false);
+        // Park BEFORE reading: the stream is read once, under the gate, and the shutdown
+        // flush that lands while we are parked must be part of what the rebuild replays.
         _firstLoadEntered.TrySetResult(true);
         await _releaseFirstLoad.Task.ConfigureAwait(false);
-        return snapshot;
+        return await _inner.LoadAsync(actorId).ConfigureAwait(false);
     }
 
     public ValueTask<ulong> AppendAsync(
@@ -117,16 +118,15 @@ internal sealed class FixBStaleSnapshotStore : IEventStore
 public sealed class FixBStaleSnapshotTests
 {
     /// <summary>
-    /// Deterministic replay of the stale-prefetch window: a saga is parked inside a message
-    /// turn, its registry entry is removed by StopAsync while the loop keeps draining,
-    /// GetAsync prefetches the (still terminal-free) stream, the released loop flushes
-    /// SagaCompleted, and only then does GetAsync continue. It must re-read under the gate,
-    /// observe the terminal state and return without rebuilding: no second resume, no
-    /// ConcurrencyException, no duplicate terminal batch.
+    /// Deterministic replay of the shutdown window: a saga is parked inside a message turn, its
+    /// registry entry is removed by StopAsync while the loop keeps draining, GetAsync's single
+    /// in-gate read is parked BEFORE it reads, the released loop flushes SagaCompleted, and only
+    /// then does the read observe the stream. The rebuild must see the terminal state and return
+    /// without rebuilding: no resume, no ConcurrencyException, no duplicate terminal batch.
     /// </summary>
     [Test]
     [Timeout(15000)]
-    public async Task GetAsync_PrefetchGoesStaleDuringShutdown_DoesNotResumeOnStaleSnapshot(
+    public async Task GetAsync_ShutdownFlushDuringLoad_DoesNotResumeOnStaleSnapshot(
         CancellationToken cancellationToken = default
     )
     {
@@ -153,8 +153,8 @@ public sealed class FixBStaleSnapshotTests
         // Shutdown: the registry entry goes away immediately; the parked loop keeps running.
         var stopTask = system.StopAsync(id).AsTask();
 
-        // GetAsync prefetches BEFORE taking the gate: it sees a stream without a terminal
-        // event and then parks in the controlled store.
+        // GetAsync's only read is inside the gate: park it before it reads, so the flush
+        // below lands while the read is in flight.
         var getTask = Task.Run(() => system.GetAsync<FixBStaleSaga>(id).AsTask());
         await store.FirstLoadEntered;
 

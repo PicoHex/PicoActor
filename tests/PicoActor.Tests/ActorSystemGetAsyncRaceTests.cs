@@ -50,35 +50,33 @@ public sealed class ActorSystemGetAsyncRaceTests
     private sealed class RaceEventStore : IEventStore
     {
         private readonly IReadOnlyList<IDomainEvent> _events;
-        private readonly TaskCompletionSource<bool> _bothEntered;
-        private readonly TaskCompletionSource<bool> _releaseSecond;
+        private readonly TaskCompletionSource<bool> _loadEntered;
+        private readonly TaskCompletionSource<bool> _releaseLoad;
         private int _enteredCount;
 
         public RaceEventStore(
             IReadOnlyList<IDomainEvent> events,
-            TaskCompletionSource<bool> bothEntered,
-            TaskCompletionSource<bool> releaseSecond
+            TaskCompletionSource<bool> loadEntered,
+            TaskCompletionSource<bool> releaseLoad
         )
         {
             _events = events;
-            _bothEntered = bothEntered;
-            _releaseSecond = releaseSecond;
+            _loadEntered = loadEntered;
+            _releaseLoad = releaseLoad;
         }
+
+        /// <summary>Number of loads observed; a single-flight rebuild must show exactly 1.</summary>
+        public int Loads => Volatile.Read(ref _enteredCount);
 
         public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
         {
-            // n == 1 / n == 2 are the two PRE-gate prefetches of the two concurrent callers
-            // (the ordering this store manufactures). Every later load is GetAsync's
-            // unconditional re-read under the per-id gate, which must never park: the
-            // ordering it exists to create is already established by then, and parking
-            // there would deadlock the very callers this store lines up.
-            var n = Interlocked.Increment(ref _enteredCount);
-            if (n == 1)
-                await _bothEntered.Task.ConfigureAwait(false);
-            else if (n == 2)
+            // The FIRST load is the winner's single in-gate read. Park it so the test can
+            // start the second caller against a still-empty registry: that caller then has to
+            // wait on the same gate (and must not load at all). Later loads never park.
+            if (Interlocked.Increment(ref _enteredCount) == 1)
             {
-                _bothEntered.TrySetResult(true);
-                await _releaseSecond.Task.ConfigureAwait(false);
+                _loadEntered.TrySetResult(true);
+                await _releaseLoad.Task.ConfigureAwait(false);
             }
             return _events;
         }
@@ -136,28 +134,25 @@ public sealed class ActorSystemGetAsyncRaceTests
             () => new CountingReadyActor()
         );
 
+        // Start the winner and park it INSIDE its in-gate load: at that point the registry is
+        // still empty, so the second caller that starts now cannot see a registered instance.
         var taskA = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
+        await bothEntered.Task;
         var taskB = Task.Run(() => system.GetAsync<CountingReadyActor>(id).AsTask());
+        await Task.Delay(100); // let B reach the gate (it must not load: it waits on A's gate)
 
-        // The first caller into LoadAsync (n==1) waits on bothEntered; the second
-        // (n==2) sets bothEntered and waits on releaseSecond — so both callers have
-        // provably passed the empty-registry check before either rebuilds, independent of
-        // Task.Run scheduling.
-        var firstCompleted = await Task.WhenAny(taskA, taskB);
-        var registered = await firstCompleted;
-        var secondTask = ReferenceEquals(firstCompleted, taskA) ? taskB : taskA;
-
-        // Release the second caller: it takes the gate, finds the registered instance and
-        // resolves to it instead of rebuilding (and re-initializing) a copy.
         releaseSecond.TrySetResult(true);
-        var secondResult = await secondTask;
+        var both = await Task.WhenAll(taskA, taskB);
 
-        await Assert.That(registered).IsNotNull();
-        await Assert.That(secondResult).IsNotNull();
+        await Assert.That(both[0]).IsNotNull();
+        await Assert.That(both[1]).IsNotNull();
+        await Assert.That(ReferenceEquals(both[0], both[1])).IsTrue();
 
-        // Single-flight: exactly one instance runs OnReadyAsync (recovery/replay path).
+        // Single-flight: exactly one instance runs OnReadyAsync (recovery/replay path) and
+        // the stream is read exactly once (the loser resolves through the registry).
         await Task.Delay(200);
         await Assert.That(CountingReadyActor.ReadyCount).IsEqualTo(1);
+        await Assert.That(store.Loads).IsEqualTo(1);
     }
 
     /// <summary>
@@ -215,7 +210,7 @@ public sealed class ActorSystemGetAsyncRaceTests
             }
         });
 
-        await Task.WhenAny(taskA, taskB);
+        await bothEntered.Task; // A is parked inside its in-gate load; the registry is empty
         releaseSecond.TrySetResult(true);
         await Task.WhenAll(taskA, taskB);
 
