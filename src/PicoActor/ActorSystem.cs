@@ -282,14 +282,20 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             if (_registry.TryGetValue(id, out var winner))
                 return await ResolveRegisteredAsync<T>(id, winner).ConfigureAwait(false);
 
+            // Capability discovery is this ONE test: a store that implements the cursor read
+            // port is rebuilt through it (the tail is read and materialized, the head is never
+            // turned into domain events), every other store keeps the LoadAsync path. No option
+            // slot, no wrapper: the store instance itself decides.
+            if (_eventStore is IEventLogReader reader)
+                return await RebuildFromReaderAsync<T>(reader, id, rebuildFactory)
+                    .ConfigureAwait(false);
+
             var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
             if (events.Count == 0)
                 return default;
 
             var actor = (ActorBase)(IActor)rebuildFactory();
             WireActor(actor, id);
-
-            var es = (IEventSourcedActor)actor;
 
             // Full-path resource cleanup: any failure point after the rebuild (replay/init)
             // marks the actor discarded + StopAsync + rethrow.
@@ -308,58 +314,7 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
                 throw;
             }
 
-            // Terminal events that already existed before the rebuild (Completed/Failed) → do not resurrect
-            if (actor is SagaActor saga && (saga.IsCompleted || saga.IsFailed))
-            {
-                await actor.StopAsync().ConfigureAwait(false);
-                return default;
-            }
-
-            // DEFENSIVE, and unreachable in a correct process: the per-id gate above is held
-            // through registration, so no second rebuild of this id can be racing this
-            // TryAdd — every concurrent caller either waited on the gate (and found this
-            // instance as a registry hit) or is behind us. The branch is kept because the
-            // registry is only private by accident of assembly boundaries, not by contract:
-            // if anything ever adds an entry for this id out of band, the loser must still be
-            // discarded (no second copy resuming/flushing) instead of silently overwriting
-            // the owner.
-            if (!_registry.TryAdd(id, actor))
-            {
-                TryLog(l =>
-                    l.Warning(
-                        $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
-                    )
-                );
-                await DiscardDuplicateAsync(actor);
-
-                if (_registry.TryGetValue(id, out var owner))
-                {
-                    // Same type guard as the registry-hit path above: if another thread won
-                    // the rebuild with a DIFFERENT aggregate type, degrade to default instead
-                    // of throwing InvalidCastException from the cast.
-                    return owner is T typedOwner ? typedOwner : default;
-                }
-
-                return default;
-            }
-
-            // Release the consumption loop gate and wait for initialization
-            // (OnReadyAsync: persist + mutate). The helper removes the actor from the
-            // registry and stops it on failure, then rethrows the original exception.
-            await CompleteInitializationAsync(actor, id);
-
-            // Init can end with the instance no longer registered: a terminal saga removes
-            // itself, and a concurrent stop can take it out. Resolve against the CURRENT
-            // registry state instead of returning a dead handle.
-            // Best effort: the rebuild succeeded, so a broken sink must not fail the lookup.
-            TryLog(l =>
-                l.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})")
-            );
-
-            // Passivation bookkeeping: a reclaim is only paid off here (see PassivatedCount).
-            NoteReactivated();
-
-            return ResolveAfterInitialization<T>(id, actor);
+            return await FinishRebuildAsync<T>(actor, id).ConfigureAwait(false);
         }
         finally
         {
@@ -368,6 +323,282 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             // have to call Release on it.
             gate.Semaphore.Release();
             _rebuildGates.Exited(id);
+        }
+    }
+
+    /// <summary>
+    /// The registry/initialization tail of a rebuild, SHARED by the cursor path and the
+    /// <c>LoadAsync</c> fallback so the two can never drift: terminal-saga refusal, ownership
+    /// registration with the duplicate-discard branch, initialization, the
+    /// "rebuilt from events" log, passivation bookkeeping and the final registry resolve.
+    /// <para>
+    /// The per-id rebuild gate is NOT touched here — it stays owned by
+    /// <see cref="GetAsync{T}"/>'s <c>finally</c>, which is what keeps "one rebuild per id at a
+    /// time" true for both paths.
+    /// </para>
+    /// </summary>
+    private async ValueTask<T?> FinishRebuildAsync<T>(ActorBase actor, Guid id)
+        where T : IActor
+    {
+        var es = (IEventSourcedActor)actor;
+
+        // Terminal events that already existed before the rebuild (Completed/Failed) → do not resurrect
+        if (actor is SagaActor saga && (saga.IsCompleted || saga.IsFailed))
+        {
+            await actor.StopAsync().ConfigureAwait(false);
+            return default;
+        }
+
+        // DEFENSIVE, and unreachable in a correct process: the per-id gate above is held
+        // through registration, so no second rebuild of this id can be racing this
+        // TryAdd — every concurrent caller either waited on the gate (and found this
+        // instance as a registry hit) or is behind us. The branch is kept because the
+        // registry is only private by accident of assembly boundaries, not by contract:
+        // if anything ever adds an entry for this id out of band, the loser must still be
+        // discarded (no second copy resuming/flushing) instead of silently overwriting
+        // the owner.
+        if (!_registry.TryAdd(id, actor))
+        {
+            TryLog(l =>
+                l.Warning(
+                    $"Actor {typeof(T).Name} {id} already rebuilt by another thread, discarding duplicate"
+                )
+            );
+            await DiscardDuplicateAsync(actor);
+
+            if (_registry.TryGetValue(id, out var owner))
+            {
+                // Same type guard as the registry-hit path above: if another thread won
+                // the rebuild with a DIFFERENT aggregate type, degrade to default instead
+                // of throwing InvalidCastException from the cast.
+                return owner is T typedOwner ? typedOwner : default;
+            }
+
+            return default;
+        }
+
+        // Release the consumption loop gate and wait for initialization
+        // (OnReadyAsync: persist + mutate). The helper removes the actor from the
+        // registry and stops it on failure, then rethrows the original exception.
+        await CompleteInitializationAsync(actor, id);
+
+        // Init can end with the instance no longer registered: a terminal saga removes
+        // itself, and a concurrent stop can take it out. Resolve against the CURRENT
+        // registry state instead of returning a dead handle.
+        // Best effort: the rebuild succeeded, so a broken sink must not fail the lookup.
+        TryLog(l => l.Info($"Actor {typeof(T).Name} rebuilt from events: {id} (v{es.Version})"));
+
+        // Passivation bookkeeping: a reclaim is only paid off here (see PassivatedCount).
+        NoteReactivated();
+
+        return ResolveAfterInitialization<T>(id, actor);
+    }
+
+    /// <summary>
+    /// Rebuild through the store's cursor read port: open ONCE at <c>snapshot.Version + 1</c>,
+    /// take the stream length from that cursor's <see cref="IEventCursor.End"/> and materialize
+    /// only the tail the snapshot does not already cover.
+    /// <para>
+    /// The single observation is the point: the rollback guard, the "did the tail arrive" check
+    /// and the reconstructed <c>Version</c> all come from ONE <see cref="IEventCursor.End"/>, so a
+    /// rebuild can never mix two different views of the stream (which a second <c>LoadAsync</c>
+    /// would reintroduce). Empty streams never call <paramref name="rebuildFactory"/> — not on the
+    /// first open and not on the full-replay re-open.
+    /// </para>
+    /// <para>
+    /// Nothing here throws for a rolled back or shrinking stream: an open past the end is legal,
+    /// and a short drain is a mismatch that degrades to the full replay on the SAME instance.
+    /// </para>
+    /// </summary>
+    private async ValueTask<T?> RebuildFromReaderAsync<T>(
+        IEventLogReader reader,
+        Guid id,
+        Func<object> rebuildFactory
+    )
+        where T : IActor
+    {
+        // The snapshot decides the OPEN POSITION only (v + 1). It never decides the guard: that
+        // is compared against the End of the one open below.
+        var snapshot = _eventStore is IEventStoreSnapshot snapshotStore
+            ? await snapshotStore.LoadSnapshotAsync(id).ConfigureAwait(false)
+            : null;
+        var v = snapshot?.Version ?? 0;
+
+        await using var cursor = await reader
+            .OpenAsync(id, v == 0 ? 1UL : v + 1UL)
+            .ConfigureAwait(false);
+
+        // Nothing to rebuild FROM: no factory call, no initialization, not even a Version-0 actor.
+        if (cursor.End == 0)
+            return default;
+
+        var tail = await DrainAsync(cursor).ConfigureAwait(false);
+
+        // Rollback (a snapshot newer than the stream) and shrink (the drain delivered less than
+        // End) are MISMATCHES, not exceptions: discard the snapshot, replay from version 1.
+        if (v > cursor.End || v + (ulong)tail.Count != cursor.End)
+        {
+            await cursor.DisposeAsync().ConfigureAwait(false); // release before the second open
+            return await FullReplayAsync<T>(reader, id, rebuildFactory).ConfigureAwait(false);
+        }
+
+        var actor = (ActorBase)(IActor)rebuildFactory();
+        WireActor(actor, id);
+
+        var es = (IEventSourcedActor)actor;
+        Exception? failure = null;
+
+        // Same cleanup contract as the LoadAsync path: any failure after the actor exists
+        // discards it (MarkDiscarded + StopAsync) before the exception reaches the caller.
+        try
+        {
+            if (v == 0)
+            {
+                // No snapshot: the tail IS the whole stream.
+                es.ReplayEvents(tail);
+            }
+            else if (
+                es is ISnapshotableActor snap
+                && TryApplySnapshot(snap, snapshot, cursor.End, out failure)
+            )
+            {
+                snap.ReplayEventsFrom(v, tail);
+                TryLog(l =>
+                    l.Info(
+                        $"Actor {typeof(T).Name} {id} restored from snapshot v{v}, "
+                            + $"replayed {tail.Count} of {cursor.End} events"
+                    )
+                );
+            }
+            else
+            {
+                // Snapshot rejected (schema, format, throw) or the aggregate cannot restore one:
+                // replay the WHOLE stream on THIS instance — never build a second actor.
+                await cursor.DisposeAsync().ConfigureAwait(false); // release before the second open
+                var all = await DrainAllAsync(reader, id).ConfigureAwait(false);
+                if (all.Count == 0)
+                {
+                    // The stream vanished between the two opens.
+                    await DiscardDuplicateAsync(actor).ConfigureAwait(false);
+                    return default;
+                }
+
+                es.ReplayEvents(all);
+                TryLog(l =>
+                    l.Warning(
+                        $"Actor {typeof(T).Name} {id}: snapshot ignored, replaying the full stream "
+                            + $"({failure?.Message ?? "actor cannot restore a snapshot"})"
+                    )
+                );
+            }
+        }
+        catch
+        {
+            await DiscardDuplicateAsync(actor).ConfigureAwait(false);
+            throw;
+        }
+
+        return await FinishRebuildAsync<T>(actor, id).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The cursor path's full replay: a SECOND open at version 1, drained BEFORE anything is
+    /// constructed — so a stream that vanished since the first open returns <c>default</c>
+    /// instead of resurrecting an empty aggregate.
+    /// </summary>
+    private async ValueTask<T?> FullReplayAsync<T>(
+        IEventLogReader reader,
+        Guid id,
+        Func<object> rebuildFactory
+    )
+        where T : IActor
+    {
+        var all = await DrainAllAsync(reader, id).ConfigureAwait(false);
+        if (all.Count == 0)
+            return default;
+
+        var actor = (ActorBase)(IActor)rebuildFactory();
+        WireActor(actor, id);
+
+        try
+        {
+            ((IEventSourcedActor)actor).ReplayEvents(all);
+        }
+        catch
+        {
+            await DiscardDuplicateAsync(actor).ConfigureAwait(false);
+            throw;
+        }
+
+        return await FinishRebuildAsync<T>(actor, id).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Materialize what the cursor still holds. The runtime replays from an
+    /// <see cref="IReadOnlyList{T}"/> (the actor contract is unchanged), so the TAIL is
+    /// materialized here — the point of the cursor is that the head never becomes domain events.
+    /// </summary>
+    private static async ValueTask<List<IDomainEvent>> DrainAsync(IEventCursor cursor)
+    {
+        var events = new List<IDomainEvent>();
+        while (await cursor.MoveNextAsync().ConfigureAwait(false))
+            events.Add(cursor.Current);
+        return events;
+    }
+
+    /// <summary>
+    /// Drain a fresh cursor opened at version 1 — the whole stream as this store sees it, read
+    /// from a SECOND open (never from the tail cursor that already reported its End).
+    /// </summary>
+    private async ValueTask<List<IDomainEvent>> DrainAllAsync(IEventLogReader reader, Guid id)
+    {
+        await using var cursor = await reader.OpenAsync(id, 1).ConfigureAwait(false);
+        return await DrainAsync(cursor).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The first deserializable event of a stream, for recovery enumeration: the reader's view
+    /// when the store is one, else the store's own member (the fallback for stores that did not
+    /// implement the read port yet).
+    /// </summary>
+    private ValueTask<IDomainEvent?> PeekFirstAsync(Guid id) =>
+        _eventStore is IEventLogReader reader
+            ? reader.PeekFirstAsync(id)
+            : _eventStore.PeekFirstAsync(id);
+
+    /// <summary>
+    /// Decode <paramref name="snapshot"/> into <paramref name="snapshotable"/> when it describes
+    /// state this stream really has: a missing snapshot, version 0 ("describes nothing") and a
+    /// version past the stream end (a rolled back or truncated stream) are all "no". A throwing
+    /// restore is a "no" too, with the exception reported through
+    /// <paramref name="failure"/> — snapshots are acceleration only, so this never throws.
+    /// <para>
+    /// Both rebuild paths share it, and each passes its OWN stream length (the cursor's
+    /// <see cref="IEventCursor.End"/> for the reader path, the loaded list's count for the
+    /// fallback), so the guard compares a snapshot against the same observation it came from.
+    /// </para>
+    /// </summary>
+    private static bool TryApplySnapshot(
+        ISnapshotableActor snapshotable,
+        ActorSnapshot? snapshot,
+        ulong streamEnd,
+        out Exception? failure
+    )
+    {
+        failure = null;
+
+        if (snapshot is null || snapshot.Version == 0 || snapshot.Version > streamEnd)
+            return false;
+
+        try
+        {
+            snapshotable.RestoreSnapshot(snapshot.Version, snapshot.Payload);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+            return false;
         }
     }
 
@@ -406,21 +637,12 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             return;
         }
 
-        ulong baseVersion;
+        // Reading the snapshot is part of the same degradation contract as applying it: an
+        // unreadable snapshot costs a warning, never a failed rebuild.
+        ActorSnapshot? snapshot;
         try
         {
-            var snapshot = await snapshotStore.LoadSnapshotAsync(actor.Id).ConfigureAwait(false);
-
-            // Version 0 describes nothing, and a version beyond the end of the stream belongs
-            // to a stream that was rolled back or truncated: neither can be applied.
-            if (snapshot is null || snapshot.Version == 0 || snapshot.Version > (ulong)events.Count)
-            {
-                es.ReplayEvents(events);
-                return;
-            }
-
-            baseVersion = snapshot.Version;
-            snapshotable.RestoreSnapshot(baseVersion, snapshot.Payload);
+            snapshot = await snapshotStore.LoadSnapshotAsync(actor.Id).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -433,6 +655,23 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             es.ReplayEvents(events);
             return;
         }
+
+        // Version 0 describes nothing, and a version beyond the end of the stream belongs to a
+        // stream that was rolled back or truncated: neither can be applied.
+        if (!TryApplySnapshot(snapshotable, snapshot, (ulong)events.Count, out var failure))
+        {
+            if (failure is not null)
+                TryLog(l =>
+                    l.Warning(
+                        $"Actor {actor.GetType().Name} {actor.Id}: snapshot ignored, replaying the "
+                            + $"full stream ({failure.Message})"
+                    )
+                );
+            es.ReplayEvents(events);
+            return;
+        }
+
+        var baseVersion = snapshot!.Version;
 
         // The tail is a zero-copy WINDOW over the store's list, not a materialized copy:
         // a store may return a lazy IReadOnlyList whose indexer deserializes on demand
@@ -860,7 +1099,7 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             var id in await enumerator.ListAggregateIdsAsync(firstEventType).ConfigureAwait(false)
         )
         {
-            var first = await _eventStore.PeekFirstAsync(id).ConfigureAwait(false);
+            var first = await PeekFirstAsync(id).ConfigureAwait(false);
             if (first is not null && firstEventMatch(first))
                 result.Add(id);
         }
@@ -888,7 +1127,7 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             {
                 // First-event match first (peek only — no full-file read), so a
                 // non-matching stream is skipped without a rebuild.
-                var first = await _eventStore.PeekFirstAsync(id).ConfigureAwait(false);
+                var first = await PeekFirstAsync(id).ConfigureAwait(false);
                 if (first is null || !match(first))
                     continue;
 
