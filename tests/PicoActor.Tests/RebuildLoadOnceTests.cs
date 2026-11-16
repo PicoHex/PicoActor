@@ -36,9 +36,11 @@ internal sealed class CountingEventStore(InMemoryEventStore inner) : IEventStore
 /// </summary>
 internal sealed class RebuildLoadOnceTests
 {
-    private static async Task<(ActorSystem System, CountingEventStore Store, Guid Id)> BuildStoppedAsync(
-        int adds = 4
-    )
+    private static async Task<(
+        ActorSystem System,
+        CountingEventStore Store,
+        Guid Id
+    )> BuildStoppedAsync(int adds = 4)
     {
         var store = new CountingEventStore(new InMemoryEventStore());
         var system = new ActorSystem(new ActorSystemOptions { EventStore = store });

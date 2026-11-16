@@ -15,7 +15,7 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     /// Per-id single-flight gates for <see cref="GetAsync{T}"/> (rebuild + initialization).
     /// Entries are never reclaimed — see the gate comment in <see cref="GetAsync{T}"/>.
     /// </summary>
-    private readonly ConcurrentDictionary<Guid, RebuildGate> _rebuildGates = new();
+    private readonly RebuildGateTable _rebuildGates = new();
 
     /// <summary>Number of per-id rebuild gates currently tracked (diagnostic/test hook).</summary>
     internal int RebuildGateCount => _rebuildGates.Count;
@@ -258,45 +258,31 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
         if (!typeof(IEventSourcedActor).IsAssignableFrom(typeof(T)))
             return default;
 
-        // Prefetch the stream the rebuild replays. Read BEFORE taking the per-id gate: an
-        // id with no stream at all must not take the gate, and reading outside the gate
-        // keeps lookups of different ids fully parallel.
-        // This snapshot is NEVER trusted for the rebuild itself: it can already be stale
-        // by the time the gate is acquired (it is always re-read below).
-        var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
-        if (events.Count == 0)
-            return default;
-
         // Single-flight per id: callers that miss the registry must not each build and
         // initialize their own copy of the same aggregate. A duplicate copy replays the
         // stream twice and, for a saga, resumes twice - so the second resume flushes on
         // top of the first and dies with ConcurrencyException. The gate is held THROUGH
         // initialization: that is what makes the re-check below meaningful (a registered
         // but still initializing instance must not be handed out).
-        // Gates are NOT reclaimed for the process lifetime - the same trade-off
-        // InMemoryEventStore._locks makes for its per-aggregate append locks (one
-        // SemaphoreSlim per id, bounded by the number of aggregates this process touches).
-        var gate = _rebuildGates.GetOrAdd(id, static _ => new RebuildGate());
+        //
+        // The stream is read ONCE, under the gate. There is no prefetch to reuse: one taken
+        // outside the gate could already be stale by the time the gate is acquired, and
+        // replaying it would resume a saga that has already completed (a previous caller's
+        // rebuild leaves nothing registered for a terminal saga, a stopped copy or a failed
+        // init; the shutdown side removes the registry entry BEFORE its draining loop flushes
+        // the terminal event, which is invisible to the registry). Reading once under the gate
+        // makes "the replayed baseline cannot predate the gate" structural instead of a rule
+        // to remember.
+        var gate = _rebuildGates.Acquire(id);
         await gate.Semaphore.WaitAsync().ConfigureAwait(false);
+        _rebuildGates.Entered(id);
         try
         {
             // Another caller may have completed the rebuild while we waited.
             if (_registry.TryGetValue(id, out var winner))
                 return await ResolveRegisteredAsync<T>(id, winner).ConfigureAwait(false);
 
-            // Re-read UNCONDITIONALLY under the gate - the prefetch above is never the
-            // baseline we replay. Two independent writes can land between the prefetch and
-            // this line:
-            //   - a previous caller's rebuild (it left nothing registered: a terminal saga
-            //     that unregistered itself, a stopped copy, a failed init), and
-            //   - the SHUTDOWN side: StopAsync removes the registry entry first and only
-            //     then lets the draining loop flush its terminal event - that write is
-            //     invisible to the registry, and the first caller into the gate ("entry 1")
-            //     is exactly the caller that can be holding the pre-shutdown snapshot.
-            // Replaying a stale snapshot resumes a saga that has already completed and dies
-            // with ConcurrencyException (or appends a second terminal batch). Reads are
-            // idempotent and cheap; correctness wins over saving one read.
-            events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
+            var events = await _eventStore.LoadAsync(id).ConfigureAwait(false);
             if (events.Count == 0)
                 return default;
 
@@ -377,7 +363,11 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
         }
         finally
         {
+            // Release BEFORE marking the gate idle: an idle gate may be evicted (and its
+            // semaphore disposed) by the table, and it must not be disposed while we still
+            // have to call Release on it.
             gate.Semaphore.Release();
+            _rebuildGates.Exited(id);
         }
     }
 
@@ -1121,5 +1111,118 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     private sealed class RebuildGate
     {
         public SemaphoreSlim Semaphore { get; } = new(1, 1);
+    }
+
+    /// <summary>
+    /// Bounded per-id table of <see cref="RebuildGate"/>s (LRU, capacity
+    /// <see cref="Capacity"/>). A gate is dropped only when nobody is waiting on or holding
+    /// it, so a dropped id always starts a fresh single-flight group: concurrent callers
+    /// either share the same gate, or one starts a new group only after the previous one
+    /// finished - two groups for one id can never overlap.
+    /// <para>
+    /// This deliberately differs from <c>InMemoryEventStore._locks</c>, which stays unbounded:
+    /// its keys are aggregates that actually have streams (bounded by stored data), while this
+    /// table is keyed by caller-supplied ids, including ids that do not exist. Lookups must
+    /// not grow process memory without bound.
+    /// </para>
+    /// </summary>
+    private sealed class RebuildGateTable
+    {
+        internal const int Capacity = 1024;
+
+        private readonly object _sync = new();
+        private readonly Dictionary<Guid, Entry> _entries = new();
+        private readonly LinkedList<Guid> _recent = new();
+
+        internal int Count
+        {
+            get
+            {
+                lock (_sync)
+                    return _entries.Count;
+            }
+        }
+
+        public RebuildGate Acquire(Guid id)
+        {
+            lock (_sync)
+            {
+                if (_entries.TryGetValue(id, out var existing))
+                {
+                    _recent.Remove(existing.Node);
+                    _recent.AddFirst(existing.Node);
+                    existing.Waiters++;
+                    return existing.Gate;
+                }
+
+                var gate = new RebuildGate();
+                var node = _recent.AddFirst(id);
+                _entries.Add(
+                    id,
+                    new Entry
+                    {
+                        Gate = gate,
+                        Node = node,
+                        Waiters = 1,
+                    }
+                );
+                Trim();
+                return gate;
+            }
+        }
+
+        /// <summary>The caller acquired the semaphore; it is now holding the gate.</summary>
+        public void Entered(Guid id)
+        {
+            lock (_sync)
+            {
+                if (!_entries.TryGetValue(id, out var entry))
+                    return;
+                entry.Waiters--;
+                entry.Holders++;
+            }
+        }
+
+        /// <summary>The caller released the semaphore and no longer touches the gate.</summary>
+        public void Exited(Guid id)
+        {
+            lock (_sync)
+            {
+                if (!_entries.TryGetValue(id, out var entry))
+                    return;
+                entry.Holders--;
+                _recent.Remove(entry.Node);
+                _recent.AddFirst(entry.Node);
+            }
+        }
+
+        private void Trim()
+        {
+            var node = _recent.Last;
+            while (_entries.Count > Capacity && node is not null)
+            {
+                var previous = node.Previous;
+                if (
+                    _entries.TryGetValue(node.Value, out var entry)
+                    && entry.Waiters == 0
+                    && entry.Holders == 0
+                )
+                {
+                    _entries.Remove(node.Value);
+                    _recent.Remove(node);
+                    entry.Gate.Semaphore.Dispose();
+                }
+
+                node = previous;
+            }
+        }
+
+        private sealed class Entry
+        {
+            public required RebuildGate Gate { get; init; }
+            public required LinkedListNode<Guid> Node { get; init; }
+            public int Waiters;
+            public int Holders;
+        }
     }
 }
