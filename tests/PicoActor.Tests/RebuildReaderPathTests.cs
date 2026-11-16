@@ -334,4 +334,60 @@ public sealed class RebuildReaderPathTests
 
         await system.StopAsync(id);
     }
+
+    [Test, Timeout(15000)]
+    public async Task NonReaderStore_FallsBackToLoadAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        // CountingEventStore wraps IEventStore ONLY (no reader, no snapshot capability): the
+        // runtime has no choice but the LoadAsync path, and it must read the stream once.
+        var store = new CountingEventStore(new InMemoryEventStore());
+        var system = NewSystem(store);
+        Register(system);
+        var id = await SeedStoppedAsync(system, events: 4);
+        store.Reset();
+
+        var rebuilt = await system.GetAsync<SSnapshotCounter>(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.Value).IsEqualTo(4);
+        await Assert.That(store.Loads).IsEqualTo(1);
+
+        await system.StopAsync(id);
+    }
+
+    [Test, Timeout(15000)]
+    public async Task ConcurrentMisses_SingleFlight_OnReaderPath_Unchanged(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        // RebuildLoadOnceTests.ConcurrentMisses_RebuildOnceAndReadOnce pins this for the
+        // FALLBACK (its store wraps IEventStore only). This is the reader path: two callers that
+        // both miss the registry must still produce ONE instance, not one rebuilt copy each.
+        var store = new ReaderOnlyStore();
+        var system = NewSystem(store);
+        var factoryCalls = new int[1];
+        Register(
+            system,
+            () =>
+            {
+                Interlocked.Increment(ref factoryCalls[0]);
+                return new SSnapshotCounter();
+            }
+        );
+        var id = await SeedStoppedAsync(system, events: 4);
+
+        var first = system.GetAsync<SSnapshotCounter>(id).AsTask();
+        var second = system.GetAsync<SSnapshotCounter>(id).AsTask();
+        var results = await Task.WhenAll(first, second);
+
+        await Assert.That(results[0]).IsNotNull();
+        await Assert.That(ReferenceEquals(results[0], results[1])).IsTrue();
+        await Assert.That(factoryCalls[0]).IsEqualTo(1);
+
+        await system.StopAsync(id);
+    }
 }
