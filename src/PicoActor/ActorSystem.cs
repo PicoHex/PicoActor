@@ -434,7 +434,11 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
             return;
         }
 
-        var tail = events.Skip((int)baseVersion).ToList();
+        // The tail is a zero-copy WINDOW over the store's list, not a materialized copy:
+        // a store may return a lazy IReadOnlyList whose indexer deserializes on demand
+        // (the file store does), and materializing here would throw that away by touching
+        // every element of the head we are about to skip.
+        var tail = new EventTailView(events, (int)baseVersion);
         snapshotable.ReplayEventsFrom(baseVersion, tail);
         TryLog(l =>
             l.Info(
@@ -1108,6 +1112,29 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     /// one id run one caller at a time. The gate carries no state — every caller re-reads
     /// the stream under it (see GetAsync), so "who went first" never has to be inferred.
     /// </summary>
+    /// <summary>
+    /// Zero-copy window over a store list: <c>[from, source.Count)</c>. Only the elements a
+    /// caller actually touches are read, so a store whose indexer deserializes lazily pays
+    /// for the replayed tail and nothing else. Works with any <see cref="IReadOnlyList{T}"/>
+    /// because it never enumerates the head.
+    /// </summary>
+    private sealed class EventTailView(IReadOnlyList<IDomainEvent> source, int from)
+        : IReadOnlyList<IDomainEvent>
+    {
+        public IDomainEvent this[int index] => source[from + index];
+
+        public int Count => source.Count - from;
+
+        public IEnumerator<IDomainEvent> GetEnumerator()
+        {
+            for (var i = from; i < source.Count; i++)
+                yield return source[i];
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+    }
+
     private sealed class RebuildGate
     {
         public SemaphoreSlim Semaphore { get; } = new(1, 1);

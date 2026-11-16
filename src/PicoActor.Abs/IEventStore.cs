@@ -30,6 +30,12 @@ public interface IEventStore
     /// <summary>
     /// Load all events for an actor, ordered by version ascending.
     /// Returns empty list if the stream does not exist.
+    /// <para>
+    /// The returned list MAY be a lazy, index-addressed view — a file store can deserialize
+    /// an element only when it is read. Consumers therefore use <c>Count</c> and the indexer
+    /// and must not assume eager materialization: the snapshot-accelerated rebuild only reads
+    /// the events after the snapshot, so a lazy store pays for the tail and nothing else.
+    /// </para>
     /// </summary>
     ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId);
 
