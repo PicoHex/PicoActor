@@ -1,4 +1,4 @@
-namespace PicoActor.Tests;
+namespace PicoActor.EventStore.InMemory.Tests;
 
 /// <summary>Second first-event type so the enumerator has something to filter out.</summary>
 public sealed record ProbeIgnored(int Seq) : IDomainEvent;

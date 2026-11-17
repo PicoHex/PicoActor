@@ -50,6 +50,11 @@
           "PicoMediator.Abs": "2026.11.1"
         }
       },
+      "PicoSerDe.Core": {
+        "type": "Transitive",
+        "resolved": "2026.13.3",
+        "contentHash": "iIAxCzEyZOkUgOUha5nt1reaxO/I08DnyBTtyPil5iq49fK6AZPPiRUv14qD/kmDAsBkQnf5HYLNkWbb8PLmeA=="
+      },
       "picoactor": {
         "type": "Project",
         "dependencies": {
@@ -67,8 +72,31 @@
           "PicoMediator.Abs": "[2026.11.*, )"
         }
       },
+      "picoactor.eventstore.inmemory": {
+        "type": "Project",
+        "dependencies": {
+          "PicoActor.Abs": "[0.0.0-dev, )"
+        }
+      },
+      "picoactor.eventstore.jsonl": {
+        "type": "Project",
+        "dependencies": {
+          "PicoActor.Abs": "[0.0.0-dev, )",
+          "PicoJetson": "[2026.13.*, )",
+          "PicoLog.Abs": "[2026.11.*, )"
+        }
+      },
       "picoactor.gen": {
         "type": "Project"
+      },
+      "PicoJetson": {
+        "type": "CentralTransitive",
+        "requested": "[2026.13.*, )",
+        "resolved": "2026.13.3",
+        "contentHash": "30znhEAHWUt72FJKkVqauQi4OCvDWamjM6PoAAilog9+LRtiDBJW0gp8+HgK+tKvLM7VSwTgGl1OZzfQ/NqfFA==",
+        "dependencies": {
+          "PicoSerDe.Core": "2026.13.3"
+        }
       },
       "PicoLog.Abs": {
         "type": "CentralTransitive",

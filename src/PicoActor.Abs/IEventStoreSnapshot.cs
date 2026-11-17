@@ -13,9 +13,10 @@ namespace PicoActor.Abs;
 /// BUFFER OWNERSHIP, write side: the producer of a payload is allowed to REUSE its
 /// serialization buffer (one buffer per aggregate, filled again on the next snapshot), so
 /// whoever keeps an <see cref="ActorSnapshot"/> beyond the
-/// <see cref="IEventStoreSnapshot.SaveSnapshotAsync"/> call must keep its own copy (the bundled
-/// <c>InMemoryEventStore</c> does). Until the array is overwritten the snapshot describes exactly
-/// the state at <paramref name="Version"/>.
+/// <see cref="IEventStoreSnapshot.SaveSnapshotAsync"/> call must keep its own copy (the store
+/// packages do: <c>PicoActor.EventStore.InMemory</c> copies the array, <c>PicoActor.EventStore.Jsonl</c>
+/// serializes it out before its task completes). Until the array is overwritten the snapshot
+/// describes exactly the state at <paramref name="Version"/>.
 /// </para>
 /// <para>
 /// BUFFER OWNERSHIP, read side: a payload RETURNED by

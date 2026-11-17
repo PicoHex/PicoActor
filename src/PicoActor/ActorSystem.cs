@@ -1434,10 +1434,12 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     /// either share the same gate, or one starts a new group only after the previous one
     /// finished - two groups for one id can never overlap.
     /// <para>
-    /// This deliberately differs from <c>InMemoryEventStore._locks</c>, which stays unbounded:
-    /// its keys are aggregates that actually have streams (bounded by stored data), while this
-    /// table is keyed by caller-supplied ids, including ids that do not exist. Lookups must
-    /// not grow process memory without bound.
+    /// This deliberately differs from the in-memory store's per-actor gate dictionary
+    /// (<c>InMemoryEventStore._locks</c>, in the <c>PicoActor.EventStore.InMemory</c> package),
+    /// which stays unbounded: its keys are aggregates that actually have streams (bounded by
+    /// stored data), while this table is keyed by caller-supplied ids, including ids that do not
+    /// exist. Lookups must not grow process memory without bound; the JSONL store bounds its own
+    /// gate table the same way (<c>MaxAggregateLocks</c>).
     /// </para>
     /// </summary>
     private sealed class RebuildGateTable

@@ -27,9 +27,12 @@ public interface IEventLogReader
     /// tools/diagnostics surface; the rebuild path does NOT call it — it takes the length from
     /// the <see cref="IEventCursor.End"/> of the cursor it already opened (one observation).
     /// <para>
-    /// For the same stream it either equals <c>(await LoadAsync(id)).Count</c> or throws the
-    /// same exception the loader throws: both use the store's single line-classification rule,
-    /// so a line the loader skips is neither counted nor yielded.
+    /// The count is a LINE COUNT, taken by the same cheap scan <see cref="IEventCursor.End"/> uses:
+    /// complete, non-blank, terminated lines (records), never a JSON validation. It therefore equals
+    /// <c>(await LoadAsync(id)).Count</c> for a clean stream, and may EXCEED it for a damaged one: a
+    /// terminated line that fails to deserialize is counted here while
+    /// <see cref="IEventStore.LoadAsync"/> and the cursor throw for it (a file store does not repair
+    /// corruption). An unterminated final line — the crash tail — is neither counted nor thrown.
     /// </para>
     /// </summary>
     ValueTask<ulong> GetVersionAsync(Guid actorId, CancellationToken ct = default);

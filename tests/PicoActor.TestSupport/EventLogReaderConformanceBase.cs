@@ -1,6 +1,6 @@
 using PicoActor.Abs;
 
-namespace PicoActor.Tests;
+namespace PicoActor.TestSupport;
 
 /// <summary>
 /// Conformance contract every <see cref="IEventLogReader"/>/<see cref="IEventCursor"/>
@@ -21,6 +21,23 @@ public abstract class EventLogReaderConformanceBase
     /// is a property of the pair (the reader must agree with the store's own view of the stream).
     /// </summary>
     protected abstract (IEventStore Store, IEventLogReader Reader) Create();
+
+    /// <summary>
+    /// Rewrite an existing stream so that blank lines sit BETWEEN its events (and after the last
+    /// one), when the store's medium has lines at all (a file). The default does nothing: a store
+    /// whose streams are lists cannot hold a blank line, and the blank-line cases then assert only
+    /// that the stream is intact.
+    /// <para>
+    /// BETWEEN the events is the load-bearing placement: a blank block only at the tail never
+    /// exercises the cursor's byte positioning, which counts EVENTS, not lines — a reader that
+    /// counted lines would open in the middle of the stream and drift by one event per block.
+    /// </para>
+    /// <para>
+    /// The three shapes every reader must ignore are trailing ASCII spaces, a lone tab and a bare
+    /// carriage return — all newline-TERMINATED, so the file is not torn, only wasteful.
+    /// </para>
+    /// </summary>
+    protected virtual Task InjectBlankLinesAsync(Guid actorId) => Task.CompletedTask;
 
     /// <summary>Append <paramref name="count"/> events — versions 1..count — to a fresh stream.</summary>
     private static async Task<Guid> SeedAsync(IEventStore store, int count)
@@ -244,15 +261,54 @@ public abstract class EventLogReaderConformanceBase
             .That(async () => await cursor.MoveNextAsync(cancelled.Token))
             .Throws<OperationCanceledException>();
     }
-}
 
-/// <summary>The bundled in-memory store satisfies the cursor read port.</summary>
-[InheritsTests]
-public sealed class EventLogReaderConformanceTests : EventLogReaderConformanceBase
-{
-    protected override (IEventStore Store, IEventLogReader Reader) Create()
+    [Test, Timeout(15000)]
+    public async Task BlankLines_NeitherCountedNorPositionedOver(
+        CancellationToken cancellationToken = default
+    )
     {
-        var store = new InMemoryEventStore();
-        return (store, store);
+        _ = cancellationToken;
+        var (store, reader) = Create();
+        var id = await SeedAsync(store, Seeded);
+
+        // Blank lines are not events: the count, the loader and the cursor must all skip them, and
+        // the cursor's byte positioning must not land ON one (positioning counts events, not lines).
+        await InjectBlankLinesAsync(id);
+
+        await Assert.That(await reader.GetVersionAsync(id)).IsEqualTo((ulong)Seeded);
+        await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(Seeded);
+
+        await using var cursor = await reader.OpenAsync(id, 2);
+
+        await Assert.That(cursor.End).IsEqualTo(3UL);
+
+        var versions = new List<ulong>();
+        while (await cursor.MoveNextAsync())
+            versions.Add(cursor.CurrentVersion);
+
+        await Assert.That(versions.SequenceEqual([2UL, 3UL])).IsTrue();
+    }
+
+    [Test, Timeout(15000)]
+    public async Task BlankLines_AfterLastEvent_AreNotATornTail(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var (store, reader) = Create();
+        var id = await SeedAsync(store, Seeded);
+
+        // A trailing blank line is TERMINATED — it is not the torn tail a crash leaves — so the stream
+        // still ends at version Seeded, a cursor past the end is empty, and the first event is intact.
+        await InjectBlankLinesAsync(id);
+
+        await using (var past = await reader.OpenAsync(id, Seeded + 1))
+        {
+            await Assert.That(past.End).IsEqualTo((ulong)Seeded);
+            await Assert.That(await past.MoveNextAsync()).IsFalse();
+        }
+
+        await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(Seeded);
+        await Assert.That(await reader.PeekFirstAsync(id)).IsEqualTo(new SSnapshotAdded(1));
     }
 }

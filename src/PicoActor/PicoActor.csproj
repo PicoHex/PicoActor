@@ -4,7 +4,7 @@
     <IsPackable>true</IsPackable>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageId>PicoActor</PackageId>
-    <Description>In-memory Actor runtime for PicoNode. Provides ActorSystem (IActorSystem implementation), InMemoryEventStore, and PicoDI integration.</Description>
+    <Description>Actor runtime for PicoNode. Provides ActorSystem (IActorSystem implementation) and PicoDI integration; event stores ship as separate packages (PicoActor.EventStore.InMemory, PicoActor.EventStore.Jsonl).</Description>
     <PackageTags>PicoHex;PicoNode;AOT;Actor;ActorModel;EventSourcing</PackageTags>
   </PropertyGroup>
   <ItemGroup>

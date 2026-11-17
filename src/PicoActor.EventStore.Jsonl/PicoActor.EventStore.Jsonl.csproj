@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageId>PicoActor.EventStore.Jsonl</PackageId>
+    <Description>Durable JSONL event store for PicoActor: one file per aggregate, append-only with optimistic concurrency, tail-only rebuild through the cursor read port, atomic snapshot sidecars. AOT-safe, source-generated serialization (PicoJetson), single-process.</Description>
+    <PackageTags>PicoHex;PicoActor;AOT;JSONL event store;Durable event store;Event sourcing</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PicoActor.EventStore.Jsonl.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- PicoJetson: PrivateAssets="none" is load-bearing, NOT the (silent) default. Its generator and
+         build/PicoJetson.targets must flow to the CONSUMER, because that is where [PicoDerivedType]
+         registration happens — the generator ignores type parameters, so a Serialize<TEventBase> call
+         in this package generates nothing. The default PrivateAssets (contentfiles;analyzers;build)
+         writes exclude="Build,Analyzers" on the nuspec edge, and the consumer would then find no
+         generator for its own registration. "none" keeps the edge as include="All".
+         scripts/verify-package.sh asserts that edge on the packed package. -->
+    <PackageReference Include="PicoJetson" PrivateAssets="none" />
+    <!-- PicoLog.Abs: Build-private (the repo convention). It ships an analyzers/dotnet/cs dll and a
+         props file that no JSONL consumer needs; the logger seam itself is compiled in. -->
+    <PackageReference Include="PicoLog.Abs" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
+    <!-- PrivateAssets=Build: let Abs's buildTransitive analyzer flow downstream
+         (nuspec edge would otherwise become exclude="Build,Analyzers") -->
+    <ProjectReference Include="..\PicoActor.Abs\PicoActor.Abs.csproj" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
+    <PackageReference Include="PicoActor.Abs" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
+  <!-- The two-item pair (both halves are load-bearing): the ProjectReference actually BUILDS the
+       analyzer and hands it to this compilation, the None puts the built dll into the package's
+       analyzers/dotnet/cs folder for consumers. A None without the ProjectReference packs a missing
+       dll (or a stale one); a ProjectReference without the None analyzes this package alone and ships
+       nothing. Mirrors src/PicoActor.Abs/PicoActor.Abs.csproj. -->
+  <ItemGroup>
+    <ProjectReference
+      Include="..\PicoActor.EventStore.Gen\PicoActor.EventStore.Gen.csproj"
+      OutputItemType="Analyzer"
+      ReferenceOutputAssembly="false"
+      PrivateAssets="all"
+    />
+    <None
+      Include="..\PicoActor.EventStore.Gen\bin\$(Configuration)\netstandard2.0\PicoActor.EventStore.Gen.dll"
+      Pack="true"
+      PackagePath="analyzers/dotnet/cs"
+      Visible="false"
+    />
+  </ItemGroup>
+</Project>

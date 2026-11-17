@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="PublishAot">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <!-- Belt-and-suspenders: the shared netstandard2.0 guard in Directory.Build.targets covers
+         forgotten projects, this blocks inheritance at the project level too. -->
+    <PublishAot>false</PublishAot>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <NoWarn>$(NoWarn);RS2008;RS1041;NU5128</NoWarn>
+    <!-- Embedded into PicoActor.EventStore.Jsonl's package (analyzers/dotnet/cs): Gen is never
+         packed standalone, so it carries no packaging metadata and no Pack items. -->
+    <IsPackable>false</IsPackable>
+    <Description>Analyzer for PicoActor event stores — flags domain events that no [PicoDerivedType] registration covers</Description>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <MSBuildWarningsAsMessages>MSB3026</MSBuildWarningsAsMessages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- No ProjectReference to PicoActor.Abs: an analyzer ships to every consumer's compilation,
+         so it must stay netstandard2.0 and carry no class library. The two types it reasons about
+         are matched by metadata name instead. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

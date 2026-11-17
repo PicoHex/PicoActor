@@ -107,6 +107,7 @@ public sealed class CommandSenderTests
     {
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var childScope = container.CreateScope();

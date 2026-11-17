@@ -11,6 +11,8 @@ public sealed class ActorConfigTests
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         var config = new ActorConfig { EventStore = new EventStoreConfig { Type = "InMemory" } };
 
+        // "InMemory" claims no implementation: the store is whatever the host registered.
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor(config);
         container.Build();
         await using var scope = container.CreateScope();
@@ -28,6 +30,7 @@ public sealed class ActorConfigTests
     {
         var container = new SvcContainer(autoConfigureFromGenerator: false);
 
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor((ActorConfig?)null);
         container.Build();
         await using var scope = container.CreateScope();
@@ -38,7 +41,8 @@ public sealed class ActorConfigTests
     }
 
     /// <summary>
-    /// Unsupported event store type should throw at registration time.
+    /// Unsupported event store type still throws at registration time — the core registers no
+    /// implementation, so an explicit type name other than "InMemory" can only be a mistake.
     /// </summary>
     [Test]
     public async Task AddPicoActor_WithUnsupportedStoreType_Throws()
@@ -46,7 +50,18 @@ public sealed class ActorConfigTests
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         var config = new ActorConfig { EventStore = new EventStoreConfig { Type = "Postgres" } };
 
-        await Assert.That(() => container.AddPicoActor(config)).Throws<NotSupportedException>();
+        var ex = await Assert
+            .That(() => container.AddPicoActor(config))
+            .Throws<NotSupportedException>();
+
+        // The message must name the ONLY supported shape: a store the host registered itself.
+        await Assert.That(ex!.Message).Contains("'Postgres' is not supported");
+        await Assert
+            .That(ex.Message)
+            .Contains(
+                "Supported: whatever IEventStore is already registered "
+                    + "(e.g. AddPicoActorInMemoryStore()); other stores are constructed explicitly."
+            );
     }
 
     /// <summary>
@@ -58,6 +73,7 @@ public sealed class ActorConfigTests
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         var config = new ActorConfig(); // No EventStore set
 
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor(config);
         container.Build();
         await using var scope = container.CreateScope();

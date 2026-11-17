@@ -61,11 +61,13 @@ Event Sourcing Actor는 **Persist-then-Mutate**(영속화 후 변경)를 따릅�
 
 ```bash
 dotnet add package PicoActor
+dotnet add package PicoActor.EventStore.InMemory   # 저장소는 독립 패키지(v2026.9)
 ```
 
 ```csharp
 using PicoActor;
 using PicoActor.Abs;
+using PicoActor.EventStore.InMemory;
 
 // 1. 설정
 var store = new InMemoryEventStore();
@@ -122,7 +124,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 타입 | 역할 |
 |------|------|
 | `ActorSystem` | 기본 `IActorSystem`——ConcurrentDictionary 레지스트리, 팩토리 등록, 메시지 라우팅 |
-| `InMemoryEventStore` | 인메모리 저장소——스트림 단위 락, 낙관적 동시성(ConcurrentDictionary 기반) |
+| `InMemoryEventStore` | **`PicoActor.EventStore.InMemory`**로 이동(v2026.9)——인메모리 저장소: 스트림 단위 락, 낙관적 동시성(ConcurrentDictionary 기반); `AddPicoActorInMemoryStore()`로 등록 |
 | `ActorConfig` | 설정 POCO——PicoCfg에서 바인딩 가능 |
 | `ActorSystemOptions` | 옵션 — 필수 EventStore, 선택 Logger, 선택 DomainEventPublisher;`ActorSystem` 생성자에서 사용 |
 | `MediatorDomainEventPublisher` | 기본 `IDomainEventPublisher` — 이벤트별로 `DomainEventEnvelope` 게시, 이벤트별 격리 |
@@ -274,6 +276,68 @@ while (await cursor.MoveNextAsync())
   스트림 전체를 읽어 역직렬화합니다.
 - `InMemoryEventStore`는 `IEventLogReader`를 구현합니다. 다른 스토어에게 구현은 선택 사항이며
   순수하게 추가적인 변경입니다.
+
+### JSONL Event Store (opt-in)(JSONL 이벤트 저장소, 선택 사항)
+
+`PicoActor`는 Actor를 실행할 뿐 저장소를 함께 제공하지 않습니다. 저장소를 제공하는 패키지는
+두 개입니다: `PicoActor.EventStore.InMemory`(인메모리 기본 구현, `AddPicoActorInMemoryStore()`로
+등록)와 `PicoActor.EventStore.Jsonl`(영속화 — 이 절에서 설명).
+
+`PicoActor.EventStore.Jsonl`은 집계마다 추가 전용 JSONL 파일 하나
+(`<root>/<aggregateId>.jsonl`, 한 줄에 JSON 객체 하나)를 유지하고, 스냅샷은 인접한
+`<root>-snapshots` 디렉터리에 sidecar로 원자적으로 기록합니다. `IEventStore`,
+`IEventLogReader`, `IEventStoreSnapshot`, `IEventStoreEnumerator`를 구현하고 AOT 안전
+(PicoJetson 소스 생성)이며 **단일 프로세스**입니다: 같은 디렉터리에 대한 두 store 인스턴스는
+게이트를 공유하지 않으므로 동시 쓰기는 스트림을 찢지 않고 명확하게 실패합니다.
+
+```bash
+dotnet add package PicoActor.EventStore.Jsonl
+```
+
+```csharp
+using PicoActor.EventStore.Jsonl;
+
+// Registration lives on the event BASE, in YOUR assembly: one [PicoDerivedType] per concrete
+// event. [PicoSerializable] on the derived type is NOT enough — the generator ignores type
+// parameters, so a bare derived type leaves TEventBase without a serializer and the FIRST
+// append throws.
+[PicoDerivedType(typeof(CounterCreated), "counter-created")]
+[PicoDerivedType(typeof(CounterIncremented), "counter-incremented")]
+public abstract record CounterEvent : IDomainEvent;
+
+public sealed record CounterCreated(int Initial) : CounterEvent;
+
+public sealed record CounterIncremented(int Delta) : CounterEvent;
+
+var store = new JsonlEventStore<CounterEvent>(
+    "/var/lib/myapp/streams",
+    new JsonlEventStoreOptions { FlushToDisk = true }
+);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+```
+
+- **등록 누락은 빌드 시점에 드러납니다(첫 쓰기의 놀라움이 아님)**: 패키지에는 `PICOSTORE001`
+  분석기가 포함되어, 어떤 `[PicoDerivedType]`에도 열거되지 않은 도메인 이벤트를 지적합니다
+  (인메모리 저장소만 쓰는 프로젝트는 비용을 지불하지 않습니다).
+- **찢어진 꼬리와 손상은 다릅니다.** 개행으로 끝나지 않는 마지막 줄—프로세스 크래시만 남기는
+  형태—은 무시되며 집계되지도, 예외가 되지도 않습니다. 다음 추가가 그것을 잘라냅니다. 반면
+  **종료된** 줄인데 역직렬화에 실패하면 손상이며 예외입니다(마지막 줄 포함). 저장소는 이를
+  복구하지 않습니다—복구는 추측이기 때문입니다. 이것이 `FlushToDisk`를 기본값 `false`로 둘 때의
+  문서화된 비용입니다: 바이트는 OS에 도달하지만(다른 판독자는 즉시 그 이벤트를 봄) 플래터에는
+  도달하지 않으므로, 전원 손실이 종료된 쓰레기 줄을 남길 수 있습니다. `FlushToDisk = true`로
+  설정하면 추가마다 fsync합니다.
+- **커서와 꼬리만 재구성.** `GetVersionAsync`, 커서의 `End`, 그 바이트 위치는 한 번의 저렴한
+  스캔(완전하고 비어 있지 않으며 종료된 줄—JSON 검증 없음, 역직렬화기 없음)에서 나오므로,
+  스냅샷 가속 재구성은 `snapshot.Version + 1`에서 열어 꼬리(`N − v`개)만 역직렬화합니다.
+  절약되는 것은 역직렬화와 할당이며 디스크 I/O가 아닙니다: 머리 부분도 바이트로 한 번은 읽힙니다.
+  직렬화기의 "건너뛰기" 프로브가 필요 없습니다—일반 스트림에는 이벤트만 있으므로, 읽을 수 없는
+  줄은 외래 레코드가 아니라 손상입니다.
+- `MaxAggregateLocks`(기본 `1024`)가 집계별 게이트 테이블의 상한입니다; 밀려난 항목은 그 집계의
+  다음 추가에서 한 번 다시 스캔할 뿐이며 정확성에는 영향이 없습니다. `Logger`는 DI의
+  `ILoggerFactory`와 독립적입니다: 저장소의 경고를 자신의 로그에서 보려면 같은 logger를
+  명시적으로 전달하세요.
+- 이번 릴리스 범위 밖: 다중 프로세스 쓰기, 아카이브/보존/컴팩션, 외래(비이벤트) 줄,
+  암호화/압축, 프레임워크 이벤트용 두 번째 코덱.
 
 ### Idle Passivation (opt-in)(유휴 패시베이션, 선택 사항)
 
@@ -433,7 +497,8 @@ protected override async ValueTask<object?> OnMessageAsync(ICommand command)
 
 ```csharp
 var container = new SvcContainer();
-container.AddPicoActor();  // IActorSystem + InMemoryEventStore 등록
+container.AddPicoActor();               // IActorSystem만 등록(저장소는 등록하지 않음)
+container.AddPicoActorInMemoryStore();  // PicoActor.EventStore.InMemory: 인메모리 기본 구현
 
 // 사용자 정의 이벤트 저장소
 var store = new InMemoryEventStore();
@@ -443,6 +508,11 @@ container.AddPicoActor(store);
 var cfg = CfgBind.Bind<ActorConfig>(configuration, "Actor");
 container.AddPicoActor(cfg);
 ```
+
+`AddPicoActor()`는 더 이상 저장소를 등록하지 않지만 등록 시점에 실패하지는 않습니다:
+`IActorSystem`을 **해석**할 때 `InvalidOperationException`을 던지고 메시지에서
+`AddPicoActorInMemoryStore()`를 지목합니다(등록 순서는 여전히 자유롭고, 명시적
+`AddPicoActor(store)`가 계속 우선합니다).
 
 `IActorSystem`은 **Singleton**으로 등록됩니다. `ILoggerFactory`가 등록되어
 있으면 로거가 자동으로 주입됩니다.
@@ -498,7 +568,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // 사용자 지정 publisher 명시적 배선:AddPicoActor(IPublisher)(인스턴스는 Build() 전에 필요).
 ```
 
-> **필수 패키지:** 추가해야 하는 패키지는 `PicoActor` 하나입니다(`PicoActor.Abs`와 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator` 포함). `IDomainEventSubscriber<TEvent>`를 선언할 때 추가로 필요한 패키지는 없습니다. `PicoMediator`는 `PicoActor`의 종속성으로 함께 제공됩니다(생성된 브리지가 해당 패키지의 `MediatorAutoSubscriptionRegistry`를 호출합니다). 컨테이너 배선(`SvcContainer`, `AddPicoMediator`)을 사용할 때는 `PicoDI`와 `PicoMediator.DI`를 추가합니다.
+> **필수 패키지:** `PicoActor`(`PicoActor.Abs`와 `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator` 포함)에 더해 저장소 패키지 하나가 필요합니다 — 인메모리라면 `PicoActor.EventStore.InMemory`(`AddPicoActorInMemoryStore()`로 등록), 영속화라면 `PicoActor.EventStore.Jsonl`(PicoJetson 포함). `IDomainEventSubscriber<TEvent>`를 선언할 때 추가로 필요한 패키지는 없습니다. `PicoMediator`는 `PicoActor`의 종속성으로 함께 제공됩니다(생성된 브리지가 해당 패키지의 `MediatorAutoSubscriptionRegistry`를 호출합니다). 컨테이너 배선(`SvcContainer`, `AddPicoMediator`)을 사용할 때는 `PicoDI`와 `PicoMediator.DI`를 추가합니다.
 
 > **로컬 개발(ProjectReference):** analyzer는 ProjectReference 체인을 통해 전파되지 않습니다——프로젝트 소비자는 `PicoActor.Gen`을 직접 참조해야 합니다(`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, `tests/PicoActor.Tests` 미러). NuGet 소비자는 `PicoActor.Abs` 패키지의 `buildTransitive` props를 통해 생성기를 자동으로 받습니다——추가 참조 불필요.
 
@@ -544,7 +614,9 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | 패키지 | 타겟 | 설명 |
 |---------|--------|-------------|
 | [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 핵심 추상화: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor`, `SagaActor` — 추가로 구독 타입(`IDomainEventSubscriber<TEvent>`, `DomainEventEnvelope`, `ICommandSender`)과 내장 `PicoActor.Gen` 분석기(declare-and-subscribe) |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 런타임: `ActorSystem`, `InMemoryEventStore`, `MediatorDomainEventPublisher`(엔벨로프 이벤트 유출), PicoDI 통합(`AddPicoActor`가 IMediator + ICommandSender 자동 연결) |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 런타임: `ActorSystem`, `MediatorDomainEventPublisher`(엔벨로프 이벤트 유출), PicoDI 통합(`AddPicoActor`가 IMediator + ICommandSender 자동 연결) |
+| [PicoActor.EventStore.InMemory](https://www.nuget.org/packages/PicoActor.EventStore.InMemory) | `net10.0` | 인메모리 저장소(`InMemoryEventStore`, v2026.9에서 `PicoActor` 밖으로 이동) + `AddPicoActorInMemoryStore()` |
+| [PicoActor.EventStore.Jsonl](https://www.nuget.org/packages/PicoActor.EventStore.Jsonl) | `net10.0` | 영속 JSONL 이벤트 저장소: 추가 전용, 낙관적 동시성, `IEventLogReader`를 통한 꼬리만 재구성, 원자적 스냅샷 sidecar, AOT 안전(PicoJetson) — 내장 `PICOSTORE001` 등록 분석기 포함 |
 
 ---
 

@@ -16,8 +16,6 @@ internal sealed record SSnapshotAdd(int Delta) : ICommand;
 
 internal sealed record SSnapshotGet : ICommand;
 
-internal sealed record SSnapshotAdded(int Delta) : IDomainEvent;
-
 /// <summary>
 /// Counter aggregate that can snapshot itself. The payload is a magic byte plus the
 /// value, so a CORRUPT payload is detectable inside <see cref="RestoreSnapshot"/> —

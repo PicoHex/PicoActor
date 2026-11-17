@@ -6,12 +6,19 @@
   <Folder Name="/src/">
     <File Path="src\README.md" />
     <Project Path="src/PicoActor.Abs/PicoActor.Abs.csproj" />
+    <Project Path="src/PicoActor.EventStore.Gen/PicoActor.EventStore.Gen.csproj" />
+    <Project Path="src/PicoActor.EventStore.InMemory/PicoActor.EventStore.InMemory.csproj" />
+    <Project Path="src/PicoActor.EventStore.Jsonl/PicoActor.EventStore.Jsonl.csproj" />
     <Project Path="src/PicoActor.Gen/PicoActor.Gen.csproj" />
     <Project Path="src/PicoActor/PicoActor.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <File Path="tests\README.md" />
     <Project Path="tests/PicoActor.Abs.Tests/PicoActor.Abs.Tests.csproj" />
+    <Project Path="tests/PicoActor.EventStore.Gen.Tests/PicoActor.EventStore.Gen.Tests.csproj" />
+    <Project Path="tests/PicoActor.EventStore.InMemory.Tests/PicoActor.EventStore.InMemory.Tests.csproj" />
+    <Project Path="tests/PicoActor.EventStore.Jsonl.Tests/PicoActor.EventStore.Jsonl.Tests.csproj" />
+    <Project Path="tests/PicoActor.TestSupport/PicoActor.TestSupport.csproj" />
     <Project Path="tests/PicoActor.Tests/PicoActor.Tests.csproj" />
   </Folder>
 </Solution>

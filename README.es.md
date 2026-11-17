@@ -62,11 +62,13 @@ siempre es consistente con el flujo de eventos.
 
 ```bash
 dotnet add package PicoActor
+dotnet add package PicoActor.EventStore.InMemory   # el almacén es un paquete aparte (v2026.9)
 ```
 
 ```csharp
 using PicoActor;
 using PicoActor.Abs;
+using PicoActor.EventStore.InMemory;
 
 // 1. Configuración
 var store = new InMemoryEventStore();
@@ -123,7 +125,7 @@ Target `net10.0`, compatible con AOT.
 | Tipo | Rol |
 |------|------|
 | `ActorSystem` | `IActorSystem` por defecto — registro ConcurrentDictionary, fábricas, enrutamiento |
-| `InMemoryEventStore` | Almacén en memoria con bloqueo por flujo — concurrencia optimista, basado en ConcurrentDictionary |
+| `InMemoryEventStore` | Movido a **`PicoActor.EventStore.InMemory`** (v2026.9) — almacén en memoria: bloqueo por flujo, concurrencia optimista (basado en ConcurrentDictionary); regístrelo con `AddPicoActorInMemoryStore()` |
 | `ActorConfig` | POCO de configuración — vinculable desde PicoCfg |
 | `ActorSystemOptions` | Opciones — EventStore obligatorio, Logger opcional, DomainEventPublisher opcional; consumido por el constructor de `ActorSystem` |
 | `MediatorDomainEventPublisher` | `IDomainEventPublisher` predeterminado — publica `DomainEventEnvelope` por evento con aislamiento por evento |
@@ -279,6 +281,71 @@ while (await cursor.MoveNextAsync())
   deserializa el flujo completo.
 - `InMemoryEventStore` implementa `IEventLogReader`; para cualquier otro store es opcional y
   puramente aditivo.
+
+### JSONL Event Store (opt-in) (Almacén de eventos JSONL, opcional)
+
+`PicoActor` ejecuta actores; no incluye ningún almacén. Dos paquetes lo aportan:
+`PicoActor.EventStore.InMemory` (el valor por defecto en memoria, registrado con
+`AddPicoActorInMemoryStore()`) y `PicoActor.EventStore.Jsonl` (duradero, el que describe esta
+sección).
+
+`PicoActor.EventStore.Jsonl` mantiene un archivo JSONL de solo agregación por agregado
+(`<root>/<aggregateId>.jsonl`, un objeto JSON por línea), con las instantáneas como sidecars
+atómicos en el directorio hermano `<root>-snapshots`. Implementa `IEventStore`,
+`IEventLogReader`, `IEventStoreSnapshot` y `IEventStoreEnumerator`, es seguro para AOT
+(generación de código fuente de PicoJetson) y es de **un solo proceso**: dos instancias del
+almacén sobre un mismo directorio no comparten puertas, así que los escritores concurrentes
+fallan de forma explícita en lugar de romper un flujo.
+
+```bash
+dotnet add package PicoActor.EventStore.Jsonl
+```
+
+```csharp
+using PicoActor.EventStore.Jsonl;
+
+// Registration lives on the event BASE, in YOUR assembly: one [PicoDerivedType] per concrete
+// event. [PicoSerializable] on the derived type is NOT enough — the generator ignores type
+// parameters, so a bare derived type leaves TEventBase without a serializer and the FIRST
+// append throws.
+[PicoDerivedType(typeof(CounterCreated), "counter-created")]
+[PicoDerivedType(typeof(CounterIncremented), "counter-incremented")]
+public abstract record CounterEvent : IDomainEvent;
+
+public sealed record CounterCreated(int Initial) : CounterEvent;
+
+public sealed record CounterIncremented(int Delta) : CounterEvent;
+
+var store = new JsonlEventStore<CounterEvent>(
+    "/var/lib/myapp/streams",
+    new JsonlEventStoreOptions { FlushToDisk = true }
+);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+```
+
+- **Un registro olvidado se descubre en la compilación, no en el primer append**: el paquete
+  incluye el analizador `PICOSTORE001`, que señala todo evento de dominio que ningún
+  `[PicoDerivedType]` enumera (un proyecto que solo usa el almacén en memoria no paga por él).
+- **Cola rota frente a corrupción.** La última línea sin terminar — la única forma que deja un
+  fallo del proceso — se ignora, nunca se cuenta y nunca lanza; el siguiente append la trunca.
+  Una línea **terminada** que no se puede deserializar es corrupción y lanza (la última incluida),
+  y el almacén no la repara, porque reparar es adivinar. Ese es el coste documentado de dejar
+  `FlushToDisk` en su valor por defecto `false`: los bytes llegan al sistema operativo (otro
+  lector ve el evento de inmediato) pero no al disco, así que un corte de corriente puede dejar
+  una línea basura terminada. Ponga `FlushToDisk = true` para hacer fsync en cada append.
+- **Cursor y reconstrucción solo de la cola.** `GetVersionAsync`, el `End` del cursor y su
+  posicionamiento en bytes salen de un único recorrido barato (líneas completas, no vacías y
+  terminadas — sin validar JSON, sin deserializador), así que una reconstrucción acelerada por
+  instantánea abre en `snapshot.Version + 1` y deserializa solo la cola (`N − v` eventos). El
+  ahorro es de deserialización y asignación, no de E/S de disco: la cabeza se sigue leyendo una vez
+  como bytes. No hace falta ninguna sonda de "salto" del serializador — un flujo genérico solo
+  contiene eventos, así que una línea ilegible es corrupción, no un registro ajeno.
+- `MaxAggregateLocks` (por defecto `1024`) acota la tabla de puertas por agregado; una entrada
+  desalojada solo cuesta un recorrido extra en el siguiente append de ese agregado, nunca
+  corrección. `Logger` es independiente del `ILoggerFactory` de DI: pase el mismo logger de forma
+  explícita para ver los avisos del almacén en su log.
+- Fuera de esta versión: escritores multiproceso, archivado/retención/compactación, líneas ajenas
+  (no eventos), cifrado/compresión, y un segundo códec para eventos del framework.
 
 ### Idle Passivation (opt-in) (Pasivación por inactividad, opcional)
 
@@ -439,7 +506,8 @@ protected override async ValueTask<object?> OnMessageAsync(ICommand command)
 
 ```csharp
 var container = new SvcContainer();
-container.AddPicoActor();  // Registra IActorSystem + InMemoryEventStore
+container.AddPicoActor();               // Registra IActorSystem — ningún almacén
+container.AddPicoActorInMemoryStore();  // PicoActor.EventStore.InMemory: el valor por defecto en memoria
 
 // Almacén de eventos personalizado
 var store = new InMemoryEventStore();
@@ -452,6 +520,10 @@ container.AddPicoActor(cfg);
 
 `IActorSystem` se registra como **Singleton**. Si `ILoggerFactory` está
 registrado, se inyecta automáticamente un logger.
+
+`AddPicoActor()` ya no registra ningún almacén, y no falla al registrarse: la **resolución** de
+`IActorSystem` lanza `InvalidOperationException` nombrando `AddPicoActorInMemoryStore()` (así el
+orden de registro sigue siendo libre y un `AddPicoActor(store)` explícito sigue ganando).
 
 ### IEventStore Personalizado
 
@@ -505,7 +577,7 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 // (la instancia debe estar disponible antes de Build()).
 ```
 
-> **Paquetes requeridos:** solo hay que añadir `PicoActor` (incluye `PicoActor.Abs` y las abstracciones `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator`). Para declarar manejadores `IDomainEventSubscriber<TEvent>` no hace falta ningún paquete extra: `PicoMediator` ya es una dependencia de `PicoActor` (el bridge generado llama a su `MediatorAutoSubscriptionRegistry`). Añada `PicoDI` + `PicoMediator.DI` solo cuando use el contenedor (`SvcContainer`, `AddPicoMediator`).
+> **Paquetes requeridos:** además de `PicoActor` (incluye `PicoActor.Abs` y las abstracciones `PicoDI.Abs`/`PicoLog.Abs`/`PicoMediator.Abs`/`PicoMediator`) hace falta un paquete de almacén: `PicoActor.EventStore.InMemory` en memoria (registrado con `AddPicoActorInMemoryStore()`) o `PicoActor.EventStore.Jsonl` para persistencia (incluye PicoJetson). Para declarar manejadores `IDomainEventSubscriber<TEvent>` no hace falta ningún paquete extra: `PicoMediator` ya es una dependencia de `PicoActor` (el bridge generado llama a su `MediatorAutoSubscriptionRegistry`). Añada `PicoDI` + `PicoMediator.DI` solo cuando use el contenedor (`SvcContainer`, `AddPicoMediator`).
 
 > **Desarrollo local (ProjectReference):** los analyzers no se propagan a través de cadenas `ProjectReference` — los consumidores por proyecto deben añadir una referencia directa a `PicoActor.Gen` (`<ProjectReference Include="..\src\PicoActor.Gen\PicoActor.Gen.csproj" OutputItemType="Analyzer" />`, espejo de `tests/PicoActor.Tests`). Los consumidores NuGet reciben el generador automáticamente vía los props `buildTransitive` de `PicoActor.Abs` — sin referencia adicional.
 
@@ -551,7 +623,9 @@ Notas:
 | Paquete | Target | Descripción |
 |---------|--------|-------------|
 | [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | Abstracciones centrales: `IActor`, `IActorSystem`, `ICommand`, `IDomainEvent`, `IEventStore`, `Actor`, `EventSourcedActor`, `SagaActor` — más tipos de suscripción (`IDomainEventSubscriber<TEvent>`, `DomainEventEnvelope`, `ICommandSender`) y el analizador integrado `PicoActor.Gen` (declare-and-subscribe) |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `InMemoryEventStore`, `MediatorDomainEventPublisher` (flujo de salida de eventos por envelope), integración PicoDI (`AddPicoActor` cablea automáticamente IMediator + ICommandSender) |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | Runtime: `ActorSystem`, `MediatorDomainEventPublisher` (flujo de salida de eventos por envelope), integración PicoDI (`AddPicoActor` cablea automáticamente IMediator + ICommandSender) |
+| [PicoActor.EventStore.InMemory](https://www.nuget.org/packages/PicoActor.EventStore.InMemory) | `net10.0` | El almacén en memoria (`InMemoryEventStore`, separado de `PicoActor` en v2026.9) + `AddPicoActorInMemoryStore()` |
+| [PicoActor.EventStore.Jsonl](https://www.nuget.org/packages/PicoActor.EventStore.Jsonl) | `net10.0` | Almacén de eventos JSONL duradero: solo agregación, concurrencia optimista, reconstrucción solo de la cola vía `IEventLogReader`, sidecars de instantánea atómicos, seguro para AOT (PicoJetson) — más el analizador `PICOSTORE001` de registro |
 
 ---
 
