@@ -22,7 +22,9 @@ public sealed class JsonlEventStore<TEventBase>
         IEventStoreSnapshot
     where TEventBase : class, IDomainEvent
 {
-    private const string StreamSuffix = ".jsonl";
+    // The name grammar lives in JsonlNames: one spelling of the suffix for the store and the
+    // classifier both.
+    private const string StreamSuffix = JsonlNames.StreamSuffix;
     private const string SnapshotSuffix = ".snap";
     private const int ScanBufferBytes = 64 * 1024;
 
@@ -35,6 +37,9 @@ public sealed class JsonlEventStore<TEventBase>
     private long _deserializedEvents;
     private long _tornTailLines;
     private long _skippedFileNames;
+    private long _filesOpened;
+    private long _directoryScans;
+    private long _foreignFormatFiles;
 
     /// <summary>
     /// Create a store rooted at <paramref name="rootDirectory"/>. The directory is created on the first
@@ -71,6 +76,30 @@ public sealed class JsonlEventStore<TEventBase>
 
     /// <summary>Directory entries skipped by <see cref="ListAggregateIdsAsync"/> because they are not streams.</summary>
     internal long SkippedFileNames => Interlocked.Read(ref _skippedFileNames);
+
+    /// <summary>
+    /// Stream files this store has OPENED for reading (a load, a cursor move, a count, a peek). Written
+    /// in one place — the read path — so the counter measures what an enumeration actually costs: under
+    /// <see cref="FileNameFormat.IdOnly"/> one open per stream, under
+    /// <see cref="FileNameFormat.TypePrefix"/> none at all.
+    /// </summary>
+    internal long FilesOpened => Interlocked.Read(ref _filesOpened);
+
+    /// <summary>
+    /// Directory CLASSIFICATION passes this store has performed. A single-format directory on the
+    /// historical layout pays none: <see cref="FileNameFormat.IdOnly"/> derives every path from the id
+    /// and defers the one pass to the first observation of a MISSING stream. A
+    /// <see cref="FileNameFormat.TypePrefix"/> store pays one at construction (to learn the
+    /// <c>id → type</c> map) and one per resolved miss.
+    /// </summary>
+    internal long DirectoryScans => Interlocked.Read(ref _directoryScans);
+
+    /// <summary>
+    /// Directory entries this store has classified as a stream in the OTHER naming format. Non-zero in a
+    /// mixed directory; non-zero with ZERO configured-format streams means the store is pointed at a
+    /// directory of the other layout, which is a misconfiguration and not an empty store.
+    /// </summary>
+    internal long ForeignFormatFiles => Interlocked.Read(ref _foreignFormatFiles);
 
     /// <summary>Live per-aggregate gate entries.</summary>
     internal int LockEntryCount => _locks.Count;
@@ -451,10 +480,24 @@ public sealed class JsonlEventStore<TEventBase>
 
     // ── Internals ───────────────────────────────────────────────────────────────────────────────
 
-    private static FileStream OpenRead(string path) =>
-        new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    /// <summary>
+    /// The ONE place a read handle is opened, and therefore the one place
+    /// <see cref="FilesOpened"/> moves — a write handle is not an open for this counter's purpose.
+    /// </summary>
+    private FileStream OpenRead(string path)
+    {
+        Interlocked.Increment(ref _filesOpened);
+        return new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    }
 
-    private string PathFor(Guid actorId) =>
+    private string PathFor(Guid actorId) => IdOnlyPathFor(actorId);
+
+    /// <summary>
+    /// The path under <see cref="FileNameFormat.IdOnly"/>: the id alone, no directory knowledge. Also
+    /// the path a <see cref="FileNameFormat.TypePrefix"/> store must check when it wants to know whether
+    /// the OTHER format already holds this aggregate.
+    /// </summary>
+    internal string IdOnlyPathFor(Guid actorId) =>
         Path.Combine(_root, actorId.ToString("D") + StreamSuffix);
 
     private string SnapshotPathFor(Guid actorId) =>

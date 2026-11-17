@@ -20,8 +20,42 @@ public sealed record JsonlEventStoreOptions
     public int MaxAggregateLocks { get; init; } = 1024;
 
     /// <summary>
+    /// How a stream FILE is named in the store's root directory. Default
+    /// <see cref="FileNameFormat.IdOnly"/> — <c>&lt;id:D&gt;.jsonl</c>, the historical layout, which
+    /// this store reproduces byte-for-byte (names, enumeration, counts).
+    /// <para>
+    /// <see cref="FileNameFormat.TypePrefix"/> names a stream <c>&lt;type&gt;-&lt;id:D&gt;.jsonl</c>
+    /// after its first event's concrete type, which lets an enumeration resolve the aggregate ids from
+    /// the names alone (zero file opens). The two layouts share the content format, so a directory can
+    /// be pointed at either — but never both: the store diagnoses a directory whose streams are all in
+    /// the other layout instead of enumerating nothing.
+    /// </para>
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The assigned value is not a defined <see cref="FileNameFormat"/>: a config typo must never fall
+    /// back silently to <see cref="FileNameFormat.IdOnly"/>.
+    /// </exception>
+    public FileNameFormat FileNameFormat
+    {
+        get => _fileNameFormat;
+        init
+        {
+            if (!Enum.IsDefined(value))
+                throw new ArgumentOutOfRangeException(
+                    nameof(FileNameFormat),
+                    value,
+                    "FileNameFormat must be a defined FileNameFormat value."
+                );
+
+            _fileNameFormat = value;
+        }
+    }
+
+    /// <summary>
     /// The store's logger, independent of any DI <c>ILoggerFactory</c>: a host that wants the store's
     /// warnings in its own log passes the same logger explicitly. Null is silent.
     /// </summary>
     public ILogger? Logger { get; init; }
+
+    private readonly FileNameFormat _fileNameFormat = FileNameFormat.IdOnly;
 }
