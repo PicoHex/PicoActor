@@ -393,15 +393,17 @@ Namen, mit dem der Stream geboren wurde.
   seinen Pfad aber **genau wie ein schreibendes Append** auf und prüft weiterhin `expectedVersion`.
 - **Der Fehlgriff-Cache dient nur dem LESEPFAD.** Ein `TypePrefix`-Fehlgriff wird erinnert — ein
   begrenztes Set von 4.096 Ids, das bei Überschreitung geleert statt vergrößert wird — und
-  **single-flight** geteilt: eine Probes-Schleife über Ids, die niemand hat, zahlt **einen**
-  Verzeichnis-Durchlauf für den ganzen Schwung und keinen für die Wiederholungen. Ein **Append
-  vertraut diesem Gedächtnis nie**: dort „kein Stream“ aufzulösen würde einen zweiten Namen neben einem
-  Stream anlegen, den ein externer Schreiber nach dem Aufbau der Abbildung erzeugt hat. Ein Append
-  scannt bei einem Fehlgriff also **erneut** und verwirft bei Erfolg nur **seinen eigenen** Eintrag —
-  niemals alles, und ohne das Scan-Gate zu nehmen. Der Preis wird benannt: ein *Lesen* darf „leer“ für
-  einen Stream antworten, der daneben entstanden ist, bis zum nächsten Durchlauf; und
-  `NegativeCacheInvalidations` zählt die Einträge, die ein Append tatsächlich widerlegt hat (unter
-  `IdOnly` identisch `0`, weil dort nie ein Fehlgriff erinnert wird).
+  **single-flight** geteilt: ein Schwung **gleichzeitiger Probes EINER** fehlenden Id teilt sich
+  einen einzigen Durchlauf, und **Wiederholungen dieser Id** sind gratis; eine **andere** fehlende Id
+  zahlt ihren eigenen Durchlauf. Ein **Append vertraut diesem Gedächtnis nie**: dort „kein Stream“
+  aufzulösen würde einen zweiten Namen neben einem Stream anlegen, den ein externer Schreiber nach dem
+  Aufbau der Abbildung erzeugt hat. Ein Append scannt bei einem Fehlgriff also **erneut** und verwirft
+  bei Erfolg nur **seinen eigenen** Eintrag — niemals alles, und ohne das Scan-Gate zu nehmen. Der Preis
+  wird benannt: ein *Lesen* darf „leer“ für einen Stream antworten, der daneben entstanden ist, bis zum
+  nächsten Durchlauf — und ein Host, der nie wieder einen Durchlauf macht, sieht die veraltete Antwort,
+  bis eine **neue Instanz** das Verzeichnis neu einliest. `NegativeCacheInvalidations` zählt die
+  Einträge, die ein Append tatsächlich widerlegt hat (unter `IdOnly` identisch `0`, weil dort nie ein
+  Fehlgriff erinnert wird).
 - **Eine veraltete Abbildung korrigiert der nächste SCAN.** Ein Rivale-Präfix, der nach dem Aufbau der
   Abbildung eintrifft, wird von einem Lesen nicht gefunden (ein Map-Treffer kostet keinen Durchlauf) und
   von einem Append **ebenso wenig**: der Store fügt dem Append-Pfad keinen Verzeichnis-Durchlauf hinzu,

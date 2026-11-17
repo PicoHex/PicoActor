@@ -388,13 +388,15 @@ lote posterior cuyo primer evento sea de otro tipo sigue añadiendo al nombre co
   valida `expectedVersion`.
 - **La caché de fallos solo sirve a la RUTA DE LECTURA.** Un fallo de `TypePrefix` se recuerda — un
   conjunto acotado de 4.096 id, vaciado en vez de ampliado al superarlo — y se comparte en
-  **single-flight**: un bucle de sondeo sobre ids que nadie tiene paga **un** recorrido de directorio
-  para toda la ráfaga y ninguno para las repeticiones. Un **append nunca confía en esa memoria**:
-  resolver ahí «ningún stream» crearía un segundo nombre junto a un stream que un escritor externo creó
-  después de construir el mapa, así que un append **reescanea** cuando falla y, si tiene éxito, descarta
-  solo **su propia** entrada — nunca en bloque, y sin tomar la puerta del escaneo. El precio se declara:
-  una *lectura* puede responder «vacío» para un stream que apareció al lado hasta el siguiente recorrido,
-  y `NegativeCacheInvalidations` cuenta las entradas que un append invalidó de verdad (idénticamente `0`
+  **single-flight**: una ráfaga de **sondeos concurrentes de UN mismo id** ausente comparte un solo
+  recorrido, y las **repeticiones de ese id** son gratis; un id ausente **distinto** paga un recorrido
+  propio. Un **append nunca confía en esa memoria**: resolver ahí «ningún stream» crearía un segundo
+  nombre junto a un stream que un escritor externo creó después de construir el mapa, así que un append
+  **reescanea** cuando falla y, si tiene éxito, descarta solo **su propia** entrada — nunca en bloque, y
+  sin tomar la puerta del escaneo. El precio se declara: una *lectura* puede responder «vacío» para un
+  stream que apareció al lado hasta el siguiente recorrido — y un host que nunca vuelve a recorrer ve la
+  respuesta obsoleta hasta que una **nueva instancia** relee el directorio.
+  `NegativeCacheInvalidations` cuenta las entradas que un append invalidó de verdad (idénticamente `0`
   bajo `IdOnly`, que nunca recuerda un fallo).
 - **Un mapa obsoleto lo corrige el SIGUIENTE escaneo.** Un prefijo rival que llega después de construir
   el mapa no lo encuentra una lectura (un acierto del mapa no paga recorrido) ni tampoco un append: la

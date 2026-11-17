@@ -384,12 +384,14 @@ posterior cujo primeiro evento seja de outro tipo continua anexando ao nome com 
   escreve** e ainda valida `expectedVersion`.
 - **O cache de erros serve só ao CAMINHO DE LEITURA.** Um erro de `TypePrefix` é lembrado — um conjunto
   limitado a 4.096 ids, esvaziado em vez de ampliado ao ultrapassá-lo — e compartilhado em
-  **single-flight**: um laço de sondagem sobre ids que ninguém tem paga **uma** passada de diretório
-  para toda a rajada e nenhuma para as repetições. Um **append nunca confia nessa memória**: resolver ali
-  "nenhum stream" criaria um segundo nome ao lado de um stream que um escritor externo criou depois de o
-  mapa ser montado, então um append **varre de novo** ao errar e, ao acertar, descarta apenas **a sua
-  própria** entrada — nunca em bloco, e sem pegar o portão da varredura. O preço é declarado: uma *leitura*
-  pode responder "vazio" para um stream que apareceu ao lado até a próxima passada, e
+  **single-flight**: uma rajada de **sondagens concorrentes de UM mesmo id** ausente compartilha uma
+  única passada, e as **repetições desse id** são grátis; um id ausente **diferente** paga uma passada
+  própria. Um **append nunca confia nessa memória**: resolver ali "nenhum stream" criaria um segundo
+  nome ao lado de um stream que um escritor externo criou depois de o mapa ser montado, então um append
+  **varre de novo** ao errar e, ao acertar, descarta apenas **a sua própria** entrada — nunca em bloco,
+  e sem pegar o portão da varredura. O preço é declarado: uma *leitura* pode responder "vazio" para um
+  stream que apareceu ao lado até a próxima passada — e um host que nunca mais passa vê a resposta
+  obsoleta até uma **nova instância** reler o diretório.
   `NegativeCacheInvalidations` conta as entradas que um append realmente invalidou (identicamente `0` no
   `IdOnly`, que nunca lembra um erro).
 - **Um mapa desatualizado é corrigido pela PRÓXIMA varredura.** Um prefixo rival que chega depois de o
