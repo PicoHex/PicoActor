@@ -417,15 +417,22 @@ is how many defaults were actually applied, `0…2`, and `RegisteredCount` is th
   reachable **by id**, invisible to type enumeration, never counted `ForeignFormatFiles` and never
   triggers the whole-directory throw. A prefix contains no `-`; equal short names share one prefix.
 - **`SagaCompleted.Result` is `object?`, and the serializer cannot write a non-null value at all** (the
-  generated writer emits the member with no value). `null` — the only shape the framework produces today
-  — round-trips; anything else fails loudly and writes nothing. Keep `Result` null in a persistent store.
+  generated writer emits the member with no value). `null` — the only shape a **durable store** accepts
+  today — round-trips; anything else fails loudly and writes nothing. `MarkComplete(result)` with a
+  non-null result cannot be persisted: the terminal batch throws and nothing is written. Keep `Result`
+  null in a persistent store.
 - **Registration rules.** Bindings live on the options instance — `options.EventTypeBindings.Add<T>(tag)`
   before the store is constructed: the constructor **freezes and copies** the table, so a later `Add`
   throws instead of being silently ignored. One type has exactly one tag and one tag names exactly one
-  type (the same pair again is a no-op; a tag is non-blank and carries no quote, backslash or control
-  character). A base that already covers the framework events (`IDomainEvent` itself) is refused at
-  construction — they would be both ordinary and bound events — and so is a bound type assignable to
-  `TEventBase`.
+  type (the same pair again is a no-op **before the freeze**; a tag is non-blank and carries no quote,
+  backslash or control character). A base that already covers the framework events (`IDomainEvent`
+  itself) is refused at construction — they would be both ordinary and bound events — and so is a bound
+  type assignable to `TEventBase`. `with` copies the **reference**: a clone and its original share one
+  table, frozen state included, so a clone's `Add` throws and names the *other* store — build
+  `new JsonlEventStoreOptions()` for an independent table.
+- **A binding's tag must differ from every `[PicoDerivedType]` discriminator on `TEventBase`.** The sniff
+  takes precedence, so a collision reads base lines as the bound type — silently, with no throw and no
+  warning.
 
 ### Idle Passivation (opt-in)
 

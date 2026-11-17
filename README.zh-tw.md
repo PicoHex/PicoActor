@@ -389,13 +389,18 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   在 `TypePrefix` 下，落在所有已註冊**型別**前綴之外的名字（`unknown-<id>.jsonl`，主機自己的分類）**按 id 可達**、按型別列舉不可見、
   不計入 `ForeignFormatFiles`、也不會觸發整目錄拋。前綴不含 `-`；同短名共用一個前綴。
 - **`SagaCompleted.Result` 是 `object?`，而序列化器根本寫不出非 null 的值**（產生的 writer 只寫出成員名、
-  不寫值）。`null`——框架今天唯一產生的形狀——能正常往返；其它任何值都會當場失敗，且一個位元組也不會寫入。
+  不寫值）。`null`——**持久化儲存**今天唯一接受的形狀——能正常往返；其它任何值都會當場失敗，且一個位元組也
+  不會寫入。帶非 null 結果的 `MarkComplete(result)` 無法持久化：終態批次直接拋，什麼都不會寫入。
   持久化儲存裡請讓 `Result` 保持 `null`。
 - **註冊規則。** 繫結掛在 options 實例上——在建構 store **之前**呼叫
   `options.EventTypeBindings.Add<T>(tag)`：建構子會**凍結並複製**這張表，之後的 `Add` 會拋例外，而不是被
-  靜默忽略。一個型別只有一個 tag，一個 tag 只命名一個型別（同一對重複呼叫是 no-op；tag 非空且不含引號、
-  反斜線或控制字元）。會一併涵蓋框架事件的基底型別（例如 `IDomainEvent` 本身）在建構時被拒絕——否則它們
-  既是普通事件又是 bound 事件；可指派給 `TEventBase` 的 bound 型別同樣被拒絕。
+  靜默忽略。一個型別只有一個 tag，一個 tag 只命名一個型別（同一對重複呼叫是 no-op，但僅限**凍結前**；
+  tag 非空且不含引號、反斜線或控制字元）。會一併涵蓋框架事件的基底型別（例如 `IDomainEvent` 本身）在建構
+  時被拒絕——否則它們既是普通事件又是 bound 事件；可指派給 `TEventBase` 的 bound 型別同樣被拒絕。`with`
+  複製的是**參照**：複本與原件共用同一張表（含凍結狀態），因此複本上的 `Add` 會拋，且訊息點名「另一個」
+  store——要獨立的一張表請用 `new JsonlEventStoreOptions()`。
+- **繫結的 tag 必須與 `TEventBase` 上每一個 `[PicoDerivedType]` 判別值都不同。** sniffer 優先，所以一旦
+  撞上，基底的行會被讀成 bound 型別——不拋例外、不警告，完全靜默。
 
 ### Idle Passivation (opt-in)（閒置鈍化，可選）
 

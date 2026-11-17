@@ -446,16 +446,22 @@ Defaults, `0…2`, `RegisteredCount` die Gesamtzahl).
   Kurznamen teilen sich ein Präfix.
 - **`SagaCompleted.Result` ist `object?` — und der Serializer kann einen Nicht-null-Wert gar nicht
   schreiben** (der generierte Writer schreibt nur den Membernamen, keinen Wert). `null` — die einzige Form,
-  die das Framework heute erzeugt — geht hin und zurück; alles andere scheitert sofort und schreibt kein
-  Byte. In einem persistenten Store `Result` auf `null` halten.
+  die ein **persistenter Store** heute akzeptiert — geht hin und zurück; alles andere scheitert sofort und
+  schreibt kein Byte. `MarkComplete(result)` mit einem Nicht-null-Ergebnis lässt sich nicht persistieren:
+  der Terminal-Batch wirft und schreibt nichts. In einem persistenten Store `Result` auf `null` halten.
 - **Regeln der Registrierung.** Bindungen liegen auf der options-Instanz —
   `options.EventTypeBindings.Add<T>(tag)` **vor** dem Konstruieren des Stores: Der Konstruktor **friert die
   Tabelle ein und kopiert sie**, ein späteres `Add` wirft also, statt still ignoriert zu werden. Ein Typ hat
-  genau einen Tag und ein Tag benennt genau einen Typ (dasselbe Paar erneut ist ein No-op; ein Tag ist
-  nicht leer und enthält kein Anführungszeichen, keinen Backslash und kein Steuerzeichen). Eine Basis, die
-  die Framework-Ereignisse bereits abdeckt (`IDomainEvent` selbst), wird beim Konstruieren abgelehnt — sie
-  wären zugleich gewöhnliche und gebundene Ereignisse — und ebenso ein gebundener Typ, der `TEventBase`
-  zuweisbar ist.
+  genau einen Tag und ein Tag benennt genau einen Typ (dasselbe Paar erneut ist ein No-op **vor dem
+  Einfrieren**; ein Tag ist nicht leer und enthält kein Anführungszeichen, keinen Backslash und kein
+  Steuerzeichen). Eine Basis, die die Framework-Ereignisse bereits abdeckt (`IDomainEvent` selbst), wird
+  beim Konstruieren abgelehnt — sie wären zugleich gewöhnliche und gebundene Ereignisse — und ebenso ein
+  gebundener Typ, der `TEventBase` zuweisbar ist. `with` kopiert die **Referenz**: Klon und Original teilen
+  sich eine Tabelle samt Einfrierzustand, ein `Add` auf dem Klon wirft also und nennt den *anderen* Store —
+  für eine unabhängige Tabelle `new JsonlEventStoreOptions()` bauen.
+- **Der Tag einer Bindung muss sich von jedem `[PicoDerivedType]`-Diskriminator auf `TEventBase`
+  unterscheiden.** Der Sniff hat Vorrang: bei einer Kollision werden Basiszeilen als der gebundene Typ
+  gelesen — still, ohne Exception und ohne Warnung.
 
 ### Idle Passivation (opt-in) (Idle-Passivierung, optional)
 

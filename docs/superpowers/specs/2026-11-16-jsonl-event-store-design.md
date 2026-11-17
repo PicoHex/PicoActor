@@ -643,53 +643,116 @@ read path's**, single-flight, bounded, invalidated per id — and that an append
   of the id that WAS remembered moves it to `1`. Under `IdOnly` it stays `0` for a structural reason —
   the id IS the name, so nothing is ever remembered there.
 
-### Bindings (rev-6 delta): `tests/PicoActor.EventStore.Jsonl.Tests/EventTypeBindingTests.cs`
+### Bindings (rev-6 delta): the suites under `tests/PicoActor.EventStore.Jsonl.Tests/`
 
-`Bnd0`…`Bnd17` state the binding contract in one file, and each case is asserted **where the operator's
-fix belongs**: at the `Add` call, at the construction, or at the first append that carries the bound
-event. Nothing here asserts a wall-clock number; element and flush counts are the observable.
+`Bnd0`…`Bnd17` state the binding contract, and **the numbers below follow the suites as shipped** — the
+cases live in THREE files, not one: `EventTypeBindingTests.cs` (the table itself, plus one separate class
+for the generation tripwire), `BoundEventWriteTests.cs` (the append path) and `BoundEventReadTests.cs`
+(the read path). Each case is asserted **where the operator's fix belongs**: at the `Add` call, at the
+construction, or at the first append that carries the bound event. Nothing here asserts a wall-clock
+number; element and flush counts, the exact bytes on disk, and the log are the observable.
 
-- **Bnd0 — the generation point exists** (`Bnd0_FrameworkEventSerializer_IsGenerated`): the two
-  framework serializers are observed **from another assembly**, so deleting
+#### `EventTypeBindingTests.cs` — the table, the freeze, the counts
+
+- **Bnd0 — the generation point exists** (`Bnd0_FrameworkEventSerializer_IsGenerated`, in that file's
+  second class `FrameworkSerializerTripswireTests`): the framework serializers are observed **from another
+  class's** closed delegate call sites through the public `JsonSerializer` facade — `SerRegistry` and
+  `DesRegistry` must both be populated, `SagaCompleted(null)` encodes to `{"Result":null}` and
+  `SagaFailed("boom")` to `{"Reason":"boom"}`, and both decode back. Deleting
   `FrameworkEventSerializers.Generate()` (or replacing its closed call sites with an attribute marker)
   turns this case red. It is the tripwire for the PicoSerDe limitation, not a data test.
-- **Bnd1…Bnd5 — the lifecycle of a bound event**: a saga stream holding `SagaCompleted` is written by a
-  `JsonlEventStore<TEventBase>` and read back as `SagaCompleted`/`SagaFailed` (Bnd1); a batch that mixes
-  `TEventBase` and bound events is ONE write and ONE flush with the right version count (Bnd2); the
-  bound line's bytes are `{"$type":"<tag>"` immediately followed by the payload — no comma, the
-  payload's opening `{` dropped (Bnd3); the read path sniffs the FIRST member only and matches the tag
-  case-insensitively (Bnd4); a line whose tag the table does not know **falls back unconditionally** to
-  `Deserialize<TEventBase>`, so a pre-existing stream with custom discriminators is unaffected (Bnd5).
-- **Bnd6 — one tag, one type** (`Bnd6_DuplicateTag_ThrowsAtTheCall`): the second `Add` on a taken tag
-  names both types, and `RegisteredCount` is unchanged (the refused call registered nothing).
-- **Bnd7 — one type, one tag** (`Bnd7_SameTypeDifferentTag_ThrowsAtTheCall`): the second tag for a bound
-  type names both tags in the message; the first binding survives.
-- **Bnd8 — the counting pair** (`Bnd8_Counts`): a fresh `JsonlEventStoreOptions` reports `0`/`0` (proof
-  that no initializer seeds the table), a store over untouched options reports the framework defaults in
-  `FrameworkDefaultCount`, and `RegisteredCount` counts consumer bindings and applied defaults alike.
-- **Bnd9/Bnd10 — a bound type with no generation point fails on its FIRST WRITE**, loudly: the exception
-  names the type and the missing serializer, and the stream is unchanged (no file, no partial line, no
-  encode as `TEventBase`).
-- **Bnd11 — naming**: a stream whose first event is a bound type is named by that event's CLR short name
-  under `FileNameFormat.TypePrefix`, while `unknown-<id>.jsonl` is reachable by id, invisible to
-  `ListAggregateIdsAsync`, not counted `ForeignFormatFiles` and not a whole-directory throw.
-- **Bnd12/Bnd13 — the two construction refusals**: `TEventBase = IDomainEvent` (the framework events are
-  assignable to it) throws before anything is frozen, and a bound type assignable to `TEventBase` throws
-  after the seed — both `InvalidOperationException`, both naming the offender and the way out.
+- **Bnd6 — one tag, one type** (`Bnd6_DuplicateTag_ThrowsAtTheCall`): a second `Add` on a taken tag throws
+  at the call, names the tag and both types, and registers nothing (`RegisteredCount` unchanged). The
+  idempotence row is asserted the way the READER defines a tag: the same type with the same tag — in
+  either case, because the generated reader matches a discriminator value case-insensitively — is a no-op.
+- **Bnd6b — one type, one tag** (`Bnd6b_SameTypeDifferentTag_ThrowsAtTheCall`): the second tag for a bound
+  type throws at the call and names BOTH tags; `RegisteredCount` stays at one.
+- **Bnd7 — a bound type that is also `TEventBase`** (`Bnd7_BoundTypeAlsoTEventBase_ThrowsAtConstruction`):
+  binding the store's own event (`SSnapshotAdded`, which derives from `ConformanceEvent`) is refused at the
+  construction; the message names the bound type and the generic argument it collides with, and offers
+  exactly ONE remedy — delete the `Add` line, because "register the event's own base type as the generic
+  argument" is already the case and would fail again. The refusal lands before anything is frozen: the
+  same options instance still accepts a binding afterwards, and the framework seeds the refused
+  construction would have applied are rolled back (`RegisteredCount` = the consumer's bindings,
+  `FrameworkDefaultCount` = `0`).
+- **Bnd8 — the counts and the start-up line** (`Bnd8_Counts`): a fresh options instance reports `0`/`0` and
+  logs nothing (the CONSTRUCTOR is the one seeding point); a store over untouched options reports `2`/`2`;
+  both canonical tags are pinned by literal in both directions, a miss is a `false` and never a throw; and
+  the single Info record carries the FROZEN numbers verbatim —
+  `event type bindings: 2 registered (2 framework-default)`.
 - **Bnd14 — a consumer override wins** (`Bnd14_ConsumerOverrideWins`): binding `SagaCompleted` to a
-  consumer tag before constructing the store keeps that tag (`TryAdd` seeds nothing), the lines carry it,
-  and `FrameworkDefaultCount` reports the reduction.
-- **Bnd15 — `SagaCompleted.Result` is `null` or nothing**: `null` round-trips exactly (every `MarkComplete`
-  call site is parameterless). A non-null value cannot be written OR read by the serializer today — the
-  generated writer emits the member name with no value (`if (value.Result != null) { }` → `FormatException`)
-  and the reader assigns `default!` — so the test pins the only promise the store can keep: a **loud failure
-  with nothing written** (no file, no version). It turns red on purpose the day the serializer learns untyped
-  members, at which point it is extended into the full round trip.
-- **Bnd16 — the tag grammar** (`Bnd16_TagGrammar_RejectsQuotesBackslashAndBlanks`): blank, quote,
-  backslash and control characters are refused with `ArgumentOutOfRangeException`; a legal tag with
-  spaces or non-ASCII characters is accepted.
+  consumer tag before constructing the store keeps that tag in the frozen table the store reads, the other
+  default still applies (`TryAdd`, never all-or-nothing), and `FrameworkDefaultCount` reports the
+  reduction.
+- **Bnd16 — the tag grammar** (`Bnd16_TagGrammar_RejectsQuotesBackslashAndBlanks`): blank,
+  whitespace-only, tab, quote, backslash, newline, NUL and ESC are refused with
+  `ArgumentOutOfRangeException`; a null tag is the argument-shape `ArgumentNullException`; nothing was
+  registered by any of the refusals; and the canonical tag is still accepted (`RegisteredCount` = `1`).
 - **Bnd17 — the freeze** (`Bnd17_AddAfterFreeze_Throws`): `Add` after a store was constructed over those
-  options throws naming the store, and the store's view is the copy taken at construction.
+  options throws naming the store, and the live store's view is the copy taken at construction. The tag
+  GRAMMAR is still diagnosed first on a frozen table (an illegal tag stays an illegal-tag error), and a
+  SECOND construction over the same options does not seed again.
+
+#### `BoundEventWriteTests.cs` — the append path
+
+- **Bnd1 — a mixed batch is one append** (`Bnd1_MixedBatch_RoundTrips`): `TEventBase` and a bound event in
+  one `AppendAsync` give version `2`, two lines in order, the whole file byte-for-byte
+  (`{"$type":"ss-added","Delta":7}\n{"$type":"PicoActorSagaCompleted","Result":null}\n`), `TornTailLines`
+  at `0` and no Warning in the log.
+- **Bnd1b — the zero-member payload** (`Bnd1b_ZeroMemberPayload_WritesTheTagAlone`): a memberless bound
+  event (a consumer-owned `MilestoneReached`) writes `{"$type":"milestone"}` — the separator after the tag
+  is conditional, so no dangling comma is produced.
+- **Bnd2 — a saga-only stream is named after the completion** (`Bnd2_SagaOnlyStream_PrefixIsTheTypeName`):
+  under `TypePrefix` the file is `SagaCompleted-<id:D>.jsonl` — never the store's base type, never the tag
+  — and a COLD store enumerates it with `FilesOpened` still `0`.
+- **Bnd5 — neither base nor bound** (`Bnd5_UnboundEvent_IsRefused_WithTheRemedy`): an event that is only an
+  `IDomainEvent` is refused with the EXISTING wording preserved verbatim (including the offending `index`),
+  the second remedy (`EventTypeBindings`) appended, and nothing created on disk.
+- **Bnd10 — the naming format changes a name, never a line** (`Bnd10_IdOnly_And_TypePrefix_Agree`): the
+  same mixed batch written under `IdOnly` and under `TypePrefix` (separate roots) produces byte-identical
+  streams and the same version.
+- **Bnd15 — `Result` is `null`, or nothing is written**
+  (`Bnd15_NullResult_RoundTrips_NonNullFailsLoudly`): `SagaCompleted(null)` writes the corpus line and
+  decodes back through the CONCRETE deserializer, reached as a method group so this assembly generates
+  nothing and Bnd0's tripwire stays blind. A non-null `Result` is blocked UPSTREAM by PicoJetson's writer,
+  and the test pins what the store owes: a loud failure with **no stream, no version**. It goes red on
+  purpose the day the serializer learns untyped members.
+
+#### `BoundEventReadTests.cs` — the read path
+
+- **Bnd3 — the corpus tag reads, and rewrites byte-identical**
+  (`Bnd3_ExistingCorpusTag_IsReadable_AndRewritesByteIdentical`): a `PicoActorSagaCompleted` line that no
+  `[PicoDerivedType]` declares is read as `SagaCompleted` **only by the binding**, and what came off the
+  disk goes back on with the same tag, member order and bytes.
+- **Bnd4 — an unknown tag is loud and names what IS bound** (`Bnd4_UnknownTag_IsLoud`): the line falls back
+  to `TEventBase` and fails with the pre-existing `FormatException`, whose message still names the tag and
+  now also both framework tags this store could have read.
+- **Bnd4b — the sniff agrees with the reader about what a tag is**
+  (`Bnd4b_DiscriminatorIsMatchedCaseInsensitively`): `$TYPE` as a member name and a differently-cased tag
+  value both resolve; a rewrite emits the REGISTERED spelling.
+- **Bnd4c — a bound tag whose payload does not fit**
+  (`Bnd4c_PayloadThatDoesNotFitTheTag_IsWrappedByTheBinding`): the binding's own message names the tag, the
+  bound type, the file and where the tag came from (`framework default`), and never offers the
+  `[PicoDerivedType]` remedy that belongs to the base route.
+- **Bnd9 — routing is not serialization**
+  (`Bnd9_BoundTypeWithoutGeneratedSerializer_IsRefusedOnFirstWrite`): a bound type with no generation point
+  fails on its FIRST WRITE with `InvalidOperationException` naming the type, the tag and the missing
+  serializer, with no file and no version.
+- **Bnd11 — a non-type prefix is reachable by id, not by type**
+  (`Bnd11_UnknownPrefix_IsReachableById_NotByType`): `unknown-<id>.jsonl` loads by id, is invisible to
+  `ListAggregateIdsAsync(nameof(SagaCompleted))`, is **not** counted `ForeignFormatFiles`, is not a skipped
+  name and raises no Warning.
+- **Bnd12 — an interface base cannot carry the registration**
+  (`Bnd12_InterfaceBase_IsRefusedAtConstruction`): `JsonlEventStore<IDomainEvent>` throws before anything is
+  frozen or created, and the message names the KIND of type that is wrong (`interface`,
+  `[PicoDerivedType]`) rather than a missing registration line.
+- **Bnd13 — only the FIRST member is a discriminator** (`Bnd13_NonFirstDiscriminator_IsTreatedAsAbsent`): a
+  bound tag in the second position is "no discriminator", so the line fails on the EXISTING route with the
+  polymorphic reader's own `FormatException` (wrapped) and never with a binding message.
+
+So the two refusals of D5 sit in different files — `Bnd12` (the base cannot be an interface) and `Bnd7` (a
+bound type that is also the base) — and the "same pair again" row is asserted inside `Bnd6` rather than in a
+case of its own. A later delta continues from `Bnd17`; the numbering above is the suite, not a plan.
 
 ## Repo surface
 

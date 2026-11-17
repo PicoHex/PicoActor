@@ -439,16 +439,22 @@ enruta los eventos del framework al mismo store: el framework pre-registra
   dispara el throw de todo el directorio. Un prefijo no contiene `-`; nombres cortos iguales comparten
   prefijo.
 - **`SagaCompleted.Result` es `object?` — y su serializador no sabe escribir ningún valor distinto de
-  null** (el writer generado escribe solo el nombre del miembro, sin valor). `null` — la única forma que el
-  framework produce hoy — hace ida y vuelta; cualquier otra cosa falla en el acto y no escribe un solo byte.
-  En un store persistente, mantén `Result` en `null`.
+  null** (el writer generado escribe solo el nombre del miembro, sin valor). `null` — la única forma que un
+  **store persistente** acepta hoy — hace ida y vuelta; cualquier otra cosa falla en el acto y no escribe un
+  solo byte. `MarkComplete(result)` con un resultado no nulo no se puede persistir: el lote terminal lanza y
+  no se escribe nada. En un store persistente, mantén `Result` en `null`.
 - **Reglas de registro.** Las ataduras viven en la instancia de opciones —
   `options.EventTypeBindings.Add<T>(tag)` **antes** de construir el store: el constructor **congela y copia**
   la tabla, así que un `Add` posterior lanza en vez de ignorarse en silencio. Un tipo tiene exactamente un tag
-  y un tag nombra exactamente un tipo (la misma pareja otra vez es un no-op; un tag no está vacío y no lleva
-  comilla, barra invertida ni carácter de control). Una base que ya cubre los eventos del framework
-  (`IDomainEvent` mismo) se rechaza al construir — serían a la vez eventos ordinarios y vinculados — y también
-  un tipo vinculado asignable a `TEventBase`.
+  y un tag nombra exactamente un tipo (la misma pareja otra vez es un no-op **antes de la congelación**; un
+  tag no está vacío y no lleva comilla, barra invertida ni carácter de control). Una base que ya cubre los
+  eventos del framework (`IDomainEvent` mismo) se rechaza al construir — serían a la vez eventos ordinarios y
+  vinculados — y también un tipo vinculado asignable a `TEventBase`. `with` copia la **referencia**: el clon y
+  el original comparten una sola tabla, incluido el estado de congelación, así que un `Add` sobre el clon lanza
+  y nombra el *otro* store — construye `new JsonlEventStoreOptions()` para una tabla independiente.
+- **El tag de un vínculo debe diferir de todo discriminador `[PicoDerivedType]` de `TEventBase`.** El sniff
+  tiene prioridad, así que una colisión lee las líneas de la base como el tipo vinculado — en silencio, sin
+  excepción y sin aviso.
 
 ### Idle Passivation (opt-in) (Pasivación por inactividad, opcional)
 

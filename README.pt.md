@@ -434,16 +434,21 @@ e `RegisteredCount` é o total).
   (`unknown-<id>.jsonl`, categorização própria de um host) é **alcançável por id**, invisível à enumeração por tipo, nunca contado em `ForeignFormatFiles` e nunca
   dispara o throw do diretório inteiro. Um prefixo não contém `-`; nomes curtos iguais compartilham prefixo.
 - **`SagaCompleted.Result` é `object?` — e seu serializador não sabe gravar nenhum valor não nulo** (o
-  writer gerado escreve só o nome do membro, sem valor). `null` — a única forma que o framework produz hoje
-  — faz ida e volta; qualquer outra coisa falha na hora e não grava um único byte. Num store persistente,
-  mantenha `Result` em `null`.
+  writer gerado escreve só o nome do membro, sem valor). `null` — a única forma que um **store
+  persistente** aceita hoje — faz ida e volta; qualquer outra coisa falha na hora e não grava um único byte.
+  `MarkComplete(result)` com um resultado não nulo não pode ser persistido: o lote terminal lança e nada é
+  gravado. Num store persistente, mantenha `Result` em `null`.
 - **Regras de registro.** Os vínculos ficam na instância de opções —
   `options.EventTypeBindings.Add<T>(tag)` **antes** de construir o store: o construtor **congela e copia** a
   tabela, então um `Add` posterior lança em vez de ser ignorado em silêncio. Um tipo tem exatamente um tag e
-  um tag nomeia exatamente um tipo (o mesmo par de novo é um no-op; um tag não é vazio e não contém aspas,
-  barra invertida nem caractere de controle). Uma base que já cobre os eventos do framework (`IDomainEvent`
-  em si) é recusada na construção — seriam ao mesmo tempo eventos comuns e vinculados — e o mesmo vale para um
-  tipo vinculado atribuível a `TEventBase`.
+  um tag nomeia exatamente um tipo (o mesmo par de novo é um no-op **antes da congelação**; um tag não é
+  vazio e não contém aspas, barra invertida nem caractere de controle). Uma base que já cobre os eventos do
+  framework (`IDomainEvent` em si) é recusada na construção — seriam ao mesmo tempo eventos comuns e
+  vinculados — e o mesmo vale para um tipo vinculado atribuível a `TEventBase`. `with` copia a **referência**:
+  o clone e o original compartilham uma só tabela, incluindo o estado de congelação, então um `Add` no clone
+  lança e nomeia o *outro* store — construa `new JsonlEventStoreOptions()` para uma tabela independente.
+- **O tag de um vínculo deve diferir de todo discriminador `[PicoDerivedType]` de `TEventBase`.** O sniff tem
+  precedência: uma colisão lê as linhas da base como o tipo vinculado — em silêncio, sem exceção e sem aviso.
 
 ### Idle Passivation (opt-in) (Passivação por inatividade, opcional)
 
