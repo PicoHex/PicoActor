@@ -97,9 +97,9 @@ public sealed class PicoActorDiExtensionsStoreTests
     }
 
     /// <summary>
-    /// The default store registration must not clobber a store the application already
-    /// registered on the container (documented precedence: a container-registered
-    /// IEventStore wins over the implicit InMemory default).
+    /// <c>AddPicoActor()</c> registers NO IEventStore at all, so a store the application already
+    /// registered on the container survives it untouched — the core carries no concrete store and
+    /// no implicit default to lose against.
     /// </summary>
     [Test]
     public async Task AddPicoActor_NoArgs_PreservesContainerRegisteredStore()
@@ -115,6 +115,30 @@ public sealed class PicoActorDiExtensionsStoreTests
         var resolved = scope.GetService(typeof(IEventStore));
 
         await Assert.That(ReferenceEquals(resolved, provided)).IsTrue();
+    }
+
+    /// <summary>
+    /// The other direction of the same rule: an EXPLICIT <c>AddPicoActor(store)</c> is a registration
+    /// like any other, so a later <c>AddPicoActorInMemoryStore()</c> REPLACES it — the last
+    /// registration wins, and this pins it rather than leaving it to the container's mood.
+    /// </summary>
+    [Test]
+    public async Task AddPicoActorWithStore_ThenAddPicoActorInMemoryStore_LastRegistrationWins()
+    {
+        var explicitStore = new InMemoryEventStore();
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoActor(explicitStore);
+        container.AddPicoActorInMemoryStore();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var resolved = (IEventStore)scope.GetService(typeof(IEventStore));
+
+        await Assert.That(ReferenceEquals(resolved, explicitStore)).IsFalse();
+        await Assert.That(resolved).IsTypeOf<InMemoryEventStore>();
+
+        // The system still resolves (the replacement is a working store, not a hole).
+        await Assert.That(scope.GetService(typeof(IActorSystem))).IsNotNull();
     }
 
     /// <summary>Same precedence rule for the publisher overload (explicit publisher, implicit store).</summary>

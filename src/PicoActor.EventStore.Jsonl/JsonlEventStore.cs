@@ -1,32 +1,6 @@
 namespace PicoActor.EventStore.Jsonl;
 
 /// <summary>
-/// Tunables of <see cref="JsonlEventStore{TEventBase}"/>.
-/// </summary>
-public sealed record JsonlEventStoreOptions
-{
-    /// <summary>
-    /// fsync every append. Default <c>false</c>: the bytes are flushed to the OS (so another reader
-    /// sees the event immediately) but not to the platter. The documented cost of leaving it off is
-    /// that a power loss can leave a TERMINATED garbage line, which the store treats as corruption
-    /// and never repairs — an operator removes the line.
-    /// </summary>
-    public bool FlushToDisk { get; init; }
-
-    /// <summary>
-    /// Upper bound of the per-aggregate gate table. Must be greater than zero. An evicted entry costs
-    /// one re-scan on that aggregate's next append, never correctness.
-    /// </summary>
-    public int MaxAggregateLocks { get; init; } = 1024;
-
-    /// <summary>
-    /// The store's logger, independent of any DI <c>ILoggerFactory</c>: a host that wants the store's
-    /// warnings in its own log passes the same logger explicitly. Null is silent.
-    /// </summary>
-    public ILogger? Logger { get; init; }
-}
-
-/// <summary>
 /// Durable, append-only event store: one file per aggregate (<c>&lt;root&gt;/&lt;id:D&gt;.jsonl</c>),
 /// one JSON object per line, snapshots as sidecars in <c>&lt;root&gt;-snapshots</c>.
 /// <para>
@@ -44,7 +18,8 @@ public sealed record JsonlEventStoreOptions
 public sealed class JsonlEventStore<TEventBase>
     : IEventStore,
         IEventLogReader,
-        IEventStoreEnumerator
+        IEventStoreEnumerator,
+        IEventStoreSnapshot
     where TEventBase : class, IDomainEvent
 {
     private const string StreamSuffix = ".jsonl";
@@ -74,7 +49,7 @@ public sealed class JsonlEventStore<TEventBase>
         options ??= new JsonlEventStoreOptions();
         if (options.MaxAggregateLocks <= 0)
             throw new ArgumentOutOfRangeException(
-                nameof(options),
+                nameof(JsonlEventStoreOptions.MaxAggregateLocks),
                 options.MaxAggregateLocks,
                 $"{nameof(JsonlEventStoreOptions.MaxAggregateLocks)} must be greater than zero."
             );
@@ -99,12 +74,6 @@ public sealed class JsonlEventStore<TEventBase>
 
     /// <summary>Live per-aggregate gate entries.</summary>
     internal int LockEntryCount => _locks.Count;
-
-    /// <summary>The directory the streams live in (the snapshots sit in its sibling).</summary>
-    internal string Root => _root;
-
-    /// <summary>The sibling directory snapshots live in — never enumerated as streams.</summary>
-    internal string SnapshotRoot => _snapshotRoot;
 
     /// <inheritdoc/>
     /// <remarks>
@@ -147,11 +116,17 @@ public sealed class JsonlEventStore<TEventBase>
             // 4. Length witness: a length the cache did not count at means somebody else wrote here.
             //    Refuse unconditionally and re-seed — never merge two histories.
             var length = stream.Length;
+            var scanReportedTornTail = false;
             if (!entry.Seeded)
-                entry.Seed(ScanStream(stream, fromVersion: 1, path).Count, length);
+            {
+                var seed = ScanStream(stream, fromVersion: 1, path);
+                entry.Seed(seed.Count, length);
+                scanReportedTornTail = seed.TornTail;
+            }
             else if (entry.Length != length)
             {
-                entry.Seed(ScanStream(stream, fromVersion: 1, path).Count, length);
+                var observed = ScanStream(stream, fromVersion: 1, path);
+                entry.Seed(observed.Count, length);
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
             }
 
@@ -160,9 +135,19 @@ public sealed class JsonlEventStore<TEventBase>
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
 
             // 6. Torn-tail repair: truncate the unterminated fragment, never terminate it. Terminating
-            //    would publish half an event as if it had been committed.
+            //    would publish half an event as if it had been committed. The report is part of the
+            //    repair, not of the SCAN: this branch is reached with an already-SEEDED cache (a
+            //    refused append seeded the length of the torn file), so no scan here saw the fragment
+            //    and a silent truncation would drop bytes with no warning and no counter — the one
+            //    thing this store's corruption policy never does. When a scan in THIS call already
+            //    reported it, that report stands and this one is not duplicated.
             if (length > 0 && !EndsWithNewline(stream, length))
+            {
+                if (!scanReportedTornTail)
+                    ReportTornTail(path);
+
                 stream.SetLength(FindLastNewline(stream, length));
+            }
 
             // 7. ONE write over the encoded bytes, then a flush the append contract can wait for.
             stream.Seek(0, SeekOrigin.End);
@@ -575,7 +560,12 @@ public sealed class JsonlEventStore<TEventBase>
         return 0;
     }
 
-    private readonly record struct Scan(ulong Count, long Offset);
+    /// <summary>
+    /// The single pass over a stream: the event count, the byte offset at which
+    /// <c>fromVersion</c> starts, and whether the pass reported a torn tail — the append's repair step
+    /// needs to know, so one fragment is never reported twice for one append.
+    /// </summary>
+    private readonly record struct Scan(ulong Count, long Offset, bool TornTail);
 
     /// <summary>
     /// Count complete, non-blank, newline-terminated lines and record the byte offset at which the
@@ -619,7 +609,8 @@ public sealed class JsonlEventStore<TEventBase>
             absolute += read;
         }
 
-        if (lineStart < absolute)
+        var tornTail = lineStart < absolute;
+        if (tornTail)
             ReportTornTail(path);
 
         // Past the end (or a torn tail): the remaining bytes are where a next event would start, and the
@@ -627,7 +618,7 @@ public sealed class JsonlEventStore<TEventBase>
         if (offset < 0)
             offset = lineStart;
 
-        return new Scan(count, offset);
+        return new Scan(count, offset, tornTail);
     }
 
     private void ReportTornTail(string path)

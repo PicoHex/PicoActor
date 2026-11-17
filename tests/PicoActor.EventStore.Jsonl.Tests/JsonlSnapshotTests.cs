@@ -58,6 +58,31 @@ public sealed class JsonlSnapshotTests
     }
 
     [Test, Timeout(15000)]
+    public async Task Snapshot_RootWithTrailingSeparator_NamesTheSameFile(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var plain = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        var slashed = new JsonlEventStore<ConformanceEvent>(temp.Root + "/");
+        var id = Guid.NewGuid();
+
+        await plain.SaveSnapshotAsync(id, new ActorSnapshot(2, [2]));
+        await slashed.SaveSnapshotAsync(id, new ActorSnapshot(4, [4]));
+
+        // The trailing separator is normalized BEFORE the -snapshots sibling is derived, so both
+        // spellings name ONE sidecar: the second write REPLACED the first instead of creating a
+        // "data/-snapshots" directory, and a read through either store sees the same bytes.
+        var snapshotDir = temp.Root + "-snapshots";
+        await Assert.That(Directory.Exists(snapshotDir)).IsTrue();
+        await Assert.That(Directory.Exists(temp.Root + "/-snapshots")).IsFalse();
+        await Assert.That(Directory.EnumerateFiles(snapshotDir, "*.snap").Count()).IsEqualTo(1);
+        await Assert.That((await plain.LoadSnapshotAsync(id))!.Version).IsEqualTo(4UL);
+        await Assert.That((await slashed.LoadSnapshotAsync(id))!.Version).IsEqualTo(4UL);
+    }
+
+    [Test, Timeout(15000)]
     public async Task Snapshot_ReadReturnsFreshArray(CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;

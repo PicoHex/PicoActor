@@ -13,6 +13,10 @@
          generator in this compilation. -->
     <PackageReference Include="PicoJetson" />
     <ProjectReference Include="..\..\src\PicoActor.EventStore.Jsonl\PicoActor.EventStore.Jsonl.csproj" />
+    <!-- PicoActor: the runtime integration test (JsonlRuntimeSnapshotTests) drives ActorSystem +
+         SnapshotEveryNEvents against THIS store, which is the only way to observe that the store
+         declares IEventStoreSnapshot — the whole snapshot feature hangs off that is-check. -->
+    <ProjectReference Include="..\..\src\PicoActor\PicoActor.csproj" />
     <ProjectReference Include="..\PicoActor.TestSupport\PicoActor.TestSupport.csproj" />
   </ItemGroup>
 </Project>

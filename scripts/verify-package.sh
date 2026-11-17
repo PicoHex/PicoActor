@@ -26,6 +26,15 @@
 # The nuspec dependency closure of all three packages is printed first: the package
 # must declare what the shipped DLL actually references.
 #
+# A fourth product is then PACKED but not probed: PicoActor.EventStore.Jsonl. It is the
+# one package whose AOT story does not end at its own lib/ folder, so section 4 asserts
+# the two halves a consumer cannot check for itself:
+#   - analyzers/dotnet/cs/PicoActor.EventStore.Gen.dll is IN the package (an unregistered
+#     domain event must fail at COMPILE time, not on the first write at run time);
+#   - the PicoJetson dependency edge is include="All", so the PicoJetson generator and
+#     build/PicoJetson.targets reach the consumer — that is where [PicoDerivedType]
+#     registration happens, because the generator ignores type parameters.
+#
 # Usage: scripts/verify-package.sh            (exit 0 = package surface is sound)
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -261,9 +270,66 @@ run_probe "minimal" "${MINIMAL_SOURCE}" "PicoActor PicoActor.EventStore.InMemory
 run_probe "with-event" "${WITH_EVENT_SOURCE}" "PicoActor PicoActor.EventStore.InMemory"
 run_negative_probe "no-store" "${NO_STORE_SOURCE}" "PicoActor PicoDI:2026.11.*" "AddPicoActorInMemoryStore"
 
+# ═══════════════════════════════════════════════════════════════
+# 4. PicoActor.EventStore.Jsonl — the analyzer half and the PicoJetson edge
+# ═══════════════════════════════════════════════════════════════
+# Packed with UseProjectReferences=false so the nuspec is the PUBLISHED shape: PicoActor.Abs
+# comes from the feed above, exactly as a consumer resolves it.
+#
+# That restore is a PACKAGE-mode one, and it REPLACES the project-reference entries in
+# packages.lock.json — a generated artefact of packaging, not a change to keep. The lock file
+# is snapshotted and put back, because a smoke test that leaves the repository dirty is a
+# smoke test the release flow (tools/release-build.sh refuses a dirty tree) cannot follow.
+JSONL_LOCK="${REPO_ROOT}/src/PicoActor.EventStore.Jsonl/packages.lock.json"
+cp "${JSONL_LOCK}" "${WORK}/PicoActor.EventStore.Jsonl.packages.lock.json"
+
+echo
+echo "=== packing PicoActor.EventStore.Jsonl ${VERSION} -> ${FEED} ==="
+dotnet pack "${REPO_ROOT}/src/PicoActor.EventStore.Jsonl/PicoActor.EventStore.Jsonl.csproj" \
+    -c Release \
+    -p:Version="${VERSION}" \
+    -p:UseProjectReferences=false \
+    -p:RestoreAdditionalProjectSources="${FEED_WIN}" \
+    -o "${FEED}" || die "dotnet pack PicoActor.EventStore.Jsonl failed"
+
+cp "${WORK}/PicoActor.EventStore.Jsonl.packages.lock.json" "${JSONL_LOCK}"
+
+JSONL_PKG="${FEED}/PicoActor.EventStore.Jsonl.${VERSION}.nupkg"
+[ -f "${JSONL_PKG}" ] || die "missing ${JSONL_PKG}"
+
+echo "--- $(basename "${JSONL_PKG}") ---"
+unzip -p "${JSONL_PKG}" '*.nuspec' | sed -n 's/.*<dependency \(.*\)\/>.*/  \1/p'
+
+# 4a. The analyzer half: the [PicoDerivedType] checker that turns a consumer's unregistered
+#     event into a BUILD error instead of a first-write runtime failure.
+if unzip -l "${JSONL_PKG}" | grep -q 'analyzers/dotnet/cs/PicoActor.EventStore.Gen.dll'; then
+    echo "  analyzer: analyzers/dotnet/cs/PicoActor.EventStore.Gen.dll present"
+else
+    echo "verify-package: FAIL — the Jsonl package ships no analyzers/dotnet/cs/PicoActor.EventStore.Gen.dll" >&2
+    overall=1
+fi
+
+# 4b. The PicoJetson edge. PrivateAssets="none" in the csproj is what keeps it include="All":
+#     the default (contentfiles;analyzers;build) writes exclude="Build,Analyzers", which
+#     silently stops the generator and build/PicoJetson.targets from reaching the consumer
+#     while everything still compiles — the exact dead-code shape this section exists for.
+JSONL_NUSPEC="${WORK}/PicoActor.EventStore.Jsonl.nuspec"
+unzip -p "${JSONL_PKG}" '*.nuspec' >"${JSONL_NUSPEC}"
+JETSON_EDGE="$(grep -o '<dependency id="PicoJetson" [^>]*>' "${JSONL_NUSPEC}" || true)"
+case "${JETSON_EDGE}" in
+    *include=\"All\"*)
+        echo "  PicoJetson edge: ${JETSON_EDGE}"
+        ;;
+    *)
+        echo "verify-package: FAIL — the PicoJetson dependency edge is not include=\"All\"" >&2
+        echo "  found: ${JETSON_EDGE:-<no PicoJetson dependency at all>}" >&2
+        overall=1
+        ;;
+esac
+
 echo
 if [ "${overall}" -eq 0 ]; then
-    echo "=== verify-package: PASS — packaged surface is consumable, and the store is a separate package ==="
+    echo "=== verify-package: PASS — packaged surface is consumable, the store is a separate package, and the Jsonl package carries its analyzer + PicoJetson edge ==="
 else
     echo "=== verify-package: FAIL — packaged surface is not consumable as published ===" >&2
 fi

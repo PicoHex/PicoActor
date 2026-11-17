@@ -11,11 +11,14 @@
     <InternalsVisibleTo Include="PicoActor.EventStore.Jsonl.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <!-- PicoJetson: deliberately NO PrivateAssets. Its generator and build/PicoJetson.targets must
-         flow to the CONSUMER, because that is where [PicoDerivedType] registration happens — the
-         generator ignores type parameters, so a Serialize<TEventBase> call in this package generates
-         nothing. PrivateAssets would make "registration in the consumer assembly" false. -->
-    <PackageReference Include="PicoJetson" />
+    <!-- PicoJetson: PrivateAssets="none" is load-bearing, NOT the (silent) default. Its generator and
+         build/PicoJetson.targets must flow to the CONSUMER, because that is where [PicoDerivedType]
+         registration happens — the generator ignores type parameters, so a Serialize<TEventBase> call
+         in this package generates nothing. The default PrivateAssets (contentfiles;analyzers;build)
+         writes exclude="Build,Analyzers" on the nuspec edge, and the consumer would then find no
+         generator for its own registration. "none" keeps the edge as include="All".
+         scripts/verify-package.sh asserts that edge on the packed package. -->
+    <PackageReference Include="PicoJetson" PrivateAssets="none" />
     <!-- PicoLog.Abs: Build-private (the repo convention). It ships an analyzers/dotnet/cs dll and a
          props file that no JSONL consumer needs; the logger seam itself is compiled in. -->
     <PackageReference Include="PicoLog.Abs" PrivateAssets="Build" />

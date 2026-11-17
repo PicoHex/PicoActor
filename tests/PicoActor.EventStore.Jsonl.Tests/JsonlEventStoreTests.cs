@@ -298,11 +298,59 @@ public sealed class JsonlEventStoreTests
         await Assert.That((await restarted.LoadAsync(id)).Count).IsEqualTo(4);
     }
 
+    [Test, Timeout(15000)]
+    public async Task Cursor_DoesNotYieldEventsAppendedAfterOpen(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        var id = Guid.NewGuid();
+        await store.AppendAsync(
+            id,
+            0,
+            [new SSnapshotAdded(1), new SSnapshotAdded(2), new SSnapshotAdded(3)]
+        );
+
+        // Two views, both opened BEFORE the stream grows: one at the head, one PAST the end (the
+        // rollback position a snapshot newer than the stream produces).
+        await using var head = await store.OpenAsync(id, 1);
+        await using var past = await store.OpenAsync(id, 5);
+
+        await Assert.That(head.End).IsEqualTo(3UL);
+        await Assert.That(past.End).IsEqualTo(3UL);
+
+        // The append is durable and legal; it is simply not part of a view taken before it.
+        await Assert
+            .That(await store.AppendAsync(id, 3, [new SSnapshotAdded(4), new SSnapshotAdded(5)]))
+            .IsEqualTo(5UL);
+
+        var fromHead = await DrainAsync(head);
+        var fromPast = await DrainAsync(past);
+
+        // The yield budget is End - fromVersion + 1, never "whatever the file has now": the head cursor
+        // yields exactly the three events it opened at, and the past-the-end cursor yields NOTHING —
+        // its capacity is clamped to 0 instead of underflowing to ~ulong.MaxValue.
+        await Assert.That(fromHead).IsEqualTo(3);
+        await Assert.That(fromPast).IsEqualTo(0);
+    }
+
     /// <summary>The newline byte every committed line ends with.</summary>
     private const byte Newline = 10;
 
     private static string StreamPath(string root, Guid actorId) =>
         Path.Combine(root, actorId.ToString("D") + ".jsonl");
+
+    /// <summary>Count the events a cursor produces, then release it.</summary>
+    private static async Task<int> DrainAsync(IEventCursor cursor)
+    {
+        var seen = 0;
+        while (await cursor.MoveNextAsync())
+            seen++;
+
+        return seen;
+    }
 
     /// <summary>Run an action that must throw and hand back WHAT it threw, for message assertions.</summary>
     private static async Task<Exception> CaptureAsync(Func<ValueTask> action)

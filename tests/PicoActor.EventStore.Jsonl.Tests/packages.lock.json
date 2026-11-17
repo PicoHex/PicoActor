@@ -132,6 +132,15 @@
           "TUnit.Core": "1.83.8"
         }
       },
+      "picoactor": {
+        "type": "Project",
+        "dependencies": {
+          "PicoActor.Abs": "[0.0.0-dev, )",
+          "PicoDI.Abs": "[2026.11.*, )",
+          "PicoLog.Abs": "[2026.11.*, )",
+          "PicoMediator.Abs": "[2026.11.*, )"
+        }
+      },
       "picoactor.abs": {
         "type": "Project",
         "dependencies": {
