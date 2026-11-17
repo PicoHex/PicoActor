@@ -31,6 +31,13 @@ public sealed class JsonlEventStore<TEventBase>
     private const string SnapshotSuffix = ".snap";
     private const int ScanBufferBytes = 64 * 1024;
 
+    // The three states of the ONE lazy directory pass an IdOnly store performs. Three, not a bool: a
+    // pass that threw must be RAISED AGAIN on every later observation instead of being remembered as
+    // "already scanned" — that would turn a misconfigured root into a silently empty store.
+    private const int LazyScanNotRun = 0;
+    private const int LazyScanDone = 1;
+    private const int LazyScanFailed = 2;
+
     private readonly string _root;
     private readonly string _snapshotRoot;
     private readonly JsonlEventStoreOptions _options;
@@ -52,6 +59,12 @@ public sealed class JsonlEventStore<TEventBase>
     private long _filesOpened;
     private long _directoryScans;
     private long _foreignFormatFiles;
+
+    // One lock, one state and one latched failure: the whole cost of the IdOnly lazy pass, which is
+    // read on every observation of a stream that is not there and written at most once per instance.
+    private readonly object _lazyScanGate = new();
+    private int _lazyScanState = LazyScanNotRun;
+    private Exception? _lazyScanFailure;
 
     /// <summary>
     /// Create a store rooted at <paramref name="rootDirectory"/>. The directory is created on the first
@@ -111,6 +124,12 @@ public sealed class JsonlEventStore<TEventBase>
     /// formats, because the pass is where a foreign name, an unparseable id, the other layout and a
     /// whole-directory misconfiguration are diagnosed. A <see cref="FileNameFormat.TypePrefix"/> store
     /// pays one more at construction (to learn the <c>id → type</c> map) and one per resolved miss.
+    /// <para>
+    /// <see cref="FileNameFormat.IdOnly"/> pays exactly ONE more, and only lazily: at the FIRST
+    /// observation of a stream it does not have (a load, a version, a cursor, a peek, an empty batch, or
+    /// an append of a new id). A store that only ever touches streams it already has never looks at the
+    /// directory at all.
+    /// </para>
     /// </summary>
     internal long DirectoryScans => Interlocked.Read(ref _directoryScans);
 
@@ -141,29 +160,44 @@ public sealed class JsonlEventStore<TEventBase>
     {
         ArgumentNullException.ThrowIfNull(events);
 
-        var (path, newType) = AppendPathFor(actorId, events);
+        // The gate comes FIRST: the path is resolved INSIDE it, because resolving a new id's path is
+        // what claims that id's prefix — and, under IdOnly, what pays the one lazy pass.
         var entry = _locks.Acquire(actorId);
         await entry.Gate.WaitAsync().ConfigureAwait(false);
         try
         {
-            // 1. An empty batch is an append that writes nothing, NOT a bypass: the read-only witness
-            //    and the version check run before it becomes a no-op.
+            // 1. An empty batch is an append that writes nothing, NOT a bypass: it resolves its path
+            //    the same way a writing append does (map, then the TypePrefix root pass), and the
+            //    version check that follows validates a HELD stream's expectedVersion in both formats.
+            //    Only the duplicate guard and the write are skipped — there is nothing to write and
+            //    nothing to create.
             if (events.Count == 0)
-                return EmptyAppend(actorId, expectedVersion, path, entry);
+                return EmptyAppend(actorId, expectedVersion, PathFor(actorId), entry);
 
-            // 2. A non-empty batch ALWAYS resolved a path — an existing stream, or a NEW name formed
-            //    from events[0]'s type, which is known before the path ever is. Naming it once, up front,
-            //    keeps every later use (the guard, the encode message, the handle, the reports) honest
-            //    without scattering null-forgiving operators.
-            var streamPath = path!;
+            // 2. A non-empty batch knows its TYPE before its path: the prefix is events[0]'s concrete
+            //    type name (its backtick arity kept, exactly as Type.Name reports it — never FullName),
+            //    so an id can never be given the meaningless "-<guid>.jsonl" an EMPTY prefix would form.
+            var typeName = events[0].GetType().Name;
 
-            // 3. Two histories for ONE id are never merged. Under TypePrefix the other layout's name is
+            // 3. Resolving the path is also the observation of a MISSING stream, which is the one
+            //    moment an IdOnly store pays its lazy pass: a host that only appends by id must still
+            //    learn that its whole directory is in the other layout before it forks a second stream.
+            //    A TypePrefix miss has already paid for its own pass inside PathFor.
+            var existing = PathFor(actorId);
+            if (existing is null || !File.Exists(existing))
+                ObserveMissingStream();
+
+            // 4. A NEW id takes the name its first event gives it; an EXISTING stream keeps the prefix
+            //    it was created with, whatever this batch's first event happens to be called.
+            var streamPath = existing ?? PathForNew(actorId, typeName);
+
+            // 5. Two histories for ONE id are never merged. Under TypePrefix the other layout's name is
             //    derived from the id (one stat); under IdOnly the check costs a directory pass and is
             //    gated on a scan having seen another layout here. Either way it runs BEFORE the encode,
             //    so a refused append has touched no file.
             GuardAmbiguousStream(actorId, streamPath);
 
-            // 4. Every element must be the declared base type, and the batch is encoded as ONE buffer
+            // 6. Every element must be the declared base type, and the batch is encoded as ONE buffer
             //    before anything reaches the disk — a serialization failure creates no file at all.
             var payload = Encode(events, streamPath);
 
@@ -176,7 +210,7 @@ public sealed class JsonlEventStore<TEventBase>
                 FileShare.Read
             );
 
-            // 5. Length witness: a length the cache did not count at means somebody else wrote here.
+            // 7. Length witness: a length the cache did not count at means somebody else wrote here.
             //    Refuse unconditionally and re-seed — never merge two histories.
             var length = stream.Length;
             var scanReportedTornTail = false;
@@ -193,11 +227,11 @@ public sealed class JsonlEventStore<TEventBase>
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
             }
 
-            // 6. Optimistic concurrency against the counted version.
+            // 8. Optimistic concurrency against the counted version.
             if (entry.Count != expectedVersion)
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
 
-            // 7. Torn-tail repair: truncate the unterminated fragment, never terminate it. Terminating
+            // 9. Torn-tail repair: truncate the unterminated fragment, never terminate it. Terminating
             //    would publish half an event as if it had been committed. The report is part of the
             //    repair, not of the SCAN: this branch is reached with an already-SEEDED cache (a
             //    refused append seeded the length of the torn file), so no scan here saw the fragment
@@ -212,21 +246,21 @@ public sealed class JsonlEventStore<TEventBase>
                 stream.SetLength(FindLastNewline(stream, length));
             }
 
-            // 8. ONE write over the encoded bytes, then a flush the append contract can wait for.
+            // 10. ONE write over the encoded bytes, then a flush the append contract can wait for.
             stream.Seek(0, SeekOrigin.End);
             await stream.WriteAsync(payload, CancellationToken.None).ConfigureAwait(false);
             await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             if (_options.FlushToDisk)
                 stream.Flush(flushToDisk: true);
 
-            // 9. The cache describes the file as it now is.
+            // 11. The cache describes the file as it now is.
             var version = entry.Count + (ulong)events.Count;
             entry.Seed(version, stream.Length);
 
             // The prefix is fixed at CREATION: the map learns it once the bytes are on disk, so an id
             // that is later recreated keeps pointing at the file its first event named.
-            if (newType is not null)
-                _typeById.TryAdd(actorId, newType);
+            if (existing is null)
+                _typeById.TryAdd(actorId, typeName);
 
             return version;
         }
@@ -276,13 +310,21 @@ public sealed class JsonlEventStore<TEventBase>
         return entry.Count;
     }
 
-    /// <summary>Observe a stream WITHOUT creating or repairing anything: (count, length), 0/0 when absent.</summary>
+    /// <summary>
+    /// Observe a stream WITHOUT creating or repairing anything: (count, length), 0/0 when absent. An
+    /// absent stream is an OBSERVATION like any other, so under <see cref="FileNameFormat.IdOnly"/> this
+    /// is also where the single lazy pass runs — an EMPTY batch for an id the store has never written
+    /// diagnoses a misconfigured root instead of reporting version 0.
+    /// </summary>
     private (ulong Count, long Length) Inspect(string? path)
     {
         // A null path is "this format has no stream for the id" — the same observation as a missing
         // file, and it must not create one.
         if (path is null || !File.Exists(path))
+        {
+            ObserveMissingStream();
             return (0UL, 0L);
+        }
 
         using var stream = OpenRead(path);
         var length = stream.Length;
@@ -297,8 +339,8 @@ public sealed class JsonlEventStore<TEventBase>
     /// </remarks>
     public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     {
-        var path = PathFor(actorId);
-        if (path is null || !File.Exists(path))
+        var path = ExistingPathFor(actorId);
+        if (path is null)
             return Array.Empty<IDomainEvent>();
 
         var events = new List<IDomainEvent>();
@@ -326,8 +368,8 @@ public sealed class JsonlEventStore<TEventBase>
     /// <inheritdoc/>
     public async ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
     {
-        var path = PathFor(actorId);
-        if (path is null || !File.Exists(path))
+        var path = ExistingPathFor(actorId);
+        if (path is null)
             return null;
 
         await using var stream = OpenRead(path);
@@ -373,8 +415,8 @@ public sealed class JsonlEventStore<TEventBase>
     {
         ct.ThrowIfCancellationRequested();
 
-        var path = PathFor(actorId);
-        if (path is null || !File.Exists(path))
+        var path = ExistingPathFor(actorId);
+        if (path is null)
             return new ValueTask<ulong>(0UL);
 
         using var stream = OpenRead(path);
@@ -400,8 +442,8 @@ public sealed class JsonlEventStore<TEventBase>
 
         // The path is resolved AFTER the version check: fromVersion == 0 is an argument error in both
         // formats, whether or not the aggregate exists.
-        var path = PathFor(actorId);
-        if (path is null || !File.Exists(path))
+        var path = ExistingPathFor(actorId);
+        if (path is null)
             return new ValueTask<IEventCursor>(JsonlCursor.Empty(fromVersion));
 
         var stream = OpenRead(path);
@@ -615,6 +657,88 @@ public sealed class JsonlEventStore<TEventBase>
 
     private string PrefixedPathFor(Guid actorId, string typeName) =>
         Path.Combine(_root, typeName + "-" + actorId.ToString("D") + StreamSuffix);
+
+    /// <summary>
+    /// The path of a stream that EXISTS, or <see langword="null"/> when this format has none for
+    /// <paramref name="actorId"/> — and the one place a read of a MISSING stream becomes a diagnosis.
+    /// <para>
+    /// Under <see cref="FileNameFormat.IdOnly"/> the name is derived from the id alone, so this is the
+    /// first moment the store learns it has no stream: exactly when the single lazy pass runs
+    /// (<see cref="ObserveMissingStream"/>). Under <see cref="FileNameFormat.TypePrefix"/> a miss has
+    /// already paid its own pass inside <see cref="PathFor"/>, and the lazy pass is an IdOnly cost.
+    /// </para>
+    /// </summary>
+    private string? ExistingPathFor(Guid actorId)
+    {
+        var path = PathFor(actorId);
+        if (path is not null && File.Exists(path))
+            return path;
+
+        ObserveMissingStream();
+        return null;
+    }
+
+    /// <summary>
+    /// The ONE lazy directory pass of an <see cref="FileNameFormat.IdOnly"/> store: run the first time it
+    /// observes a stream it does not have, and never again.
+    /// <para>
+    /// Why it exists: IdOnly derives every path from the id, so a host that only loads and appends BY ID
+    /// would never enumerate — and would never learn that its whole directory is in the OTHER layout.
+    /// It would write a second stream beside the one it cannot see. One pass at the first miss is what
+    /// turns that into the loud whole-directory error, and it costs nothing for a store that only ever
+    /// touches streams it already has.
+    /// </para>
+    /// <para>
+    /// A FAILED pass is LATCHED, not swallowed: the misconfiguration is raised again on the next
+    /// observation, because a store pointed at the wrong directory must not start answering "empty
+    /// aggregate" after one loud error. The latch is also why <see cref="DirectoryScans"/> stops at one —
+    /// the directory is never re-scanned per operation.
+    /// </para>
+    /// </summary>
+    private void ObserveMissingStream()
+    {
+        // TypePrefix resolves a miss with its own pass (construction, or PathFor), so the lazy pass is an
+        // IdOnly cost: that is the format whose paths are derived without ever looking at the directory.
+        if (_options.FileNameFormat != FileNameFormat.IdOnly)
+            return;
+
+        var state = Volatile.Read(ref _lazyScanState);
+        if (state == LazyScanNotRun)
+            state = RunLazyScan();
+
+        if (state == LazyScanFailed)
+            throw new InvalidOperationException(_lazyScanFailure!.Message, _lazyScanFailure);
+    }
+
+    /// <summary>
+    /// Run the lazy pass at most ONCE per instance, whatever the concurrency: the winner classifies the
+    /// directory (which counts the pass BEFORE it can throw) and publishes the outcome, the losers read
+    /// it. A pass that threw publishes the FAILURE, so every later observation raises it again.
+    /// </summary>
+    private int RunLazyScan()
+    {
+        lock (_lazyScanGate)
+        {
+            var state = Volatile.Read(ref _lazyScanState);
+            if (state != LazyScanNotRun)
+                return state;
+
+            try
+            {
+                ScanRoot();
+                state = LazyScanDone;
+            }
+            catch (InvalidOperationException ex)
+            {
+                // The whole-directory misconfiguration: remembered, never treated as "already scanned".
+                _lazyScanFailure = ex;
+                state = LazyScanFailed;
+            }
+
+            Volatile.Write(ref _lazyScanState, state);
+            return state;
+        }
+    }
 
     // ── Classification: the ONE pass every scan is built on ──────────────────────────────────
 
@@ -874,26 +998,6 @@ public sealed class JsonlEventStore<TEventBase>
 
             LearnPrefix(entry.Id, entry.Type);
         }
-    }
-
-    /// <summary>
-    /// The path an append writes to, plus the type prefix to REGISTER once the write succeeded (null
-    /// when nothing has to be registered, and for every IdOnly store). An empty batch resolves its path
-    /// the same way — map, then root pass — but writes nothing.
-    /// </summary>
-    private (string? Path, string? NewType) AppendPathFor(
-        Guid actorId,
-        IReadOnlyList<IDomainEvent> events
-    )
-    {
-        var existing = PathFor(actorId);
-        if (existing is not null || events.Count == 0)
-            return (existing, null);
-
-        // A NEW aggregate under TypePrefix: the prefix is the batch's first event type — with its
-        // backtick arity, exactly as Type.Name reports it, and never FullName.
-        var typeName = events[0].GetType().Name;
-        return (PathForNew(actorId, typeName), typeName);
     }
 
     /// <summary>

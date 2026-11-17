@@ -235,7 +235,10 @@ public sealed class FileNameFormatTests
 
         // The enumeration IS a classification pass in BOTH formats — that pass is where a foreign name,
         // an unparseable id, the other layout and a whole-directory misconfiguration are diagnosed — so
-        // exactly ONE pass was paid, and it had nothing to diagnose here.
+        // exactly ONE pass was paid here, and it had nothing to diagnose. Neither append paid the IdOnly
+        // LAZY pass either: both resolved a stream that already existed, which is not a missing-stream
+        // observation. That is the IdOnly cost model in one assertion: nothing at construction, nothing
+        // per append, one pass at the first enumeration — or at the first miss, whichever comes first.
         await Assert.That(store.DirectoryScans).IsEqualTo(1L);
         await Assert.That(store.ForeignFormatFiles).IsEqualTo(0L);
 
@@ -685,8 +688,11 @@ public sealed class FileNameFormatTests
             cancellationToken
         );
 
-        // IdOnly performs no scan at construction and no scan per append, so this is the ONLY pass.
-        await Assert.That(store.DirectoryScans).IsEqualTo(0L);
+        // IdOnly performs no scan at construction, but the append above was this store's FIRST
+        // observation of a stream it did not have — the one lazy pass it ever pays, and it found nothing
+        // to diagnose (the directory was empty when it ran). The enumeration below is therefore the
+        // SECOND and last pass, which is what its delta asserts.
+        await Assert.That(store.DirectoryScans).IsEqualTo(1L);
         var scansBefore = store.DirectoryScans;
         var foreignBefore = store.ForeignFormatFiles;
         var ids = await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
@@ -895,6 +901,150 @@ public sealed class FileNameFormatTests
         await Assert.That(names.Length).IsEqualTo(1);
         await Assert.That(names[0]).IsEqualTo($"RetiredType-{id:D}.jsonl");
         await Assert.That(await prefix.GetVersionAsync(id)).IsEqualTo(2UL);
+    }
+
+    // ── G8: a host that never enumerates still gets the diagnosis ──────────────────────────────
+
+    /// <summary>
+    /// The one loud outcome available to a host that only loads and appends BY ID. IdOnly derives the
+    /// path from the id alone, so without the lazy pass such a host sees "no stream" in a directory that
+    /// is entirely in the OTHER layout and appends a SECOND history beside the file it cannot see. The
+    /// pass runs at the first missing stream — a LOAD counts, not only an append — exactly once; a pass
+    /// that threw is LATCHED, so the misconfiguration is raised again instead of decaying into an empty
+    /// aggregate, and the directory is never re-scanned per operation.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G8_NoEnumerationHost_LazyPass_ThrowsOnMisconfiguration(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var existingId = Guid.NewGuid();
+        var missingId = Guid.NewGuid();
+
+        // A directory in the OTHER layout, written by the store itself so it is a real TypePrefix root
+        // rather than a hand-made approximation of one.
+        var writer = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        await writer.AppendAsync(existingId, 0, [new SSnapshotAdded(1)]);
+
+        // The host under test NEVER enumerates: no ListAggregateIdsAsync in this test on it.
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+
+        // Nothing at construction: an IdOnly store does not look at its directory until it has to.
+        await Assert.That(store.DirectoryScans).IsEqualTo(0L);
+
+        // The FIRST observation is a LOAD of a stream that is not there — not an enumeration and not an
+        // append. That is enough: the lazy pass runs here, counts itself BEFORE it throws, and throws.
+        var first = await CaptureAsync(async () =>
+        {
+            await store.LoadAsync(existingId);
+        });
+
+        await Assert.That(first is InvalidOperationException).IsTrue();
+        await Assert.That(store.DirectoryScans).IsEqualTo(1L);
+
+        // ... and it says what is wrong — both counts — instead of answering "no events".
+        await Assert
+            .That(first!.Message.Contains("configured: 0", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(first.Message.Contains("other-format: 1", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert.That(logger.Contains("use the other naming format")).IsTrue();
+
+        // A SECOND observation, through a DIFFERENT member, raises the same diagnosis: the latch holds
+        // the FAILURE, not a silent "already scanned". The directory is not scanned a second time.
+        var second = await CaptureAsync(async () =>
+        {
+            await store.GetVersionAsync(missingId);
+        });
+
+        await Assert.That(second is InvalidOperationException).IsTrue();
+        await Assert
+            .That(second!.Message.Contains("configured: 0", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert.That(store.DirectoryScans).IsEqualTo(1L);
+
+        // The APPEND path owes the same diagnosis: a fresh host whose first observation is a NEW id.
+        var appender = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        var appendError = await CaptureAppendErrorAsync(
+            appender,
+            missingId,
+            0,
+            new SSnapshotAdded(2)
+        );
+
+        await Assert.That(appendError is InvalidOperationException).IsTrue();
+        await Assert.That(appender.DirectoryScans).IsEqualTo(1L);
+
+        // ... and it refused BEFORE the write: no second stream was forked beside the file it cannot see,
+        // and the other layout's history is exactly as it was.
+        await Assert
+            .That(File.Exists(Path.Combine(temp.Root, missingId.ToString("D") + ".jsonl")))
+            .IsFalse();
+        await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(1);
+        await Assert.That(await writer.GetVersionAsync(existingId)).IsEqualTo(1UL);
+    }
+
+    // ── G9: an empty batch validates the version and creates nothing ────────────────────────────
+
+    /// <summary>
+    /// An empty batch is neither a bypass nor a write. It resolves its path the same way a writing append
+    /// does (map, then the TypePrefix root pass), it validates the HELD stream's
+    /// <c>expectedVersion</c>, and then it does nothing at all — no duplicate-guard pass, no file, no
+    /// directory creation. The version check is the point: a producer that "appends nothing" against a
+    /// stale version is refused exactly like one that appends an event.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G9_TypePrefix_EmptyBatch_ValidatesVersion_AndCreatesNothing(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var streamName = $"{nameof(SSnapshotAdded)}-{id:D}.jsonl";
+
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        await store.AppendAsync(
+            id,
+            0,
+            [new SSnapshotAdded(1), new SSnapshotAdded(2), new SSnapshotAdded(3)]
+        );
+
+        var names = Directory.GetFiles(temp.Root).Select(Path.GetFileName).ToArray();
+        await Assert.That(names.Length).IsEqualTo(1);
+        await Assert.That(names[0]).IsEqualTo(streamName);
+        var scansBefore = store.DirectoryScans;
+
+        // A STALE expectedVersion is refused: the empty batch still observes the stream's version.
+        var stale = await CaptureAsync(async () =>
+        {
+            await store.AppendAsync(id, 0, []);
+        });
+
+        await Assert.That(stale is ConcurrencyException).IsTrue();
+        var conflict = (ConcurrencyException)stale!;
+        await Assert.That(conflict.ActorId).IsEqualTo(id);
+        await Assert.That(conflict.ExpectedVersion).IsEqualTo(0UL);
+        await Assert.That(conflict.ActualVersion).IsEqualTo(3UL);
+
+        // A CURRENT one is a NO-OP that answers the version it observed, in the same format.
+        await Assert.That(await store.AppendAsync(id, 3, [])).IsEqualTo(3UL);
+
+        // No path resolution, no duplicate guard, no new file: the map hit answered both calls, and
+        // nothing on disk moved — not the stream, and not the OTHER layout's name for the same id.
+        await Assert.That(store.DirectoryScans).IsEqualTo(scansBefore);
+        await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(1);
+        await Assert
+            .That(File.Exists(Path.Combine(temp.Root, id.ToString("D") + ".jsonl")))
+            .IsFalse();
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(3UL);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────────────────────
