@@ -100,6 +100,12 @@ public sealed class JsonlEventStore<TEventBase>
     internal string Root => _root;
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The ORDER is the contract: read-only witness, version, torn-tail truncate, ONE write, flush,
+    /// cache update. A rejected append never changes the stream's content (a missing stream may be left
+    /// as a zero-length file, which enumeration skips), and the cache is what makes the steady state
+    /// O(1) per append instead of a rescan.
+    /// </remarks>
     public async ValueTask<ulong> AppendAsync(
         Guid actorId,
         ulong expectedVersion,
@@ -113,6 +119,15 @@ public sealed class JsonlEventStore<TEventBase>
         await entry.Gate.WaitAsync().ConfigureAwait(false);
         try
         {
+            // 1. An empty batch is an append that writes nothing, NOT a bypass: the read-only witness
+            //    and the version check run before it becomes a no-op.
+            if (events.Count == 0)
+                return EmptyAppend(actorId, expectedVersion, path, entry);
+
+            // 2. Every element must be the declared base type, and the batch is encoded as ONE buffer
+            //    before anything reaches the disk — a serialization failure creates no file at all.
+            var payload = Encode(events, path);
+
             Directory.CreateDirectory(_root);
 
             await using var stream = new FileStream(
@@ -122,27 +137,93 @@ public sealed class JsonlEventStore<TEventBase>
                 FileShare.Read
             );
 
-            var current = ScanStream(stream, fromVersion: 1, path).Count;
-            if (current != expectedVersion)
-                throw new ConcurrencyException(actorId, expectedVersion, current);
+            // 4. Length witness: a length the cache did not count at means somebody else wrote here.
+            //    Refuse unconditionally and re-seed — never merge two histories.
+            var length = stream.Length;
+            if (!entry.Seeded)
+                entry.Seed(ScanStream(stream, fromVersion: 1, path).Count, length);
+            else if (entry.Length != length)
+            {
+                entry.Seed(ScanStream(stream, fromVersion: 1, path).Count, length);
+                throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
+            }
 
-            if (events.Count == 0)
-                return current;
+            // 5. Optimistic concurrency against the counted version.
+            if (entry.Count != expectedVersion)
+                throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
 
-            var payload = Encode(events);
+            // 6. Torn-tail repair: truncate the unterminated fragment, never terminate it. Terminating
+            //    would publish half an event as if it had been committed.
+            if (length > 0 && !EndsWithNewline(stream, length))
+                stream.SetLength(FindLastNewline(stream, length));
+
+            // 7. ONE write over the encoded bytes, then a flush the append contract can wait for.
             stream.Seek(0, SeekOrigin.End);
             await stream.WriteAsync(payload, CancellationToken.None).ConfigureAwait(false);
             await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             if (_options.FlushToDisk)
                 stream.Flush(flushToDisk: true);
 
-            return current + (ulong)events.Count;
+            // 8. The cache describes the file as it now is.
+            var version = entry.Count + (ulong)events.Count;
+            entry.Seed(version, stream.Length);
+            return version;
+        }
+        catch (ConcurrencyException)
+        {
+            // Content untouched: a witness mismatch has already re-seeded the cache, and a plain
+            // version mismatch leaves a valid observation alone.
+            throw;
+        }
+        catch
+        {
+            // A failed write may have flushed partial bytes, so the cache no longer describes the file.
+            entry.Invalidate();
+            throw;
         }
         finally
         {
             entry.Gate.Release();
             _locks.Release(actorId, entry);
         }
+    }
+
+    /// <summary>
+    /// The empty-batch path: a READ-ONLY witness (no file is created, no torn tail is repaired), then
+    /// the version check, then nothing. <c>InMemoryEventStore</c> behaves the same way.
+    /// </summary>
+    private ulong EmptyAppend(
+        Guid actorId,
+        ulong expectedVersion,
+        string path,
+        JsonlLockEntry entry
+    )
+    {
+        var (count, length) = Inspect(path);
+
+        if (!entry.Seeded)
+            entry.Seed(count, length);
+        else if (entry.Length != length)
+        {
+            entry.Seed(count, length);
+            throw new ConcurrencyException(actorId, expectedVersion, count);
+        }
+
+        if (entry.Count != expectedVersion)
+            throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
+
+        return entry.Count;
+    }
+
+    /// <summary>Observe a stream WITHOUT creating or repairing anything: (count, length), 0/0 when absent.</summary>
+    private (ulong Count, long Length) Inspect(string path)
+    {
+        if (!File.Exists(path))
+            return (0UL, 0L);
+
+        using var stream = OpenRead(path);
+        var length = stream.Length;
+        return (ScanStream(stream, fromVersion: 1, path).Count, length);
     }
 
     /// <inheritdoc/>
@@ -329,7 +410,7 @@ public sealed class JsonlEventStore<TEventBase>
         Path.Combine(_root, actorId.ToString("D") + StreamSuffix);
 
     /// <summary>Encode the batch as ONE buffer: <c>json</c> + newline per event, never split.</summary>
-    private static byte[] Encode(IReadOnlyList<IDomainEvent> events)
+    private static byte[] Encode(IReadOnlyList<IDomainEvent> events, string path)
     {
         using var buffer = new MemoryStream();
         for (var i = 0; i < events.Count; i++)
@@ -345,7 +426,16 @@ public sealed class JsonlEventStore<TEventBase>
                 );
             }
 
-            var json = JsonSerializer.SerializeToUtf8Bytes(domainEvent);
+            byte[] json;
+            try
+            {
+                json = JsonSerializer.SerializeToUtf8Bytes(domainEvent);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw Wrap(ex, path, "serialize");
+            }
+
             buffer.Write(json);
             buffer.WriteByte(JsonlLines.NewLine);
         }
@@ -370,16 +460,16 @@ public sealed class JsonlEventStore<TEventBase>
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            throw Wrap(ex, path);
+            throw Wrap(ex, path, "deserialize");
         }
 
-        throw Wrap(new FormatException("the line deserialized to null"), path);
+        throw Wrap(new FormatException("the line deserialized to null"), path, "deserialize");
     }
 
-    private static Exception Wrap(Exception inner, string path)
+    private static Exception Wrap(Exception inner, string path, string action)
     {
         var message =
-            $"Cannot deserialize a line of '{path}' as {typeof(TEventBase).FullName}: {inner.Message} "
+            $"Cannot {action} '{path}' as {typeof(TEventBase).FullName}: {inner.Message} "
             + "Every concrete event must be registered with [PicoDerivedType(typeof(T), \"tag\")] on "
             + $"{typeof(TEventBase).FullName} in the assembly that declares it — that is where the "
             + "PicoJetson serializer is generated.";
@@ -390,6 +480,33 @@ public sealed class JsonlEventStore<TEventBase>
         return inner is InvalidOperationException
             ? new InvalidOperationException(message, inner)
             : new FormatException(message, inner);
+    }
+
+    private static bool EndsWithNewline(FileStream stream, long length)
+    {
+        stream.Seek(length - 1, SeekOrigin.Begin);
+        return stream.ReadByte() == JsonlLines.NewLine;
+    }
+
+    /// <summary>Offset just after the last newline (0 when the file has none) — the truncation point.</summary>
+    private static long FindLastNewline(FileStream stream, long length)
+    {
+        var buffer = new byte[8192];
+        var position = length;
+        while (position > 0)
+        {
+            var chunk = (int)Math.Min(buffer.Length, position);
+            position -= chunk;
+            stream.Seek(position, SeekOrigin.Begin);
+            stream.ReadExactly(buffer, 0, chunk);
+            for (var i = chunk - 1; i >= 0; i--)
+            {
+                if (buffer[i] == JsonlLines.NewLine)
+                    return position + i + 1;
+            }
+        }
+
+        return 0;
     }
 
     private readonly record struct Scan(ulong Count, long Offset);

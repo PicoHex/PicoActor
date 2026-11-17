@@ -284,7 +284,7 @@ public abstract class EventLogReaderConformanceBase
     }
 
     [Test, Timeout(15000)]
-    public async Task BlankLines_AfterLastEvent_AreTerminatedAndKeepTheStreamAppendable(
+    public async Task BlankLines_AfterLastEvent_AreNotATornTail(
         CancellationToken cancellationToken = default
     )
     {
@@ -292,9 +292,8 @@ public abstract class EventLogReaderConformanceBase
         var (store, reader) = Create();
         var id = await SeedAsync(store, Seeded);
 
-        // A trailing blank line is TERMINATED — it is not the torn tail a crash leaves — so the
-        // stream still ends at version Seeded, a cursor past the end is empty, and the next append
-        // is accepted at that version.
+        // A trailing blank line is TERMINATED — it is not the torn tail a crash leaves — so the stream
+        // still ends at version Seeded, a cursor past the end is empty, and the first event is intact.
         await InjectBlankLinesAsync(id);
 
         await using (var past = await reader.OpenAsync(id, Seeded + 1))
@@ -303,8 +302,7 @@ public abstract class EventLogReaderConformanceBase
             await Assert.That(await past.MoveNextAsync()).IsFalse();
         }
 
-        await Assert
-            .That(await store.AppendAsync(id, Seeded, [new SSnapshotAdded(Seeded + 1)]))
-            .IsEqualTo((ulong)Seeded + 1);
+        await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(Seeded);
+        await Assert.That(await reader.PeekFirstAsync(id)).IsEqualTo(new SSnapshotAdded(1));
     }
 }

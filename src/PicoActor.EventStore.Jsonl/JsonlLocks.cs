@@ -1,8 +1,14 @@
 namespace PicoActor.EventStore.Jsonl;
 
 /// <summary>
-/// One aggregate's append gate. Append is the only operation that mutates a stream, so the gate is
-/// what makes "check the version, then write" atomic for a single store instance.
+/// One aggregate's append entry: the gate that makes "check the version, then write" atomic for a
+/// single store instance, plus the bookkeeping the next append reads instead of the file — the cached
+/// event count and the file length it was counted at.
+/// <para>
+/// The length is the WITNESS: a write after an external modification is refused (a forked history is
+/// worse than a failed append), and the only recovery is a re-seed. An entry that is dropped by the
+/// table's bound costs one re-scan on the next append, never correctness.
+/// </para>
 /// </summary>
 internal sealed class JsonlLockEntry
 {
@@ -10,6 +16,31 @@ internal sealed class JsonlLockEntry
 
     /// <summary>Holders plus waiters; guarded by the owning table, never by this entry.</summary>
     internal int Refs;
+
+    /// <summary>True once <see cref="Count"/>/<see cref="Length"/> describe the file.</summary>
+    internal bool Seeded;
+
+    /// <summary>Event count at the observed length (the version an append is checked against).</summary>
+    internal ulong Count;
+
+    /// <summary>File length at which <see cref="Count"/> was observed.</summary>
+    internal long Length;
+
+    /// <summary>Describe the file as seen: the count and the length it was counted at.</summary>
+    internal void Seed(ulong count, long length)
+    {
+        Seeded = true;
+        Count = count;
+        Length = length;
+    }
+
+    /// <summary>Forget the observation, so the next append re-scans (a failed write invalidates).</summary>
+    internal void Invalidate()
+    {
+        Seeded = false;
+        Count = 0;
+        Length = 0;
+    }
 }
 
 /// <summary>
