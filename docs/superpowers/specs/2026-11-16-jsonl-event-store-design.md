@@ -656,8 +656,9 @@ event. Nothing here asserts a wall-clock number; element and flush counts are th
 - **Bnd1…Bnd5 — the lifecycle of a bound event**: a saga stream holding `SagaCompleted` is written by a
   `JsonlEventStore<TEventBase>` and read back as `SagaCompleted`/`SagaFailed` (Bnd1); a batch that mixes
   `TEventBase` and bound events is ONE write and ONE flush with the right version count (Bnd2); the
-  bound line's bytes are `{"$type":"<tag>"` immediately followed by the payload — no comma, the
-  payload's opening `{` dropped (Bnd3); the read path sniffs the FIRST member only and matches the tag
+  bound line's bytes are `{"$type":"<tag>"` followed by the payload with its opening `{` dropped and a
+  separator **only when the payload has a member** (`{"$type":"t","M":1}`; a memberless payload gives
+  `{"$type":"t"}`) (Bnd3); the read path sniffs the FIRST member only and matches the tag
   case-insensitively (Bnd4); a line whose tag the table does not know **falls back unconditionally** to
   `Deserialize<TEventBase>`, so a pre-existing stream with custom discriminators is unaffected (Bnd5).
 - **Bnd6 — one tag, one type** (`Bnd6_DuplicateTag_ThrowsAtTheCall`): the second `Add` on a taken tag
