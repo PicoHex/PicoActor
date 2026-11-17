@@ -1,5 +1,7 @@
 # PicoActor CI — validation pipeline
-# Tier 2: source-generator library (PicoActor.Abs + PicoActor.Gen + PicoActor)
+# Tier 2: source-generator library (PicoActor.Abs + PicoActor.Gen + PicoActor) plus the
+# store family (PicoActor.EventStore.InMemory, PicoActor.EventStore.Jsonl and the
+# PicoActor.EventStore.Gen analyzer embedded in the Jsonl package).
 # Gen is embedded in the Abs package; tests exercise the generated bridge code.
 # Runs on PR and push to main
 
@@ -116,6 +118,18 @@ jobs:
       - name: Test PicoActor
         run: dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-build -c Release
 
+      # The store family moved out of the core package: each store ships its own
+      # conformance/behaviour suite, and the analyzer that guards [PicoDerivedType]
+      # registration has its own project. All four run from the same Release build.
+      - name: Test PicoActor.EventStore.InMemory
+        run: dotnet test --project tests/PicoActor.EventStore.InMemory.Tests/PicoActor.EventStore.InMemory.Tests.csproj --no-build -c Release
+
+      - name: Test PicoActor.EventStore.Jsonl
+        run: dotnet test --project tests/PicoActor.EventStore.Jsonl.Tests/PicoActor.EventStore.Jsonl.Tests.csproj --no-build -c Release
+
+      - name: Test PicoActor.EventStore.Gen
+        run: dotnet test --project tests/PicoActor.EventStore.Gen.Tests/PicoActor.EventStore.Gen.Tests.csproj --no-build -c Release
+
       # The sample declares AotOptimizationLevel=aggressive (minimal tier +
       # size levers) in its csproj; Abs/Gen guard against inherited PublishAot
       # via the netstandard2.0 guard block and TreatAsLocalProperty.
@@ -183,10 +197,11 @@ jobs:
           grep -q "=== Done ===" aot-sample.log
 
   # ---------------------------------------------------------------------------
-  # Package smoke — the PACKAGED surface must be consumable with PicoActor alone
-  # (C1 regression guard: scripts/verify-package.sh). Independent of the unit-test
-  # matrix on purpose: it packs both packages in Release and restores two throwaway
-  # probe projects, which is minutes the per-RID build job should not pay.
+  # Package smoke — the PACKAGED surface must be consumable, and the store must be its
+  # OWN package (C1 + C2 regression guards: scripts/verify-package.sh). Independent of
+  # the unit-test matrix on purpose: it packs three packages in Release and restores
+  # three throwaway probe projects (two positive, one negative), which is minutes the
+  # per-RID build job should not pay.
   # Needs `unzip` (the script unpacks the nuspec; preinstalled on ubuntu-latest).
   # ---------------------------------------------------------------------------
   package-smoke:
@@ -201,5 +216,5 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Verify packaged surface (PicoActor alone)
+      - name: Verify packaged surface (PicoActor + store package, and the no-store throw)
         run: bash scripts/verify-package.sh

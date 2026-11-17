@@ -21,6 +21,9 @@
 // fixed sleep whose length decides whether the assertion sees the work or not.
 // ═══════════════════════════════════════════════════════════════
 
+using PicoActor.EventStore.Jsonl;
+using PicoSerDe.Core;
+
 Console.WriteLine("=== PicoActor Sample: Event-Sourced Counter ===\n");
 
 // ── Setup: ActorSystem with InMemoryEventStore ─────────────────
@@ -132,6 +135,8 @@ Gate(reRebuilt is not null, "an event-sourced actor must be rebuildable after St
 
 await SagaAndEventOutflowDemoAsync();
 
+await JsonlStoreDemoAsync();
+
 Console.WriteLine("\n=== Done ===");
 
 // ═══════════════════════════════════════════════════════════════
@@ -237,6 +242,122 @@ static async Task SagaAndEventOutflowDemoAsync()
     Gate(
         results[0].Status == SagaResumeStatus.Completed,
         $"the resumed saga should classify as Completed, got {results[0].Status}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Demo: durable JSONL store (PicoActor.EventStore.Jsonl)
+// ═══════════════════════════════════════════════════════════════
+
+static async Task JsonlStoreDemoAsync()
+{
+    Console.WriteLine("\n=== JSONL durable store (PicoActor.EventStore.Jsonl) ===\n");
+
+    // A temp directory: the store creates it on the first WRITE (never in the constructor), and
+    // this demo deletes it again — a sample must not litter the machine it runs on. The snapshots
+    // live in the '<root>-snapshots' sibling, which is why both are cleaned up.
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "picoactor-sample-jsonl-" + Guid.CreateVersion7().ToString("N")
+    );
+    var snapshotRoot = root + "-snapshots";
+
+    try
+    {
+        // 1. Append through the actor system: every RaiseEvent becomes one JSONL line.
+        var store = new JsonlEventStore<SampleStoreEvent>(
+            root,
+            new JsonlEventStoreOptions { FlushToDisk = true }
+        );
+        var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+        RegisterJsonlCounter(system);
+
+        var counter = await system.CreateAsync<JsonlCounter>(new StartCounterAt(100));
+        system.Send(counter.Id, new AddToCounter(5));
+        system.Send(counter.Id, new AddToCounter(7));
+        // The AskAsync is queued behind both Sends, so its answer is the value AFTER the appends
+        // were persisted — the gate does not depend on how long a delay happened to be.
+        var appended = await system.AskAsync<int>(counter.Id, new GetCounterValue());
+        var version = counter.Version;
+        Console.WriteLine($"[JsonlStore]  appended:  value={appended}, Version={version}");
+        Gate(appended == 112, $"100 + 5 + 7 should read 112, got {appended}");
+        Gate(version == 3, $"3 appended events should leave Version 3, got {version}");
+        await system.StopAllAsync();
+
+        // 2. A NEW store instance over the same directory: the bytes on disk are the state, and
+        //    nothing was carried over in memory from the first instance.
+        var reopened = new JsonlEventStore<SampleStoreEvent>(root);
+        var reopenedSystem = new ActorSystem(new ActorSystemOptions { EventStore = reopened });
+        RegisterJsonlCounter(reopenedSystem);
+
+        var rebuilt = await reopenedSystem.GetAsync<JsonlCounter>(counter.Id);
+        Console.WriteLine(
+            $"[JsonlStore]  reopened:  Version={rebuilt?.Version}, sameId={rebuilt?.Id == counter.Id}"
+        );
+        Gate(
+            rebuilt is not null,
+            "a JSONL stream must rebuild the counter in a new store instance"
+        );
+        Gate(
+            rebuilt!.Version == version,
+            $"a reopen must rebuild Version {version}, got {rebuilt.Version}"
+        );
+        Gate(rebuilt.Id == counter.Id, "a rebuilt actor must keep its aggregate id");
+        var reread = await reopenedSystem.AskAsync<int>(rebuilt.Id, new GetCounterValue());
+        Console.WriteLine($"[JsonlStore]  reopened:  value={reread}");
+        Gate(reread == appended, $"a reopen must read {appended} back, got {reread}");
+        await reopenedSystem.StopAllAsync();
+
+        // 3. No sentinel left behind: exactly one stream file, and no '<guid>.tmp' from an
+        //    interrupted atomic write (the store writes through a temp file + rename, so a
+        //    leftover .tmp is the marker of a write that never completed).
+        string[] streams = Directory.Exists(root) ? Directory.GetFiles(root) : [];
+        string[] sentinels = Directory.Exists(snapshotRoot)
+            ? Directory.GetFiles(snapshotRoot, "*.tmp", SearchOption.AllDirectories)
+            : [];
+        Console.WriteLine(
+            $"[JsonlStore]  on disk:   streams={streams.Length}, leftover .tmp={sentinels.Length}"
+        );
+        Gate(
+            streams.Length == 1
+                && Path.GetFileName(streams[0]) == counter.Id.ToString("D") + ".jsonl",
+            $"the stream directory should hold exactly {counter.Id:D}.jsonl, got [{string.Join(", ", streams)}]"
+        );
+        Gate(sentinels.Length == 0, "a completed flow must leave no .tmp sentinel behind");
+
+        foreach (var dir in new[] { root, snapshotRoot })
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+        Console.WriteLine(
+            $"[JsonlStore]  cleanup:   temp directory deleted={!Directory.Exists(root)}"
+        );
+    }
+    finally
+    {
+        // Unconditional cleanup: a gate failure exits the process, and even then the temp
+        // directory must not survive the run.
+        foreach (var dir in new[] { root, snapshotRoot })
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+}
+
+static void RegisterJsonlCounter(ActorSystem system)
+{
+    system.Register<JsonlCounter>(
+        createFactory: cmd =>
+            cmd switch
+            {
+                StartCounterAt c => new JsonlCounter(c),
+                _ => throw new InvalidOperationException(
+                    $"Unexpected creation command: {cmd.GetType().Name}"
+                ),
+            },
+        rebuildFactory: () => new JsonlCounter()
     );
 }
 
@@ -595,5 +716,72 @@ public sealed class SagaCompletedSub : IDomainEventSubscriber<SagaCompleted>
     {
         Received.Add(envelope.Event);
         return default;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Durable counter domain — the JSONL store sample
+// ═══════════════════════════════════════════════════════════════
+
+// A durable stream needs a registered event BASE: the JSONL store's serializer is
+// source-generated in THIS assembly over this type, and every concrete event it must
+// round-trip is listed by a [PicoDerivedType] on the base. The bare
+// `record X : IDomainEvent` types above are deliberately NOT durable — registering a
+// concrete type without the base registration is not enough, and the store says so on
+// the first write.
+[PicoDerivedType(typeof(CounterStartedAt), "sample-counter-started")]
+[PicoDerivedType(typeof(CounterDeltaAdded), "sample-counter-added")]
+public abstract record SampleStoreEvent : IDomainEvent;
+
+public sealed record CounterStartedAt(int Initial) : SampleStoreEvent;
+
+public sealed record CounterDeltaAdded(int Delta) : SampleStoreEvent;
+
+public sealed record StartCounterAt(int Initial) : ICommand;
+
+public sealed record AddToCounter(int Delta) : ICommand;
+
+public sealed record GetCounterValue : ICommand;
+
+/// <summary>The durable counter: the same event-sourced shape as <see cref="Counter"/>, but
+/// its events are registered on a base the JSONL store can serialize.</summary>
+public sealed class JsonlCounter : EventSourcedActor
+{
+    private int _value;
+
+    /// <summary>Creation path.</summary>
+    public JsonlCounter(StartCounterAt cmd)
+        : base(cmd) { }
+
+    /// <summary>Rebuild path — required for the reopen in the JSONL demo.</summary>
+    public JsonlCounter() { }
+
+    protected override ValueTask<object?> OnMessageAsync(ICommand command)
+    {
+        switch (command)
+        {
+            case StartCounterAt c:
+                RaiseEvent(new CounterStartedAt(c.Initial));
+                return default;
+            case AddToCounter a:
+                RaiseEvent(new CounterDeltaAdded(a.Delta));
+                return default;
+            case GetCounterValue:
+                return new ValueTask<object?>(_value);
+        }
+        return default;
+    }
+
+    protected override void Mutate(IDomainEvent @event)
+    {
+        switch (@event)
+        {
+            case CounterStartedAt e:
+                _value = e.Initial;
+                break;
+            case CounterDeltaAdded e:
+                _value += e.Delta;
+                break;
+        }
     }
 }
