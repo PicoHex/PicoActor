@@ -30,6 +30,12 @@ public sealed class EventTypeBindings
     private readonly Dictionary<Type, string> _tagByType = new();
     private readonly Dictionary<string, Type> _typeByTag = new(StringComparer.Ordinal);
 
+    // The append path's half of the same registration: the CLOSED generic that serializes the concrete
+    // bound type (D9). Captured HERE because a generic method's type argument is the only moment this
+    // package can name the type — the store serializes through a type PARAMETER, so it can never reach
+    // a concrete event, and a runtime Type cannot be turned into a call site without reflection.
+    private readonly Dictionary<Type, Func<IDomainEvent, byte[]>> _writeByType = new();
+
     private int _frameworkDefaultCount;
     private bool _frozen;
     private string _frozenBy = string.Empty;
@@ -95,7 +101,7 @@ public sealed class EventTypeBindings
         {
             ThrowIfFrozen();
             ValidateTag(tag);
-            AddCore(typeof(T), tag);
+            AddCore(typeof(T), tag, WriterFor<T>());
         }
 
         return this;
@@ -128,6 +134,7 @@ public sealed class EventTypeBindings
 
             _tagByType.Add(type, tag);
             _typeByTag.Add(tag, type);
+            _writeByType.Add(type, WriterFor<T>());
             _frameworkDefaultCount++;
             return true;
         }
@@ -155,7 +162,12 @@ public sealed class EventTypeBindings
 
             seedDefaults(this);
 
-            _table = new EventTypeBindingsTable(_tagByType, _typeByTag, _frameworkDefaultCount);
+            _table = new EventTypeBindingsTable(
+                _tagByType,
+                _typeByTag,
+                _writeByType,
+                _frameworkDefaultCount
+            );
             _frozenBy = frozenBy;
             _frozen = true;
             return _table;
@@ -163,7 +175,7 @@ public sealed class EventTypeBindings
     }
 
     /// <summary>The matrix (D1b) for a legal tag: one type, one tag; one tag, one type.</summary>
-    private void AddCore(Type type, string tag)
+    private void AddCore(Type type, string tag, Func<IDomainEvent, byte[]> write)
     {
         if (_tagByType.TryGetValue(type, out var existingTag))
         {
@@ -189,7 +201,22 @@ public sealed class EventTypeBindings
 
         _tagByType.Add(type, tag);
         _typeByTag.Add(tag, type);
+        _writeByType.Add(type, write);
     }
+
+    /// <summary>
+    /// The write path's delegate for <typeparamref name="T"/>: the CONCRETE serializer, resolved once at
+    /// registration and never by reflection over a runtime <see cref="Type"/> (D9).
+    /// <para>
+    /// The call site names a TYPE PARAMETER, so it generates nothing — the same property that makes this
+    /// table necessary: the serializer must already exist in some loaded assembly. This package supplies
+    /// the framework's two terminal events (<see cref="FrameworkEventSerializers"/>); a consumer's own
+    /// bound type must be generated in the consumer's assembly.
+    /// </para>
+    /// </summary>
+    private static Func<IDomainEvent, byte[]> WriterFor<T>()
+        where T : class, IDomainEvent =>
+        domainEvent => JsonSerializer.SerializeToUtf8Bytes((T)domainEvent);
 
     /// <summary>
     /// The tag grammar. A tag is spliced between the quotes of the <c>$type</c> member with no escaping,
@@ -249,15 +276,18 @@ internal sealed class EventTypeBindingsTable
 {
     private readonly FrozenDictionary<Type, string> _tagByType;
     private readonly FrozenDictionary<string, Type> _typeByTag;
+    private readonly FrozenDictionary<Type, Func<IDomainEvent, byte[]>> _writeByType;
 
     internal EventTypeBindingsTable(
         IReadOnlyDictionary<Type, string> tagByType,
         IReadOnlyDictionary<string, Type> typeByTag,
+        IReadOnlyDictionary<Type, Func<IDomainEvent, byte[]>> writeByType,
         int frameworkDefaultCount
     )
     {
         _tagByType = tagByType.ToFrozenDictionary();
         _typeByTag = typeByTag.ToFrozenDictionary(StringComparer.Ordinal);
+        _writeByType = writeByType.ToFrozenDictionary();
         FrameworkDefaultCount = frameworkDefaultCount;
     }
 
@@ -285,6 +315,35 @@ internal sealed class EventTypeBindingsTable
         }
 
         tag = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// Everything the APPEND path needs for a bound event in ONE lookup: the tag it is spliced with and
+    /// the closed generic that serializes its concrete payload (D2/D9). One lookup because the two are
+    /// registered together — a tag without a writer could not be written at all, so the pair is the
+    /// binding, not two independent facts.
+    /// </summary>
+    internal bool TryGetBinding(
+        Type eventType,
+        out string tag,
+        out Func<IDomainEvent, byte[]> write
+    )
+    {
+        ArgumentNullException.ThrowIfNull(eventType);
+
+        if (
+            _tagByType.TryGetValue(eventType, out var found)
+            && _writeByType.TryGetValue(eventType, out var writer)
+        )
+        {
+            tag = found;
+            write = writer;
+            return true;
+        }
+
+        tag = string.Empty;
+        write = null!;
         return false;
     }
 

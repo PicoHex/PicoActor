@@ -1495,27 +1495,43 @@ public sealed class JsonlEventStore<TEventBase>
     private string SnapshotPathFor(Guid actorId) =>
         Path.Combine(_snapshotRoot, actorId.ToString("D") + SnapshotSuffix);
 
-    /// <summary>Encode the batch as ONE buffer: <c>json</c> + newline per event, never split.</summary>
-    private static byte[] Encode(IReadOnlyList<IDomainEvent> events, string path)
+    /// <summary>
+    /// Encode the batch as ONE buffer: <c>json</c> + newline per event, never split.
+    /// <para>
+    /// The accepted set is <c>TEventBase</c> <b>∪</b> every event type this store's bindings carry (D3):
+    /// a saga stream necessarily mixes the consumer's own events with the framework's terminal
+    /// <see cref="SagaCompleted"/>, which cannot derive from the consumer's base. That does NOT open a
+    /// second write path — a mixed batch is one buffer, one write, one flush, and an event that is
+    /// neither is still refused before the file exists.
+    /// </para>
+    /// </summary>
+    private byte[] Encode(IReadOnlyList<IDomainEvent> events, string path)
     {
         using var buffer = new MemoryStream();
         for (var i = 0; i < events.Count; i++)
         {
-            if (events[i] is not TEventBase domainEvent)
-            {
-                throw new ArgumentException(
-                    $"Event at index {i} is {events[i]?.GetType().FullName ?? "null"}, which is not a "
-                        + $"{typeof(TEventBase).FullName}. A stream's event type is fixed by the store's "
-                        + "generic argument — register every concrete event with [PicoDerivedType] on "
-                        + $"{typeof(TEventBase).FullName}.",
-                    nameof(events)
-                );
-            }
+            EncodeEvent(events[i], i, path, buffer);
+            buffer.WriteByte(JsonlLines.NewLine);
+        }
 
+        return buffer.ToArray();
+    }
+
+    /// <summary>
+    /// Encode ONE event into the batch's buffer, by the route its type has: the store's base type, a
+    /// binding, or nothing at all (a refusal).
+    /// </summary>
+    private void EncodeEvent(IDomainEvent? domainEvent, int index, string path, MemoryStream buffer)
+    {
+        // The declared route. Bounded by the store's generic argument since v2026.9.0, and untouched
+        // here: an event that is a TEventBase produces exactly the bytes it produced before bindings
+        // existed, discriminator included (the generated polymorphic writer supplies it).
+        if (domainEvent is TEventBase declaredBaseEvent)
+        {
             byte[] json;
             try
             {
-                json = JsonSerializer.SerializeToUtf8Bytes(domainEvent);
+                json = JsonSerializer.SerializeToUtf8Bytes(declaredBaseEvent);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1523,10 +1539,50 @@ public sealed class JsonlEventStore<TEventBase>
             }
 
             buffer.Write(json);
-            buffer.WriteByte(JsonlLines.NewLine);
+            return;
         }
 
-        return buffer.ToArray();
+        // The BOUND route (D2). Same discriminator idea as a [PicoDerivedType] event, but the tag comes
+        // from the bindings and the payload from the CONCRETE serializer, so the payload is written
+        // exactly as its own type writes it.
+        if (
+            domainEvent is not null
+            && _bindings.TryGetBinding(domainEvent.GetType(), out var tag, out var write)
+        )
+        {
+            // Deliberately NOT wrapped in Wrap: its remedy ("[PicoDerivedType] on the base") is wrong
+            // advice for a bound type, whose serializer is generated in its OWN assembly. Nothing has
+            // been written and no file exists, so the failure costs nothing but the append.
+            var payload = write(domainEvent);
+
+            // D2's byte splice, spelled out because every byte here is permanent wire format:
+            //   '{"$type":"' + tag + '"' [',' only if the payload has members] + payload[1..]
+            // The payload's OPENING BRACE IS DROPPED and the payload itself is never rewritten:
+            //   {"Result":null}  +  tag  ->  {"$type":"PicoActorSagaCompleted","Result":null}
+            //   {}               +  tag  ->  {"$type":"<tag>"}
+            // Two ways to get this wrong, both invisible at write time and fatal on read-back (possibly
+            // after the line reached an archive): keeping the payload's brace AND joining with a comma
+            // gives {"$type":"t",{"Result":null}; joining a zero-member payload with a comma gives
+            // {"$type":"t",}. So the separator is emitted exactly when there is a member to separate —
+            // the payload's own members already carry their leading quote.
+            buffer.Write(Encoding.UTF8.GetBytes($"{{\"$type\":\"{tag}\""));
+            if (payload.Length > 2)
+                buffer.WriteByte((byte)',');
+            buffer.Write(payload, 1, payload.Length - 1);
+            return;
+        }
+
+        throw new ArgumentException(
+            $"Event at index {index} is {domainEvent?.GetType().FullName ?? "null"}, which is not a "
+                + $"{typeof(TEventBase).FullName}. A stream's event type is fixed by the store's "
+                + "generic argument — register every concrete event with [PicoDerivedType] on "
+                + $"{typeof(TEventBase).FullName}. "
+                + "An event that cannot derive from that base — a framework event, or one owned by "
+                + "another assembly — is written by BINDING it instead: "
+                + "JsonlEventStoreOptions.EventTypeBindings.Add<T>(\"tag\").",
+            // The PUBLIC parameter of AppendAsync, and the name this refusal has always reported.
+            "events"
+        );
     }
 
     /// <summary>
