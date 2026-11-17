@@ -48,10 +48,12 @@ public sealed class JsonlEventStore<TEventBase>
     // Never consulted under IdOnly, where the name IS the id.
     private readonly ConcurrentDictionary<Guid, string> _typeById = new();
 
-    // Ids a classification pass saw under TWO different prefixes. The prefix is fixed at creation, so two
-    // names for one id are two histories — an append must refuse rather than merge them into whichever
-    // name the map happened to learn first.
-    private readonly ConcurrentDictionary<Guid, string> _conflictingPrefixes = new();
+    // Ids a classification pass saw under several different prefixes, with EVERY rival name found. The
+    // prefix is fixed at creation, so two names for one id are two histories — an append must refuse
+    // rather than merge them into whichever name the map happened to learn first. ALL of the rivals are
+    // kept: a record that held one per id would drop the third name, and the operator would archive the
+    // two files the message named and be refused again by the one it did not.
+    private readonly ConcurrentDictionary<Guid, List<string>> _conflictingPrefixes = new();
 
     private long _deserializedEvents;
     private long _tornTailLines;
@@ -808,9 +810,13 @@ public sealed class JsonlEventStore<TEventBase>
             switch (kind)
             {
                 case StreamNameKind.ConfiguredMatch:
-                    // Counted by NAME, length aside: the layout of the names is what the whole-directory
-                    // rule diagnoses, and a zero-length file still speaks for that layout.
-                    configured++;
+                    // Counted by HISTORY, not by name: a ZERO-LENGTH file is a leftover a failed append
+                    // leaves behind (rev 5), and it speaks for no history at all. Counting it would let
+                    // one leftover raise "configured" to 1 and swallow the whole-directory diagnosis —
+                    // a directory of the other layout plus a leftover would enumerate an empty system
+                    // in silence, which is the one outcome this rule exists to prevent.
+                    if (file.Length > 0)
+                        configured++;
                     streams.Add(
                         new StreamEntry(
                             file,
@@ -883,7 +889,22 @@ public sealed class JsonlEventStore<TEventBase>
             return;
 
         if (!string.Equals(known, type, StringComparison.Ordinal))
-            _conflictingPrefixes.TryAdd(id, PrefixedPathFor(id, type));
+            RecordConflictingPrefix(id, PrefixedPathFor(id, type));
+    }
+
+    /// <summary>
+    /// Add ONE rival name to an id's conflict list. A list, not a single path: the refusal has to name
+    /// every file, and it is guarded because a pass may run while another thread resolves a path — the
+    /// only mutation is an append, and a path is never removed.
+    /// </summary>
+    private void RecordConflictingPrefix(Guid id, string path)
+    {
+        var paths = _conflictingPrefixes.GetOrAdd(id, static _ => []);
+        lock (paths)
+        {
+            if (!paths.Contains(path, StringComparer.Ordinal))
+                paths.Add(path);
+        }
     }
 
     /// <summary>
@@ -892,17 +913,10 @@ public sealed class JsonlEventStore<TEventBase>
     /// </summary>
     private void GuardAmbiguousStream(Guid actorId, string streamPath)
     {
-        // 1. Two PREFIXES for one id, seen by a classification pass. Nothing was written, so both
-        //    histories are intact and an operator can still decide which one survives.
+        // 1. SEVERAL prefix names for one id, seen by a classification pass. Nothing was written, so
+        //    every history is intact and an operator can still decide which one survives.
         if (_conflictingPrefixes.TryGetValue(actorId, out var conflicting))
-        {
-            throw new InvalidOperationException(
-                $"Aggregate '{actorId:D}' has TWO stream names in '{_root}': '{streamPath}' and "
-                    + $"'{conflicting}'. A stream's prefix is fixed when it is created, so the store "
-                    + "cannot tell which history an append belongs to. Archive one of the files, then "
-                    + "retry the append."
-            );
-        }
+            throw DuplicatePrefixNames(actorId, streamPath, conflicting);
 
         if (_options.FileNameFormat == FileNameFormat.TypePrefix)
         {
@@ -935,15 +949,43 @@ public sealed class JsonlEventStore<TEventBase>
             );
         }
 
-        // A zero-length file is NOT a stream (rev 5 lets a failed append leave one behind), so it never
-        // blocks an append; a non-empty one is a second history for this id.
-        if (candidates.Count == 1 && new FileInfo(candidates[0]) is { Exists: true, Length: > 0 })
+        // The pass returned NON-EMPTY names only, so the single candidate is a second history for this
+        // id and the append is refused.
+        if (candidates.Count == 1)
             throw MixedLayout(actorId, streamPath, candidates[0]);
     }
 
     /// <summary>
+    /// ONE id with several stream NAMES in the configured layout: the refusal names the path an append
+    /// resolves to and EVERY other name found, so one message carries the whole cleanup.
+    /// </summary>
+    private InvalidOperationException DuplicatePrefixNames(
+        Guid actorId,
+        string streamPath,
+        List<string> conflicting
+    )
+    {
+        string[] others;
+        lock (conflicting)
+            others = [.. conflicting];
+
+        var names = string.Join(
+            ", ",
+            new[] { streamPath }.Concat(others).Select(path => "'" + path + "'")
+        );
+
+        return new(
+            $"Aggregate '{actorId:D}' has {others.Length + 1} stream names in '{_root}': {names}. A "
+                + "stream's prefix is fixed when it is created, so the store cannot tell which history "
+                + "an append belongs to. Archive all but one of the files, then retry the append."
+        );
+    }
+
+    /// <summary>
     /// Every name in the OTHER layout that <paramref name="actorId"/> may already have here — empty for a
-    /// single-format directory. The caller owns the gate on this directory pass.
+    /// single-format directory, and never a leftover: a ZERO-LENGTH file is not a stream (rev 5 lets a
+    /// failed append leave one), so it is no rival and does not count towards the multi-candidate
+    /// refusal. The caller owns the gate on this directory pass.
     /// </summary>
     private List<string> OtherLayoutPathsFor(Guid actorId)
     {
@@ -958,6 +1000,9 @@ public sealed class JsonlEventStore<TEventBase>
             if (
                 JsonlNames.TryParseOtherFormat(file.Name, _options.FileNameFormat, out var id)
                 && id == actorId
+                // A zero-length file is a leftover, not a candidate: two of them for one id are zero
+                // histories, and refusing the append over them would block a stream with no rival.
+                && file.Length > 0
             )
                 matches.Add(file.FullName);
         }

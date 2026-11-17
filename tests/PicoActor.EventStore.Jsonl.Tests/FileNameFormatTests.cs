@@ -370,6 +370,18 @@ public sealed class FileNameFormatTests
         await Assert
             .That(async () => await typePrefix.OpenAsync(unknown, 0))
             .Throws<ArgumentOutOfRangeException>();
+
+        // An unknown id opens an EMPTY cursor above version 0 in BOTH formats: End is zero because
+        // there is no stream, not because a resolved stream happened to be empty.
+        var idOnlyEmpty = await idOnly.OpenAsync(unknown, 1);
+        await Assert.That(idOnlyEmpty.End).IsEqualTo(0UL);
+        await Assert.That(await idOnlyEmpty.MoveNextAsync()).IsFalse();
+        await idOnlyEmpty.DisposeAsync();
+
+        var prefixEmpty = await typePrefix.OpenAsync(unknown, 1);
+        await Assert.That(prefixEmpty.End).IsEqualTo(0UL);
+        await Assert.That(await prefixEmpty.MoveNextAsync()).IsFalse();
+        await prefixEmpty.DisposeAsync();
         await Assert.That(await idOnly.GetVersionAsync(unknown)).IsEqualTo(0UL);
         await Assert.That(await typePrefix.GetVersionAsync(unknown)).IsEqualTo(0UL);
         await Assert.That(await typePrefix.PeekFirstAsync(unknown)).IsNull();
@@ -618,6 +630,125 @@ public sealed class FileNameFormatTests
     }
 
     /// <summary>
+    /// The MIRROR of <see cref="G5a_OtherFormatNonEmpty_AppendThrows"/>: the store is
+    /// <see cref="FileNameFormat.IdOnly"/> and the file on the other side is the TypePrefix name. IdOnly
+    /// cannot derive that name from the id, so the guard is GATED on the monotonic
+    /// <c>ForeignFormatFiles</c> count: ONE classification pass arms it for good, and every later append
+    /// pays one directory pass. The append after it is refused, names both paths, and writes nothing.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5a_IdOnly_OtherFormatNonEmpty_AppendThrows(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        var streamPath = Path.Combine(temp.Root, id.ToString("D") + ".jsonl");
+        var otherPath = Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl");
+        await File.WriteAllTextAsync(
+            otherPath,
+            "{\"$type\":\"ss-added\",\"Delta\":9}\n",
+            cancellationToken
+        );
+
+        // The gate: before any pass, an append would not even look. The ONE enumeration is what arms it,
+        // and it stays armed — the counter is monotonic, not a per-pass reading.
+        await Assert.That(store.ForeignFormatFiles).IsEqualTo(0L);
+        await Assert.That(await store.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+        await Assert.That(store.ForeignFormatFiles).IsEqualTo(1L);
+
+        var error = await CaptureAppendErrorAsync(store, id, 1, new SSnapshotAdded(2));
+
+        await Assert.That(error).IsNotNull();
+        await Assert.That(error is InvalidOperationException).IsTrue();
+
+        // The id and BOTH paths: the operator can tell which file holds which history.
+        await Assert
+            .That(error!.Message.Contains(id.ToString("D"), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(error.Message.Contains(Path.GetFileName(streamPath), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(error.Message.Contains(Path.GetFileName(otherPath), StringComparison.Ordinal))
+            .IsTrue();
+
+        // Refused before the write: this layout's stream is exactly as it was.
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
+    }
+
+    /// <summary>
+    /// The same shape with a ZERO-LENGTH other-format file: an empty file is not a stream, so it must
+    /// never block an append — and it must never be "repaired" either.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5b_IdOnly_OtherFormatZeroLength_AppendSucceeds(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        var otherPath = Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl");
+        await File.WriteAllBytesAsync(otherPath, [], cancellationToken);
+
+        await Assert.That(await store.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+        await Assert.That(store.ForeignFormatFiles).IsEqualTo(1L);
+
+        await Assert.That(await store.AppendAsync(id, 1, [new SSnapshotAdded(2)])).IsEqualTo(2UL);
+
+        // The leftover keeps its own bytes, and the history lives in this layout's file alone.
+        await Assert
+            .That((await File.ReadAllBytesAsync(otherPath, cancellationToken)).Length)
+            .IsEqualTo(0);
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(2UL);
+    }
+
+    /// <summary>
+    /// TWO zero-length files in the other layout for one id. The id is exactly the case the
+    /// multi-candidate guard exists for, but a leftover is not a history: the count is taken over
+    /// NON-EMPTY candidates only, so two leftovers are zero histories and the append goes through. A
+    /// guard that counted them would refuse to extend a stream that has no rival at all.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5f_IdOnly_TwoZeroLengthOtherFormat_AppendSucceeds(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        var candidateA = Path.Combine(temp.Root, $"A-{id:D}.jsonl");
+        var candidateB = Path.Combine(temp.Root, $"B-{id:D}.jsonl");
+        await File.WriteAllBytesAsync(candidateA, [], cancellationToken);
+        await File.WriteAllBytesAsync(candidateB, [], cancellationToken);
+
+        await Assert.That(await store.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+        await Assert.That(store.ForeignFormatFiles).IsEqualTo(2L);
+
+        await Assert.That(await store.AppendAsync(id, 1, [new SSnapshotAdded(2)])).IsEqualTo(2UL);
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(2UL);
+
+        // Both leftovers are untouched: no candidate was adopted, no bytes were added.
+        await Assert
+            .That((await File.ReadAllBytesAsync(candidateA, cancellationToken)).Length)
+            .IsEqualTo(0);
+        await Assert
+            .That((await File.ReadAllBytesAsync(candidateB, cancellationToken)).Length)
+            .IsEqualTo(0);
+    }
+
+    /// <summary>
     /// A short foreign name is not a crash and not a stream: <c>x.txt</c> is SHORTER than the
     /// <c>.jsonl</c> suffix, so a scan that sliced first would throw ArgumentOutOfRangeException while
     /// booting. It is counted as skipped, warned about, and the enumeration still answers.
@@ -762,12 +893,15 @@ public sealed class FileNameFormatTests
         // Nothing was written: the append was refused before the stream was opened.
         await Assert.That(await idOnly.GetVersionAsync(id)).IsEqualTo(1UL);
 
-        // ── TypePrefix: both names are configured-format streams, and the classification pass is what
-        //    notices that ONE id has TWO of them.
+        // ── TypePrefix: the names are configured-format streams, and the classification pass is what
+        //    notices that ONE id has SEVERAL of them. THREE, so the message is checked for completeness:
+        //    a record that kept only the FIRST rival per id would drop the third name, and the operator
+        //    would archive two files and be refused again.
         using var prefixRoot = new TempRoot();
         var prefixId = Guid.NewGuid();
         var prefixA = Path.Combine(prefixRoot.Root, $"A-{prefixId:D}.jsonl");
         var prefixB = Path.Combine(prefixRoot.Root, $"B-{prefixId:D}.jsonl");
+        var prefixC = Path.Combine(prefixRoot.Root, $"C-{prefixId:D}.jsonl");
         await File.WriteAllTextAsync(
             prefixA,
             "{\"$type\":\"ss-added\",\"Delta\":7}\n",
@@ -778,22 +912,37 @@ public sealed class FileNameFormatTests
             "{\"$type\":\"ss-added\",\"Delta\":8}\n",
             cancellationToken
         );
+        await File.WriteAllTextAsync(
+            prefixC,
+            "{\"$type\":\"ss-added\",\"Delta\":9}\n",
+            cancellationToken
+        );
 
         var prefix = new JsonlEventStore<ConformanceEvent>(prefixRoot.Root, TypePrefix());
         var prefixError = await CaptureAppendErrorAsync(prefix, prefixId, 0, new SSnapshotAdded(2));
 
         await Assert.That(prefixError is InvalidOperationException).IsTrue();
+        foreach (
+            var name in new[]
+            {
+                Path.GetFileName(prefixA),
+                Path.GetFileName(prefixB),
+                Path.GetFileName(prefixC),
+            }
+        )
+        {
+            await Assert
+                .That(prefixError!.Message.Contains(name!, StringComparison.Ordinal))
+                .IsTrue();
+        }
+
+        // The count is the number of names FOUND, not "two": three files, three names in the message.
         await Assert
-            .That(
-                prefixError!.Message.Contains(Path.GetFileName(prefixA), StringComparison.Ordinal)
-            )
-            .IsTrue();
-        await Assert
-            .That(prefixError.Message.Contains(Path.GetFileName(prefixB), StringComparison.Ordinal))
+            .That(prefixError!.Message.Contains("has 3 stream names", StringComparison.Ordinal))
             .IsTrue();
 
-        // No third name appeared: the store never invents a prefix for a stream it refused to extend.
-        await Assert.That(Directory.GetFiles(prefixRoot.Root).Length).IsEqualTo(2);
+        // No FURTHER name appeared: the store never invents a prefix for a stream it refused to extend.
+        await Assert.That(Directory.GetFiles(prefixRoot.Root).Length).IsEqualTo(3);
     }
 
     /// <summary>
@@ -854,6 +1003,65 @@ public sealed class FileNameFormatTests
         await Assert
             .That(() => new JsonlEventStore<ConformanceEvent>(idOnlyOnly.Root, TypePrefix()))
             .Throws<InvalidOperationException>();
+    }
+
+    /// <summary>
+    /// The whole-directory rule counts HISTORIES, not names. A zero-length leftover in the configured
+    /// layout is not one — a failed append leaves one behind — so a directory whose only configured name
+    /// is empty and which holds the other layout besides is still a MISCONFIGURATION: counting the
+    /// leftover would raise "configured" to 1, swallow the diagnosis, and enumerate an empty system.
+    /// <para>
+    /// The other side of the same rule: leftovers with NO other layout anywhere are an empty store, not
+    /// a misconfiguration, and enumerating them answers "no aggregates yet" as it should.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G6b_ZeroLengthConfiguredName_WithOtherFormat_Throws(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var leftoverId = Guid.NewGuid();
+
+        // The ONLY configured-format name here is a leftover: zero bytes, no history.
+        var leftover = Path.Combine(temp.Root, leftoverId.ToString("D") + ".jsonl");
+        await File.WriteAllBytesAsync(leftover, [], cancellationToken);
+
+        // ... and the directory is otherwise in the other layout, which is what makes it broken.
+        var otherPath = Path.Combine(
+            temp.Root,
+            $"{nameof(SSnapshotAdded)}-{Guid.NewGuid():D}.jsonl"
+        );
+        await File.WriteAllTextAsync(
+            otherPath,
+            "{\"$type\":\"ss-added\",\"Delta\":9}\n",
+            cancellationToken
+        );
+
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        var error = await CaptureAsync(async () =>
+        {
+            await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+        });
+
+        await Assert.That(error is InvalidOperationException).IsTrue();
+        await Assert
+            .That(error!.Message.Contains("configured: 0", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(error.Message.Contains("other-format: 1", StringComparison.Ordinal))
+            .IsTrue();
+
+        // Leftovers and NOTHING else: an empty store. No throw, no ids.
+        using var leftoverOnly = new TempRoot();
+        await File.WriteAllBytesAsync(
+            Path.Combine(leftoverOnly.Root, Guid.NewGuid().ToString("D") + ".jsonl"),
+            [],
+            cancellationToken
+        );
+        var empty = new JsonlEventStore<ConformanceEvent>(leftoverOnly.Root);
+        await Assert.That(await empty.ListAggregateIdsAsync(nameof(SSnapshotAdded))).IsEmpty();
     }
 
     /// <summary>
