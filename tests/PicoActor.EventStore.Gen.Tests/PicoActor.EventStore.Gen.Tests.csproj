@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="TUnit" />
+    <!-- The tests DIAGNOSE a compilation they build themselves, so the Roslyn API is a test-time
+         dependency of this project only (never of the analyzer it exercises). -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all" />
+    <!-- PicoJetson: brings PicoSerDe.Core to the output directory, which is where the in-process
+         compilations get the REAL PicoDerivedTypeAttribute metadata from. A hand-written stub
+         attribute would let a wrong namespace inside the analyzer pass unnoticed, and the whole
+         predicate is about that attribute's identity. -->
+    <PackageReference Include="PicoJetson" />
+    <!-- IDomainEvent metadata: the analyzer matches PicoActor.Abs.IDomainEvent by name, and the
+         compilations under test must reference the real interface. -->
+    <ProjectReference Include="..\..\src\PicoActor.Abs\PicoActor.Abs.csproj" />
+    <!-- OutputItemType="Analyzer" AND a referenced assembly (deliberately no
+         ReferenceOutputAssembly="false"): the test instantiates the analyzer type itself — the same
+         shape tests/PicoActor.Abs.Tests uses for PicoActor.Gen. -->
+    <ProjectReference
+      Include="..\..\src\PicoActor.EventStore.Gen\PicoActor.EventStore.Gen.csproj"
+      OutputItemType="Analyzer"
+    />
+  </ItemGroup>
+</Project>

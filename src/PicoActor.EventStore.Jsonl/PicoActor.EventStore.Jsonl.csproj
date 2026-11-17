@@ -31,4 +31,24 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
+
+  <!-- The two-item pair (both halves are load-bearing): the ProjectReference actually BUILDS the
+       analyzer and hands it to this compilation, the None puts the built dll into the package's
+       analyzers/dotnet/cs folder for consumers. A None without the ProjectReference packs a missing
+       dll (or a stale one); a ProjectReference without the None analyzes this package alone and ships
+       nothing. Mirrors src/PicoActor.Abs/PicoActor.Abs.csproj. -->
+  <ItemGroup>
+    <ProjectReference
+      Include="..\PicoActor.EventStore.Gen\PicoActor.EventStore.Gen.csproj"
+      OutputItemType="Analyzer"
+      ReferenceOutputAssembly="false"
+      PrivateAssets="all"
+    />
+    <None
+      Include="..\PicoActor.EventStore.Gen\bin\$(Configuration)\netstandard2.0\PicoActor.EventStore.Gen.dll"
+      Pack="true"
+      PackagePath="analyzers/dotnet/cs"
+      Visible="false"
+    />
+  </ItemGroup>
 </Project>
