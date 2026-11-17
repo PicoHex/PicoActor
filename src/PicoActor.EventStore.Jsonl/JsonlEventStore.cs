@@ -55,7 +55,7 @@ public sealed class JsonlEventStore<TEventBase>
     private readonly string _snapshotRoot;
     private readonly JsonlEventStoreOptions _options;
     private readonly ILogger? _logger;
-    private readonly JsonlLockTable _locks = new();
+    private readonly JsonlLockTable _locks;
 
     private long _deserializedEvents;
     private long _tornTailLines;
@@ -83,6 +83,7 @@ public sealed class JsonlEventStore<TEventBase>
         // "data" name the same stream and the same -snapshots sibling.
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
         _snapshotRoot = _root + "-snapshots";
+        _locks = new JsonlLockTable(options.MaxAggregateLocks);
         _options = options;
         _logger = options.Logger;
     }
@@ -190,7 +191,7 @@ public sealed class JsonlEventStore<TEventBase>
         finally
         {
             entry.Gate.Release();
-            _locks.Release(actorId, entry);
+            _locks.Release(entry);
         }
     }
 

@@ -26,6 +26,9 @@ internal sealed class JsonlLockEntry
     /// <summary>File length at which <see cref="Count"/> was observed.</summary>
     internal long Length;
 
+    /// <summary>Last use, as a monotonic tick of the owning table — the LRU key.</summary>
+    internal long LastUsed;
+
     /// <summary>Describe the file as seen: the count and the length it was counted at.</summary>
     internal void Seed(ulong count, long length)
     {
@@ -44,14 +47,23 @@ internal sealed class JsonlLockEntry
 }
 
 /// <summary>
-/// The per-aggregate gate table. One entry per stream ever appended to, guarded by ONE table lock that
-/// is held only for dictionary arithmetic — never across a gate wait, so a slow append cannot block an
-/// unrelated aggregate.
+/// The per-aggregate gate table: BOUNDED (a long-lived host touches thousands of aggregates, and one
+/// live semaphore per aggregate forever is a leak) and least-recently-used, so the entries that stay are
+/// the aggregates that are actually being appended to.
+/// <para>
+/// One table lock guards membership, every entry's reference count and the LRU tick; it is held only
+/// for that arithmetic — never across a gate wait, so a slow append cannot block an unrelated
+/// aggregate. An entry is evictable exactly when nobody holds and nobody waits (<c>Refs == 0</c>), which
+/// is why the reference is taken BEFORE the wait: a releaser can then never drop an entry a fresh
+/// acquirer is about to wait on. Eviction costs one re-scan on that aggregate's next append; it never
+/// costs correctness.
+/// </para>
 /// </summary>
-internal sealed class JsonlLockTable
+internal sealed class JsonlLockTable(int capacity)
 {
     private readonly Dictionary<Guid, JsonlLockEntry> _entries = new();
     private readonly Lock _table = new();
+    private long _tick;
 
     /// <summary>Live entries — the observable side of the bound.</summary>
     internal int Count
@@ -68,23 +80,52 @@ internal sealed class JsonlLockTable
     {
         lock (_table)
         {
-            if (!_entries.TryGetValue(actorId, out var entry))
+            var tick = ++_tick;
+
+            if (_entries.TryGetValue(actorId, out var existing))
             {
-                entry = new JsonlLockEntry();
-                _entries[actorId] = entry;
+                existing.Refs++;
+                existing.LastUsed = tick;
+                return existing;
             }
 
-            entry.Refs++;
+            // Make room only when the table is full AND an idle entry exists: an entry someone is
+            // inside (or waiting on) is never dropped, so a burst of concurrent appends may briefly
+            // exceed the bound rather than evict a live gate.
+            if (_entries.Count >= capacity)
+                EvictLeastRecentlyUsedIdleEntry();
+
+            var entry = new JsonlLockEntry { Refs = 1, LastUsed = tick };
+            _entries[actorId] = entry;
             return entry;
         }
     }
 
-    /// <summary>Drop one reference; the entry itself is reclaimed by the bound (see the release path).</summary>
-    internal void Release(Guid actorId, JsonlLockEntry entry)
+    /// <summary>Drop one reference; the entry becomes evictable, and its cache dies with it.</summary>
+    internal void Release(JsonlLockEntry entry)
     {
         lock (_table)
         {
             entry.Refs--;
+            entry.LastUsed = ++_tick;
         }
+    }
+
+    private void EvictLeastRecentlyUsedIdleEntry()
+    {
+        Guid? victim = null;
+        var oldest = long.MaxValue;
+
+        foreach (var (actorId, entry) in _entries)
+        {
+            if (entry.Refs != 0 || entry.LastUsed >= oldest)
+                continue;
+
+            oldest = entry.LastUsed;
+            victim = actorId;
+        }
+
+        if (victim is { } id)
+            _entries.Remove(id);
     }
 }
