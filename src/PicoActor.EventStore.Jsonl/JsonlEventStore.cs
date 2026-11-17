@@ -48,9 +48,11 @@ public sealed class JsonlEventStore<TEventBase>
     where TEventBase : class, IDomainEvent
 {
     private const string StreamSuffix = ".jsonl";
+    private const string SnapshotSuffix = ".snap";
     private const int ScanBufferBytes = 64 * 1024;
 
     private readonly string _root;
+    private readonly string _snapshotRoot;
     private readonly JsonlEventStoreOptions _options;
     private readonly ILogger? _logger;
     private readonly JsonlLockTable _locks = new();
@@ -80,6 +82,7 @@ public sealed class JsonlEventStore<TEventBase>
         // The trailing separator is normalized BEFORE deriving anything from the root, so "data/" and
         // "data" name the same stream and the same -snapshots sibling.
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
+        _snapshotRoot = _root + "-snapshots";
         _options = options;
         _logger = options.Logger;
     }
@@ -98,6 +101,9 @@ public sealed class JsonlEventStore<TEventBase>
 
     /// <summary>The directory the streams live in (the snapshots sit in its sibling).</summary>
     internal string Root => _root;
+
+    /// <summary>The sibling directory snapshots live in — never enumerated as streams.</summary>
+    internal string SnapshotRoot => _snapshotRoot;
 
     /// <inheritdoc/>
     /// <remarks>
@@ -370,6 +376,62 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// NEVER throws for a snapshot it cannot use — a missing file, a bad magic, a truncated header, a
+    /// version of 0 and a payload-length mismatch all mean "no snapshot". The event stream is
+    /// authoritative, and the only other answer available here is a full replay. The payload is a FRESH
+    /// array on every call (the contract permits handing out the stored one; copying means callers need
+    /// no ownership rules). The version is NOT validated against the stream: a snapshot newer than the
+    /// events is returned unchanged so the runtime's rollback guard can discard it.
+    /// </remarks>
+    public ValueTask<ActorSnapshot?> LoadSnapshotAsync(Guid actorId, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        var path = SnapshotPathFor(actorId);
+        if (!File.Exists(path))
+            return new ValueTask<ActorSnapshot?>((ActorSnapshot?)null);
+
+        byte[] file;
+        try
+        {
+            file = File.ReadAllBytes(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Same answer as an unreadable snapshot: accelerate nothing, replay the stream.
+            _logger?.Warning($"Ignoring unreadable snapshot '{path}': {ex.Message}");
+            return new ValueTask<ActorSnapshot?>((ActorSnapshot?)null);
+        }
+
+        return new ValueTask<ActorSnapshot?>(
+            JsonlSnapshotFile.TryDecode(file, out var version, out var payload)
+                ? new ActorSnapshot(version, payload)
+                : null
+        );
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The payload is COPIED before this <see cref="ValueTask"/> completes: a producer is allowed to
+    /// serialize into a buffer it reuses, and keeping the reference would let the next snapshot rewrite
+    /// the file this one just wrote.
+    /// </remarks>
+    public ValueTask SaveSnapshotAsync(
+        Guid actorId,
+        ActorSnapshot snapshot,
+        CancellationToken ct = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ct.ThrowIfCancellationRequested();
+
+        var bytes = JsonlSnapshotFile.Encode(snapshot.Version, snapshot.Payload);
+        JsonlSnapshotFile.WriteAtomic(SnapshotPathFor(actorId), bytes);
+        return default;
+    }
+
+    /// <inheritdoc/>
     public async ValueTask<IReadOnlyList<Guid>> ListAggregateIdsAsync(string firstEventType)
     {
         ArgumentNullException.ThrowIfNull(firstEventType);
@@ -408,6 +470,9 @@ public sealed class JsonlEventStore<TEventBase>
 
     private string PathFor(Guid actorId) =>
         Path.Combine(_root, actorId.ToString("D") + StreamSuffix);
+
+    private string SnapshotPathFor(Guid actorId) =>
+        Path.Combine(_snapshotRoot, actorId.ToString("D") + SnapshotSuffix);
 
     /// <summary>Encode the batch as ONE buffer: <c>json</c> + newline per event, never split.</summary>
     private static byte[] Encode(IReadOnlyList<IDomainEvent> events, string path)
