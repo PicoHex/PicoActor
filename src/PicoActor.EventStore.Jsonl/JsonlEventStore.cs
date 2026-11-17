@@ -204,28 +204,42 @@ public sealed class JsonlEventStore<TEventBase>
         // keeps it (the seeds use TryAdd), FrameworkDefaultCount reports what was APPLIED rather than
         // what the framework ships, and a concurrent second construction sees the frozen table instead
         // of seeding it twice.
+        // A bound type that is ALSO a TEventBase is refused: one type, one registration (D5). The check
+        // runs on the CANDIDATE table inside the critical section that freezes it and BEFORE anything is
+        // committed, so a refusal leaves the options exactly as they were: still bindable, and still
+        // constructible over once the offending line is gone. Refusing AFTER the freeze poisoned the one
+        // object the operator has to fix — the table took no further binding, and the seeds the refused
+        // construction had already applied stayed counted in an options instance no store ever read.
+        // It has to see the SEEDED table, because the framework defaults are bindings too.
         _bindings = options.EventTypeBindings.Freeze(
             typeof(JsonlEventStore<TEventBase>).FullName!,
             static bindings =>
             {
                 bindings.TryAddDefault<SagaCompleted>(FrameworkEventTags.SagaCompleted);
                 bindings.TryAddDefault<SagaFailed>(FrameworkEventTags.SagaFailed);
+            },
+            table =>
+            {
+                foreach (var bound in table.BoundTypes)
+                {
+                    if (!typeof(TEventBase).IsAssignableFrom(bound))
+                        continue;
+
+                    // ONE remedy, and the reachable one. The message used to offer a second —
+                    // "register the event's own base type as the store's generic argument" — which is
+                    // precisely the configuration that just failed, because the generic argument
+                    // ALREADY is that type's base. The registration is the redundant half, so deleting
+                    // it is the whole fix.
+                    throw new InvalidOperationException(
+                        $"{bound.FullName} is bound in "
+                            + $"{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.EventTypeBindings)} "
+                            + $"and is also a {typeof(TEventBase).FullName}: a type is registered ONCE, "
+                            + "because its tag is what a reader dispatches on. Delete the "
+                            + $"Add<{bound.Name}>(...) line - the event's base type already covers it."
+                    );
+                }
             }
         );
-
-        // A bound type that is ALSO a TEventBase is refused: one type, one registration (D5). Checked
-        // AFTER the seed, because the framework defaults are the bindings that make this reachable.
-        foreach (var bound in _bindings.BoundTypes)
-        {
-            if (!typeof(TEventBase).IsAssignableFrom(bound))
-                continue;
-
-            throw new InvalidOperationException(
-                $"{bound.FullName} is bound in JsonlEventStoreOptions.EventTypeBindings and is also a "
-                    + $"{typeof(TEventBase).FullName}: a type is registered ONCE. Remove the binding, or "
-                    + "register the event's own base type as the store's generic argument."
-            );
-        }
 
         // A TypePrefix store learns its map from ONE filename pass. IdOnly pays nothing here: the id
         // alone is the name, so there is nothing to learn.
@@ -1602,6 +1616,25 @@ public sealed class JsonlEventStore<TEventBase>
                 throw WrapBound(ex, "serialize", path, tag, domainEvent.GetType());
             }
 
+            // The splice below DROPS the payload's opening brace and assumes a member list behind it, so
+            // the payload HAS to be a JSON object. An array (`[1,2]`), a scalar (`42`), a literal `null`
+            // or an empty payload would be framed into a line that is not JSON at all — invisible here
+            // and fatal on read-back, possibly after the line reached an archive. No generated writer can
+            // produce such a payload today (a `List<int>`-derived class serializes as `{}`, and PicoJetson
+            // has no type-level converter hook), so this is an INVARIANT CHECK rather than a path a
+            // consumer can reach today; it costs two comparisons, which is the right price for the only
+            // failure in this method that could corrupt a file instead of throwing.
+            if (payload.Length < 2 || payload[0] != (byte)'{')
+            {
+                throw new FormatException(
+                    $"Cannot serialize '{path}' as {domainEvent.GetType().FullName} through the event "
+                        + $"type binding \"{tag}\": the bound payload is {DescribePayload(payload)}, and "
+                        + "a bound line is framed as '{\"$type\":\"<tag>\"' followed by that payload's "
+                        + "MEMBERS, so the payload must be a JSON object. Nothing was written. Make sure "
+                        + "the type's own serializer writes an object."
+                );
+            }
+
             // D2's byte splice, spelled out because every byte here is permanent wire format:
             //   '{"$type":"' + tag + '"' [',' only if the payload has members] + payload[1..]
             // The payload's OPENING BRACE IS DROPPED and the payload itself is never rewritten:
@@ -1869,6 +1902,19 @@ public sealed class JsonlEventStore<TEventBase>
     {
         stream.Seek(length - 1, SeekOrigin.Begin);
         return stream.ReadByte() == JsonlLines.NewLine;
+    }
+
+    /// <summary>
+    /// The first few characters of a bound payload, for the refusal that should never fire: enough for an
+    /// operator to see WHAT arrived (`[1,2]`, `42`) without a message that dumps a whole event.
+    /// </summary>
+    private static string DescribePayload(byte[] payload)
+    {
+        if (payload.Length == 0)
+            return "empty";
+
+        var visible = Encoding.UTF8.GetString(payload, 0, Math.Min(payload.Length, 12));
+        return payload.Length > 12 ? $"'{visible}...'" : $"'{visible}'";
     }
 
     /// <summary>Offset just after the last newline (0 when the file has none) — the truncation point.</summary>

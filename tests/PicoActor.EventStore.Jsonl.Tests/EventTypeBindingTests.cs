@@ -47,10 +47,17 @@ public sealed class EventTypeBindingTests
         // The idempotence row: the SAME type with the SAME tag is a no-op, never an error.
         bindings.Add<SagaCompleted>("shared");
         await Assert.That(bindings.RegisteredCount).IsEqualTo(1);
+
+        // …and "the same tag" means what the READER means by it. The generated polymorphic reader
+        // matches a discriminator value case-insensitively, so two spellings of one tag are one tag:
+        // re-registering in another case is the same idempotent no-op, and the spelling registered
+        // FIRST stays the wire format (Bnd4b pins that on the read side).
+        bindings.Add<SagaCompleted>("SHARED");
+        await Assert.That(bindings.RegisteredCount).IsEqualTo(1);
     }
 
     [Test, Timeout(15000)]
-    public async Task Bnd7_SameTypeDifferentTag_ThrowsAtTheCall(
+    public async Task Bnd6b_SameTypeDifferentTag_ThrowsAtTheCall(
         CancellationToken cancellationToken = default
     )
     {
@@ -70,6 +77,83 @@ public sealed class EventTypeBindingTests
         await Assert.That(error.Message.Contains("second", StringComparison.Ordinal)).IsTrue();
 
         await Assert.That(bindings.RegisteredCount).IsEqualTo(1);
+    }
+
+    // ── A bound type that is ALSO a TEventBase: refused at CONSTRUCTION, before the freeze (D5) ────
+
+    /// <summary>
+    /// D5's second half, and the one a consumer actually reaches: binding the store's OWN event (here
+    /// <see cref="SSnapshotAdded"/>, which derives from <see cref="ConformanceEvent"/>) would give one
+    /// type two routes — the base's <c>[PicoDerivedType]</c> tag and the bound tag — so a type is
+    /// registered once and the store refuses the construction.
+    /// <para>
+    /// What this pins is WHERE the refusal lands and WHAT it leaves behind. It has to land before the
+    /// table is frozen, because a refused construction that froze the options would turn the documented
+    /// one-line fix ("delete the Add call") into a dead options instance: no binding can be added to it
+    /// afterwards and constructing over it again still throws, so the operator has no way forward in
+    /// the same process. And it must leave the COUNTS as it found them, because D7 says a construction
+    /// that throws attests to nothing — the framework seeds it applied are rolled back with it, not
+    /// counted against a store that does not exist.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd7_BoundTypeAlsoTEventBase_ThrowsAtConstruction(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var options = new JsonlEventStoreOptions();
+
+        // SSnapshotAdded IS a ConformanceEvent, so this binding registers a type the base already
+        // routes — the ambiguity, spelled the way an operator spells it.
+        options.EventTypeBindings.Add<SSnapshotAdded>("ss-bound");
+
+        var error = Catch(() => _ = new JsonlEventStore<ConformanceEvent>(temp.Root, options));
+
+        await Assert.That(error is InvalidOperationException).IsTrue();
+
+        var message = error!.Message;
+
+        // Both names: WHICH binding line is wrong, and WHICH generic argument it collides with.
+        await Assert
+            .That(message.Contains(typeof(SSnapshotAdded).FullName!, StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(message.Contains(typeof(ConformanceEvent).FullName!, StringComparison.Ordinal))
+            .IsTrue();
+
+        // Exactly ONE remedy, and it is the one that works: delete the registration, because the base
+        // already covers the type. The other half the message used to offer — "register the event's own
+        // base type as the store's generic argument" — is already the case here (the generic argument
+        // IS the type's base) and fails again, so it must not be offered at all.
+        await Assert
+            .That(message.Contains($"Add<{nameof(SSnapshotAdded)}>", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(
+                message.Contains(
+                    "the event's base type already covers it",
+                    StringComparison.Ordinal
+                )
+            )
+            .IsTrue();
+        await Assert
+            .That(message.Contains("register the event's own base type", StringComparison.Ordinal))
+            .IsFalse();
+
+        // Refused before the stream: no file, no directory entry.
+        await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(0);
+
+        // ── the observable surface a refused construction must leave usable ────────────────────────
+        // NOT frozen. This is the line the fix exists for: over the same options instance, the operator
+        // can still register a binding, which is only possible because the freeze never completed.
+        options.EventTypeBindings.Add<SagaFailed>("y");
+
+        // The refused construction seeded NOTHING either: the two consumer bindings are all there is,
+        // so the framework defaults it would have applied were rolled back with it (D7).
+        await Assert.That(options.EventTypeBindings.RegisteredCount).IsEqualTo(2);
+        await Assert.That(options.EventTypeBindings.FrameworkDefaultCount).IsEqualTo(0);
     }
 
     // ── The store seeds its own defaults; a consumer override survives (D1) ────────────────────────
@@ -177,6 +261,16 @@ public sealed class EventTypeBindingTests
 
         // The live store's table is untouched by the refused call.
         await Assert.That(store.Bindings.Count).IsEqualTo(2);
+
+        // The tag GRAMMAR is checked first, so an illegal tag is still diagnosed as an illegal tag on
+        // a frozen table: the operator who typed a blank tag is not asked to work out that a store
+        // exists as well. The freeze refusal belongs to the tag that could have been registered.
+        await Assert
+            .That(
+                Catch(() => options.EventTypeBindings.Add<SagaCompleted>(" "))
+                    is ArgumentOutOfRangeException
+            )
+            .IsTrue();
 
         // A SECOND construction over the same options does not seed again: the defaults were applied
         // once, inside the critical section that froze the table.

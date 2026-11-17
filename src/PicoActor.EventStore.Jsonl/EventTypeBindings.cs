@@ -116,8 +116,12 @@ public sealed class EventTypeBindings
 
         lock (_gate)
         {
-            ThrowIfFrozen();
+            // The GRAMMAR first, the freeze second: a tag that could never be registered is a mistake in
+            // the line the operator just typed, and it must be reported as that even when a store has
+            // already frozen this table — "frozen" would send them looking for a construction when the
+            // real defect is the argument in front of them.
             ValidateTag(tag);
+            ThrowIfFrozen();
             AddCore(typeof(T), tag, WriterFor<T>(), ReaderFor<T>());
         }
 
@@ -160,17 +164,30 @@ public sealed class EventTypeBindings
     }
 
     /// <summary>
-    /// Freeze the table and hand the store its immutable copy: the defaults are seeded, the table is
-    /// copied and the frozen flag is set INSIDE ONE critical section, so two threads constructing two
-    /// stores over one options instance cannot double-seed, and no <see cref="Add{T}"/> can slip in
-    /// between the copy and the flag. A second construction sees the same copy.
+    /// Freeze the table and hand the store its immutable copy: the defaults are seeded, the CANDIDATE
+    /// table is built and validated, and only then are the copy and the frozen flag committed — all
+    /// INSIDE ONE critical section, so two threads constructing two stores over one options instance
+    /// cannot double-seed, and no <see cref="Add{T}"/> can slip in between the copy and the flag. A
+    /// second construction sees the same copy.
     /// </summary>
     /// <param name="frozenBy">
     /// What froze the table, named in the <see cref="Add{T}"/> refusal — the operator has to know which
     /// construction to move their bindings above.
     /// </param>
     /// <param name="seedDefaults">Applies the framework defaults, with <see cref="TryAddDefault{T}"/>.</param>
-    internal EventTypeBindingsTable Freeze(string frozenBy, Action<EventTypeBindings> seedDefaults)
+    /// <param name="validate">
+    /// Runs over the CANDIDATE table before anything is committed, and may refuse the construction by
+    /// throwing. It exists so a check that needs the SEEDED table (the defaults are bindings too) lands
+    /// in the same transaction: a refusal here leaves the options exactly as they were — not frozen, no
+    /// default applied, no count moved — which is what makes the documented remedy ("delete the
+    /// offending Add line") survivable in the SAME process. Freezing first and refusing after would hand
+    /// the operator an options instance that accepts no binding and cannot be constructed over either.
+    /// </param>
+    internal EventTypeBindingsTable Freeze(
+        string frozenBy,
+        Action<EventTypeBindings> seedDefaults,
+        Action<EventTypeBindingsTable>? validate = null
+    )
     {
         ArgumentNullException.ThrowIfNull(seedDefaults);
 
@@ -179,19 +196,68 @@ public sealed class EventTypeBindings
             if (_table is not null)
                 return _table;
 
+            // The seeding is the only mutation this critical section makes, so capturing it is enough to
+            // make the whole call all-or-nothing. The copy is a handful of dictionaries, once per store
+            // constructed; being able to undo it is worth far more than that.
+            var tagsBefore = new Dictionary<Type, string>(_tagByType);
+            var typesBefore = new Dictionary<string, Type>(
+                _typeByTag,
+                StringComparer.OrdinalIgnoreCase
+            );
+            var writersBefore = new Dictionary<Type, Func<IDomainEvent, byte[]>>(_writeByType);
+            var readersBefore = new Dictionary<string, Func<byte[], IDomainEvent?>>(
+                _readByTag,
+                StringComparer.OrdinalIgnoreCase
+            );
+            var defaultTagsBefore = new HashSet<string>(
+                _defaultTags,
+                StringComparer.OrdinalIgnoreCase
+            );
+            var frameworkDefaultCountBefore = _frameworkDefaultCount;
+
             seedDefaults(this);
 
-            _table = new EventTypeBindingsTable(
-                _tagByType,
-                _typeByTag,
-                _writeByType,
-                _readByTag,
-                _defaultTags,
-                _frameworkDefaultCount
-            );
+            EventTypeBindingsTable candidate;
+            try
+            {
+                candidate = new EventTypeBindingsTable(
+                    _tagByType,
+                    _typeByTag,
+                    _writeByType,
+                    _readByTag,
+                    _defaultTags,
+                    _frameworkDefaultCount
+                );
+                validate?.Invoke(candidate);
+            }
+            catch
+            {
+                // Rolled back BEFORE the exception leaves this lock, so no observer can see the seeds a
+                // refused construction would have applied: D7 says it attests to nothing, and a count it
+                // never reported is a count it must not leave behind.
+                _tagByType.Clear();
+                foreach (var pair in tagsBefore)
+                    _tagByType.Add(pair.Key, pair.Value);
+                _typeByTag.Clear();
+                foreach (var pair in typesBefore)
+                    _typeByTag.Add(pair.Key, pair.Value);
+                _writeByType.Clear();
+                foreach (var pair in writersBefore)
+                    _writeByType.Add(pair.Key, pair.Value);
+                _readByTag.Clear();
+                foreach (var pair in readersBefore)
+                    _readByTag.Add(pair.Key, pair.Value);
+                _defaultTags.Clear();
+                foreach (var tag in defaultTagsBefore)
+                    _defaultTags.Add(tag);
+                _frameworkDefaultCount = frameworkDefaultCountBefore;
+                throw;
+            }
+
+            _table = candidate;
             _frozenBy = frozenBy;
             _frozen = true;
-            return _table;
+            return candidate;
         }
     }
 
@@ -206,7 +272,13 @@ public sealed class EventTypeBindings
         if (_tagByType.TryGetValue(type, out var existingTag))
         {
             // Idempotent row: the same pair again is a no-op, so a start-up path that re-runs is safe.
-            if (string.Equals(existingTag, tag, StringComparison.Ordinal))
+            // IGNORE CASE, because that is the equality the READ side uses (see _typeByTag): the
+            // generated polymorphic reader accepts a differently-cased spelling of a discriminator, so
+            // two spellings of one tag ARE one tag. Comparing ordinally here would refuse a second
+            // registration of the tag this table already holds — a "duplicate" a reader cannot even see,
+            // and a false positive on the one path a re-run start-up takes. The spelling registered
+            // FIRST stays the tag that is written, so the wire format never wobbles.
+            if (string.Equals(existingTag, tag, StringComparison.OrdinalIgnoreCase))
                 return;
 
             throw new InvalidOperationException(

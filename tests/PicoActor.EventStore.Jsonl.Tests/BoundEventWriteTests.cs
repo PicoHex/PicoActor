@@ -208,7 +208,7 @@ public sealed class BoundEventWriteTests
     // ── Bnd15: the object? member — null (the framework's only shape) round-trips ──────────────────
 
     [Test, Timeout(15000)]
-    public async Task Bnd15_NullAndStringResult_RoundTrip(
+    public async Task Bnd15_NullResult_RoundTrips_NonNullFailsLoudly(
         CancellationToken cancellationToken = default
     )
     {
@@ -256,7 +256,15 @@ public sealed class BoundEventWriteTests
             _ = await store.AppendAsync(otherId, 0, [new SagaCompleted("boom")]);
         });
 
-        await Assert.That(error).IsNotNull();
+        // "Loud" is pinned, not merely observed: the failure is one of the two documented shapes — a
+        // FormatException for a payload that does not fit the tag, an InvalidOperationException for a
+        // missing serializer — and it NAMES the event. A bare `error is not null` would accept any
+        // exception at all, including a NullReferenceException from this store, which is exactly the
+        // regression this assertion is here to refuse.
+        await Assert.That(error is FormatException or InvalidOperationException).IsTrue();
+        await Assert
+            .That(error!.Message.Contains(nameof(SagaCompleted), StringComparison.Ordinal))
+            .IsTrue();
         await Assert.That(File.Exists(StreamPath(temp.Root, otherId))).IsFalse();
         await Assert.That(await store.GetVersionAsync(otherId)).IsEqualTo(0UL);
     }
@@ -292,6 +300,15 @@ public sealed class BoundEventWriteTests
         var lines = await File.ReadAllLinesAsync(StreamPath(temp.Root, id), cancellationToken);
         await Assert.That(lines.Length).IsEqualTo(1);
         await Assert.That(lines[0]).IsEqualTo("{\"$type\":\"milestone\"}");
+
+        // …and it READS back. The writing half alone would let a splice that produces a line this store
+        // cannot parse pass: a memberless payload is the one shape where the tag is the WHOLE object, so
+        // this is the case where "the reader tolerates the leading $type member" has to hold with no
+        // member behind it to prove the payload survived.
+        var reloaded = await store.LoadAsync(id);
+        await Assert.That(reloaded.Count).IsEqualTo(1);
+        await Assert.That(reloaded[0].GetType()).IsEqualTo(typeof(MilestoneReached));
+        await Assert.That(reloaded[0]).IsEqualTo(new MilestoneReached());
     }
 
     /// <summary>

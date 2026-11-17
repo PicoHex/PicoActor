@@ -335,10 +335,12 @@ public sealed class BoundEventReadTests
         // IDomainEvent is the interface every event implements — the tempting generic argument, and
         // the one that cannot work: [PicoDerivedType] is a type attribute on the BASE, and a type the
         // framework's own terminal events are assignable to would make them both ordinary and bound.
+        var options = new JsonlEventStoreOptions();
+
         Exception? error = null;
         try
         {
-            _ = new JsonlEventStore<IDomainEvent>(temp.Root);
+            _ = new JsonlEventStore<IDomainEvent>(temp.Root, options);
         }
         catch (Exception ex)
         {
@@ -361,6 +363,12 @@ public sealed class BoundEventReadTests
 
         // Refused before anything is frozen or created: the directory holds no stream.
         await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(0);
+
+        // The SAME observable surface Bnd7 pins: the refusal came before the freeze, so the options
+        // still take a binding, and the construction that threw applied none of the framework seeds.
+        options.EventTypeBindings.Add<SagaFailed>("y");
+        await Assert.That(options.EventTypeBindings.RegisteredCount).IsEqualTo(1);
+        await Assert.That(options.EventTypeBindings.FrameworkDefaultCount).IsEqualTo(0);
     }
 
     // ── Bnd13: only the FIRST member is a discriminator — anything else falls back ────────────────
