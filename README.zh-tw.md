@@ -372,6 +372,30 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   一個裸的共享衝突。失敗的 lazy pass（錯配、根目錄不可讀、根目錄是檔案）會被 **latch**：之後每一次
   觀察都擲出同一個例外，而且目錄不會再被掃描一次，因此唯一的恢復方式是目錄修好後**重建實例**。
 
+#### Framework events (event type bindings)（框架事件：事件型別繫結）
+
+`SagaCompleted`/`SagaFailed` 是 `sealed`，衍生自 `IDomainEvent` 而不是你的 `TEventBase`，因此 saga 串流裡躺著
+一個你的序列化器從未見過的型別。`JsonlEventStoreOptions.EventTypeBindings` 把框架事件路由進同一個 store——框架
+預註冊 `SagaCompleted → PicoActorSagaCompleted` 與 `SagaFailed → PicoActorSagaFailed`（`TryAdd`，所以你自己
+的 `Add<T>(tag)` 優先；`FrameworkDefaultCount` 是實際套用了幾個預設繫結，`0…2`，`RegisteredCount` 是總數）。
+
+- **`Add<T>(tag)` 只路由，不產生。** tag 就是列內的 `$type`，也是讀取側嗅探的依據（首個成員、大小寫不敏感、
+  認不出就無條件回落 `TEventBase`），但該型別仍需要一個已產生的序列化器。對 **positional record** 而言
+  `[GenerateSerializer(typeof(T))]` 不可用（PicoSerDe 的屬性管線讀不到主建構子：`CS7036`/`CS8852`）；
+  可用形式是**閉合呼叫點**——`FrameworkEventSerializers.Generate()` 裡的字面呼叫。沒有產生點的 bound
+  型別會在**首寫**被拒絕（`InvalidOperationException`，訊息中給出 remedy）。
+- **混批就是一次寫：** `TEventBase` 與 bound 事件共用同一個 batch——一條 buffer、一次寫、一次 flush。
+- **命名。** 兩個框架 tag 就是生產語料既有的 tag，是永久線格式（無 alias）。串流仍按首事件的 CLR 短名命名；
+  在 `TypePrefix` 下，落在所有已註冊**型別**前綴之外的名字（`unknown-<id>.jsonl`，主機自己的分類）**按 id 可達**、按型別列舉不可見、
+  不計入 `ForeignFormatFiles`、也不會觸發整目錄拋。前綴不含 `-`；同短名共用一個前綴。
+- **`SagaCompleted.Result` 是 `object?`：** 只有 `null`（框架唯一產生的形狀）與 `string` 能保真往返；其它
+  物件會被 `ToString()` 字串化——有損、不可逆。saga 串流的持久化承諾只有 `null`/`string`。
+- **註冊規則。** 繫結掛在 options 實例上——在建構 store **之前**呼叫
+  `options.EventTypeBindings.Add<T>(tag)`：建構子會**凍結並複製**這張表，之後的 `Add` 會拋例外，而不是被
+  靜默忽略。一個型別只有一個 tag，一個 tag 只命名一個型別（同一對重複呼叫是 no-op；tag 非空且不含引號、
+  反斜線或控制字元）。會一併涵蓋框架事件的基底型別（例如 `IDomainEvent` 本身）在建構時被拒絕——否則它們
+  既是普通事件又是 bound 事件；可指派給 `TEventBase` 的 bound 型別同樣被拒絕。
+
 ### Idle Passivation (opt-in)（閒置鈍化，可選）
 
 Actor 會一直駐留記憶體，直到被停止。對於擁有大量長期存活聚合的工作負載，

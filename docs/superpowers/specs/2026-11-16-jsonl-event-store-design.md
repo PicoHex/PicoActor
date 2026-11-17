@@ -1,4 +1,12 @@
-# Generic JSONL event store — design (rev 5 + stream-naming delta)
+# Generic JSONL event store — design (rev 5 + stream-naming delta + event-type-binding delta)
+
+**Rev-6 delta — event type bindings (`EventTypeBindings`).** Added after the rev-5 / naming round and
+marked inline where it applies: §Public surface (`EventTypeBindings` + the option property),
+§Failure policy «Bindings and framework events», §Testing (`Bnd0`–`Bnd17`). The delta makes a **type
+outside `TEventBase`** writable and readable — the framework's own `SagaCompleted`/`SagaFailed` first,
+because `SagaActor` persists them into the aggregate's stream in the same flush — and it is **additive
+on the wire**: a stream of `TEventBase` events is byte-identical to rev 5, an unrecognised `$type` still
+takes the `TEventBase` path, and the table is empty until a consumer or the store puts something in it.
 
 **Rev-5 delta — stream naming (`FileNameFormat`).** Added after the round-5 fixes and marked
 inline where it applies: §Intent (the rename is gone), §File layout «Name layouts», §Failure
@@ -153,6 +161,49 @@ public enum FileNameFormat
     TypePrefix = 1,  // <type>-<id:D>.jsonl — prefix = events[0].GetType().Name, fixed at creation
 }
 ```
+
+```csharp
+// rev-6 delta: the event types this store may write and read IN ADDITION to TEventBase.
+public sealed class EventTypeBindings
+{
+    internal EventTypeBindings();                             // the OPTIONS owns the table (D1): no
+                                                              // free-floating registration
+    public EventTypeBindings Add<T>(string tag)                // ROUTING ONLY (no serializer, no codegen)
+        where T : class, IDomainEvent;
+    public int RegisteredCount { get; }                        // consumer bindings + applied defaults
+    public int FrameworkDefaultCount { get; }                  // the defaults actually APPLIED (0..2)
+}
+
+public sealed record JsonlEventStoreOptions
+{
+    public EventTypeBindings EventTypeBindings { get; } = new();   // empty; the STORE seeds the defaults
+}
+```
+
+- **The tag is the `$type` a bound event is written with**, spliced verbatim, and the value the read path
+  dispatches on (`Ordinal`, first member only). One type ⇄ one tag: a second `Add<T>` for the same type
+  with another tag, or a second type on a taken tag, throws at the call; the same pair again is an
+  idempotent no-op. The grammar is non-blank and free of `"`, `\` and control characters, because the
+  splice is unescaped and the damage would only surface on read-back.
+- **The table is frozen and copied at construction** (`FrozenDictionary` per direction): the append and
+  read paths take no lock, and `Add` after a store exists throws naming what froze the table instead of
+  registering a rule that applies to nothing. A second store over the same options instance sees the same
+  frozen copy (no double-seeding).
+- **The store owns the framework defaults** (`TryAdd`, one seeding mechanism): `SagaCompleted →
+  PicoActorSagaCompleted` and `SagaFailed → PicoActorSagaFailed`. A consumer binding on either side of
+  the pair wins, so `FrameworkDefaultCount` reports what was APPLIED (`0..2`) and `RegisteredCount` the
+  total — the pair a boot check asserts. Each wire tag has ONE owner: the package's
+  `FrameworkEventTags` constant (the store's seeds reference it), and nothing else spells the literal.
+- **The framework events' serializers are the PACKAGE's generation point**, not the consumer's:
+  `FrameworkEventSerializers.Generate()` holds four closed call sites (`SerializeToUtf8Bytes` and
+  `Deserialize` for each of the two records), whose generated registration is process-wide. It exists
+  because PicoJetson is call-site driven and the store is generic: `[GenerateSerializer(typeof(T))]`
+  cannot stand in — the attribute pipeline reads members only and never a primary constructor, so on a
+  positional record it emits `new T()` + init-only assignments and the package stops compiling
+  (**CS7036**/**CS8852**). A consumer's own bound type therefore needs a generation point **in its own
+  assembly** (a literal call), and that is what `Add<T>` does not do for it.
+- **The binding belongs to the OPTIONS, not to the store**: `JsonlEventStore<TEventBase>` reads
+  `options.EventTypeBindings` once, at construction, and never again.
 
 - Explicit `IEventLogReader.PeekFirstAsync(Guid, CancellationToken)`; the plain
   `PeekFirstAsync(Guid)` (the `InMemoryEventStore` pattern). `LoadAsync` returns a **fully
@@ -417,6 +468,32 @@ enumeration:
   the snapshot version against the stream (a version above the count is returned unchanged; the
   runtime's rollback guard discards it).
 
+### Bindings and framework events (rev-6 delta)
+
+Every refusal below happens **where the operator's fix belongs**, never as a symptom later on a read:
+the table refuses at the call, the construction refuses before anything is frozen, and the append
+refuses at its FIRST bound write — with no file created and no silent substitute.
+
+| Situation | Where | Exception |
+|---|---|---|
+| `Add<T>` for a type already bound to another tag, or a tag already naming another type | at the `Add` call | `InvalidOperationException` naming both tags/types; the same pair again is a no-op |
+| blank tag, or one containing `"`, `\` or a control character | at the `Add` call | `ArgumentOutOfRangeException` — the tag is spliced unescaped, so the damage would surface on read-back |
+| `Add<T>` after a store was constructed over those options | at the `Add` call | `InvalidOperationException` naming the store that froze the table (the store COPIES it, so the rule would apply to nothing) |
+| `TEventBase` already covers `SagaCompleted`/`SagaFailed` (`IDomainEvent` itself, or any base they derive from) | at **construction**, before the freeze | `InvalidOperationException`: they would be both ordinary and bound events — two routes, hence two tags — and the message says to use a class base of your own and let `EventTypeBindings` carry the framework events |
+| a bound type assignable to `TEventBase` (the framework defaults make this reachable) | at **construction**, after the seed | `InvalidOperationException`: one type, one registration |
+| a bound type with **no generation point** in any loaded assembly | at the **first append** that carries it | `InvalidOperationException` naming the type and the missing serializer, with the remedy (a closed call site in the consumer's assembly). Nothing is written: no partial batch, no truncated line, no fallback encode as `TEventBase` |
+| a `$type` the table does not know, on read | the read path | **not a failure**: unconditional fallback to `Deserialize<TEventBase>`, so a stream with custom discriminators of its own — or one written before the tags existed — reads exactly as before |
+
+- **Mixed batches do not degrade the single-write contract.** `TEventBase ∪ bound` in one `AppendAsync`
+  is one buffer, one write and one flush: a bound element never starts a second batch, opens a second
+  handle or pays a second fsync, and a batch refused for any reason above has written nothing.
+- **The naming freedom is not a failure either.** Under `TypePrefix`, `unknown-<id>.jsonl` — a prefix no
+  registered *type* owns, so a classification match that no type query asks for — is reachable by id,
+  invisible to `ListAggregateIdsAsync`, not counted `ForeignFormatFiles`, and it never triggers the
+  whole-directory `InvalidOperationException`: a host's own categorisation is not a misconfiguration.
+- **No alias layer.** The two framework tags are permanent wire format. A consumer binding may REPLACE a
+  default (and then writes its own tag), but the store never rewrites, translates or guesses a tag.
+
 ## Rebuild cost
 
 `OpenAsync(v + 1)` scans the file's bytes (page cache) to locate the offset and then deserializes
@@ -565,6 +642,50 @@ read path's**, single-flight, bounded, invalidated per id — and that an append
   `NegativeCacheInvalidations` at `0` and another id's remembered miss still costs no pass; the append
   of the id that WAS remembered moves it to `1`. Under `IdOnly` it stays `0` for a structural reason —
   the id IS the name, so nothing is ever remembered there.
+
+### Bindings (rev-6 delta): `tests/PicoActor.EventStore.Jsonl.Tests/EventTypeBindingTests.cs`
+
+`Bnd0`…`Bnd17` state the binding contract in one file, and each case is asserted **where the operator's
+fix belongs**: at the `Add` call, at the construction, or at the first append that carries the bound
+event. Nothing here asserts a wall-clock number; element and flush counts are the observable.
+
+- **Bnd0 — the generation point exists** (`Bnd0_FrameworkEventSerializer_IsGenerated`): the two
+  framework serializers are observed **from another assembly**, so deleting
+  `FrameworkEventSerializers.Generate()` (or replacing its closed call sites with an attribute marker)
+  turns this case red. It is the tripwire for the PicoSerDe limitation, not a data test.
+- **Bnd1…Bnd5 — the lifecycle of a bound event**: a saga stream holding `SagaCompleted` is written by a
+  `JsonlEventStore<TEventBase>` and read back as `SagaCompleted`/`SagaFailed` (Bnd1); a batch that mixes
+  `TEventBase` and bound events is ONE write and ONE flush with the right version count (Bnd2); the
+  bound line's bytes are `{"$type":"<tag>"` immediately followed by the payload — no comma, the
+  payload's opening `{` dropped (Bnd3); the read path sniffs the FIRST member only and matches the tag
+  case-insensitively (Bnd4); a line whose tag the table does not know **falls back unconditionally** to
+  `Deserialize<TEventBase>`, so a pre-existing stream with custom discriminators is unaffected (Bnd5).
+- **Bnd6 — one tag, one type** (`Bnd6_DuplicateTag_ThrowsAtTheCall`): the second `Add` on a taken tag
+  names both types, and `RegisteredCount` is unchanged (the refused call registered nothing).
+- **Bnd7 — one type, one tag** (`Bnd7_SameTypeDifferentTag_ThrowsAtTheCall`): the second tag for a bound
+  type names both tags in the message; the first binding survives.
+- **Bnd8 — the counting pair** (`Bnd8_Counts`): a fresh `JsonlEventStoreOptions` reports `0`/`0` (proof
+  that no initializer seeds the table), a store over untouched options reports the framework defaults in
+  `FrameworkDefaultCount`, and `RegisteredCount` counts consumer bindings and applied defaults alike.
+- **Bnd9/Bnd10 — a bound type with no generation point fails on its FIRST WRITE**, loudly: the exception
+  names the type and the missing serializer, and the stream is unchanged (no file, no partial line, no
+  encode as `TEventBase`).
+- **Bnd11 — naming**: a stream whose first event is a bound type is named by that event's CLR short name
+  under `FileNameFormat.TypePrefix`, while `unknown-<id>.jsonl` is reachable by id, invisible to
+  `ListAggregateIdsAsync`, not counted `ForeignFormatFiles` and not a whole-directory throw.
+- **Bnd12/Bnd13 — the two construction refusals**: `TEventBase = IDomainEvent` (the framework events are
+  assignable to it) throws before anything is frozen, and a bound type assignable to `TEventBase` throws
+  after the seed — both `InvalidOperationException`, both naming the offender and the way out.
+- **Bnd14 — a consumer override wins** (`Bnd14_ConsumerOverrideWins`): binding `SagaCompleted` to a
+  consumer tag before constructing the store keeps that tag (`TryAdd` seeds nothing), the lines carry it,
+  and `FrameworkDefaultCount` reports the reduction.
+- **Bnd15 — `SagaCompleted.Result` round-trip**: `null` and `string` come back equal; any other object
+  comes back as its `ToString()` — the documented, lossy promise, asserted as such rather than hidden.
+- **Bnd16 — the tag grammar** (`Bnd16_TagGrammar_RejectsQuotesBackslashAndBlanks`): blank, quote,
+  backslash and control characters are refused with `ArgumentOutOfRangeException`; a legal tag with
+  spaces or non-ASCII characters is accepted.
+- **Bnd17 — the freeze** (`Bnd17_AddAfterFreeze_Throws`): `Add` after a store was constructed over those
+  options throws naming the store, and the store's view is the copy taken at construction.
 
 ## Repo surface
 

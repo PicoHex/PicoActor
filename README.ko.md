@@ -397,6 +397,39 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   파일인 루트)는 **latch** 됩니다: 이후 모든 관측이 같은 예외를 던지고 디렉터리는 다시 스캔되지
   않으므로, 유일한 복구 방법은 디렉터리를 고친 뒤 **인스턴스를 다시 만드는** 것입니다.
 
+#### Framework events (event type bindings)(프레임워크 이벤트 타입 바인딩)
+
+`SagaCompleted`/`SagaFailed` 는 `sealed` 이고 당신의 `TEventBase` 가 아니라 `IDomainEvent` 에서 파생되므로,
+saga 스트림에는 직렬화기가 한 번도 본 적 없는 타입이 들어갑니다. `JsonlEventStoreOptions.EventTypeBindings`
+는 프레임워크 이벤트를 같은 store 로 라우팅합니다. 프레임워크는
+`SagaCompleted → PicoActorSagaCompleted` 와 `SagaFailed → PicoActorSagaFailed` 를 미리 등록하며(`TryAdd`
+이므로 당신의 `Add<T>(tag)` 가 우선합니다. `FrameworkDefaultCount` 는 실제 적용된 기본값 개수 `0…2`,
+`RegisteredCount` 는 전체 개수입니다).
+
+- **`Add<T>(tag)` 는 라우팅만 하고 생성하지 않습니다.** tag 는 줄의 `$type` 이자 읽기 측이 냄새 맡는 값입니다
+  (첫 멤버, 대소문자 무시, 판별하지 못하면 무조건 `TEventBase` 로 폴백). 하지만 그 타입에는 여전히 생성된
+  직렬화기가 필요합니다. **positional record** 에 대한 `[GenerateSerializer(typeof(T))]` 는 사용할 수 없습니다
+  (PicoSerDe 의 속성 파이프라인이 주 생성자를 읽지 못해 `CS7036`/`CS8852`). 쓸 수 있는 형태는 **닫힌 호출
+  지점**, 즉 `FrameworkEventSerializers.Generate()` 안의 리터럴 호출입니다. 생성 지점이 없는 bound 타입은
+  **첫 쓰기**에서 거부됩니다(`InvalidOperationException`, 해결책을 함께 제시).
+- **혼합 배치는 한 번의 쓰기:** `TEventBase` 와 bound 이벤트가 같은 배치를 공유합니다——버퍼 하나, 쓰기 한 번,
+  flush 한 번.
+- **이름 규칙.** 두 프레임워크 tag 는 프로덕션 코퍼스가 이미 쓰는 tag 이며 영구적인 와이어 형식입니다(alias
+  없음). 스트림은 여전히 첫 이벤트의 CLR 짧은 이름으로 명명되지만, `TypePrefix` 에서는 등록된 모든 **타입**
+  프리픽스 밖의 이름(`unknown-<id>.jsonl`, 호스트 자체 분류)은 **id 로 접근 가능**하고 타입 열거에는 보이지 않으며,
+  `ForeignFormatFiles` 에 세어지지 않고 디렉터리 전체 예외도 일으키지 않습니다. 프리픽스에는 `-` 가 없고,
+  같은 짧은 이름은 같은 프리픽스를 공유합니다.
+- **`SagaCompleted.Result` 는 `object?`:** `null`(프레임워크가 만드는 유일한 형태)과 `string` 만 충실히
+  왕복합니다. 그 밖의 객체는 `ToString()` 으로 문자열화됩니다——손실이며 되돌릴 수 없습니다. saga 스트림의
+  영속화가 약속하는 것은 `null`/`string` 뿐입니다.
+- **등록 규칙.** 바인딩은 options 인스턴스에 있습니다——store 를 생성하기 **전에**
+  `options.EventTypeBindings.Add<T>(tag)` 를 호출합니다. 생성자는 이 표를 **동결하고 복사**하므로, 이후의
+  `Add` 는 조용히 무시되지 않고 예외가 됩니다. 한 타입에는 tag 가 하나, 한 tag 는 타입 하나만 가리킵니다
+  (같은 쌍을 다시 호출하면 no-op; tag 는 비어 있지 않고 따옴표·백슬래시·제어 문자를 포함하지 않습니다).
+  프레임워크 이벤트를 포함하는 기저 타입(`IDomainEvent` 자체 등)은 생성 시 거부됩니다——그러면 그것들이
+  일반 이벤트이자 bound 이벤트가 되어 버리기 때문입니다. `TEventBase` 에 할당 가능한 bound 타입도 마찬가지로
+  거부됩니다.
+
 ### Idle Passivation (opt-in)(유휴 패시베이션, 선택 사항)
 
 액터는 중지될 때까지 메모리에 남아 있습니다. 수명이 긴 애그리거트가 많은
