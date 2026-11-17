@@ -169,8 +169,20 @@ public sealed class JsonlEventStore<TEventBase>
             || typeof(TEventBase).IsAssignableFrom(typeof(SagaFailed))
         )
         {
+            // An INTERFACE base is named first when it is the one that was chosen: [PicoDerivedType] is a
+            // TYPE attribute, so no registration can be declared on an interface and no polymorphic
+            // serializer could ever be generated for it — such a store could neither write nor read a
+            // single line, and the operator has to be told the KIND of type is wrong, not that a
+            // registration line is missing.
+            var kind = typeof(TEventBase).IsInterface
+                ? $"{typeof(TEventBase).FullName} is an interface, and a registration is declared ON a "
+                    + "base TYPE: [PicoDerivedType] cannot be put on an interface, so PicoJetson could "
+                    + "generate no polymorphic serializer for it. "
+                : string.Empty;
+
             throw new InvalidOperationException(
                 $"JsonlEventStore<{typeof(TEventBase).FullName}> cannot use that type as its event base: "
+                    + kind
                     + "the framework's terminal events PicoActor.Abs.SagaCompleted and SagaFailed are "
                     + "assignable to it, so they would be both an ordinary event and a bound one. Use a "
                     + "CLASS base of your own and let "
@@ -1550,10 +1562,18 @@ public sealed class JsonlEventStore<TEventBase>
             && _bindings.TryGetBinding(domainEvent.GetType(), out var tag, out var write)
         )
         {
-            // Deliberately NOT wrapped in Wrap: its remedy ("[PicoDerivedType] on the base") is wrong
-            // advice for a bound type, whose serializer is generated in its OWN assembly. Nothing has
-            // been written and no file exists, so the failure costs nothing but the append.
-            var payload = write(domainEvent);
+            // Wrapped by WrapBound, NEVER by Wrap: its remedy ("[PicoDerivedType] on the base") is
+            // wrong advice for a bound type, whose serializer is generated in its OWN assembly. The
+            // failure costs nothing but the append — nothing has been written and no file exists.
+            byte[] payload;
+            try
+            {
+                payload = write(domainEvent);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw WrapBound(ex, "serialize", path, tag, domainEvent.GetType());
+            }
 
             // D2's byte splice, spelled out because every byte here is permanent wire format:
             //   '{"$type":"' + tag + '"' [',' only if the payload has members] + payload[1..]
@@ -1586,12 +1606,134 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <summary>
-    /// Deserialize one line, wrapping the three documented PicoJetson failures so the message names the
-    /// base type and the ONE registration form. The alternative is a bare "Unknown type discriminator"
-    /// from a generator the consumer never sees.
+    /// Read the discriminator of a line IF it is the object's FIRST member (D4). Returns false — "no
+    /// discriminator", never an error — for everything else: a line that is not an object, a first member
+    /// with another name, a non-string value, an escaped value, a truncated line.
+    /// <para>
+    /// A PREFIX SCAN, not a search of the line. A payload is free to contain the text of a discriminator,
+    /// so an <c>IndexOf</c> over the whole line would find one there and dispatch an unrelated (or
+    /// corrupt) line to the wrong binding. The member NAME is matched case-insensitively, exactly as the
+    /// generated polymorphic reader matches it; the tag value is returned VERBATIM and the binding lookup
+    /// is the case-insensitive one, which is what makes the two readers agree about what a tag is.
+    /// </para>
+    /// <para>
+    /// A library may declare a custom discriminator property name
+    /// (<c>[PicoPolymorphic(TypeDiscriminatorPropertyName = …)]</c>): such a stream has no <c>$type</c>
+    /// first member, so it is never sniffed here and keeps reading through the
+    /// <c>Deserialize&lt;TEventBase&gt;</c> path unchanged.
+    /// </para>
+    /// </summary>
+    private static bool TryReadDiscriminator(ReadOnlySpan<byte> line, out string tag)
+    {
+        tag = string.Empty;
+
+        var index = 0;
+        SkipJsonWhitespace(line, ref index);
+        if (index >= line.Length || line[index] != (byte)'{')
+            return false;
+
+        index++;
+        SkipJsonWhitespace(line, ref index);
+
+        // The FIRST member's name must be `$type`, and it must be a plain (unescaped) JSON string.
+        if (index >= line.Length || line[index] != (byte)'"')
+            return false;
+
+        index++;
+        var nameStart = index;
+        while (index < line.Length && line[index] != (byte)'"')
+        {
+            // No escape can spell `$type`, so a name that needs one is another member.
+            if (line[index] == (byte)'\\')
+                return false;
+            index++;
+        }
+
+        if (index >= line.Length)
+            return false; // unterminated name
+
+        if (!Ascii.EqualsIgnoreCase(line[nameStart..index], DiscriminatorName))
+            return false;
+
+        index++; // the name's closing quote
+        SkipJsonWhitespace(line, ref index);
+        if (index >= line.Length || line[index] != (byte)':')
+            return false;
+
+        index++;
+        SkipJsonWhitespace(line, ref index);
+        if (index >= line.Length || line[index] != (byte)'"')
+            return false;
+
+        index++;
+        var valueStart = index;
+        while (index < line.Length && line[index] != (byte)'"')
+        {
+            // A tag this store wrote never carries an escape (EventTypeBindings.ValidateTag refuses a
+            // quote, a backslash and every control character), so an escaped value is not one of ours:
+            // the line falls back instead of being half-read.
+            if (line[index] == (byte)'\\' || line[index] < 0x20)
+                return false;
+            index++;
+        }
+
+        if (index >= line.Length)
+            return false; // unterminated value
+
+        tag = Encoding.UTF8.GetString(line[valueStart..index]);
+        return true;
+    }
+
+    /// <summary>The six bytes a discriminator member is named with, in the one spelling this store reads.</summary>
+    private static ReadOnlySpan<byte> DiscriminatorName => "$type"u8;
+
+    /// <summary>JSON's insignificant whitespace — the four characters a reader may skip between tokens.</summary>
+    private static void SkipJsonWhitespace(ReadOnlySpan<byte> line, ref int index)
+    {
+        while (
+            index < line.Length
+            && line[index] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n'
+        )
+            index++;
+    }
+
+    /// <summary>
+    /// Deserialize one line by the route its discriminator names (D4).
+    /// <para>
+    /// A tag this store's bindings carry goes through that binding's CLOSED generic: the type the tag
+    /// names, read by its OWN serializer (which tolerates the leading <c>$type</c> member the write path
+    /// splices in front of it). Everything else — no discriminator, a custom discriminator property name,
+    /// a first member that is not a discriminator, a tag nobody bound — goes through the EXISTING
+    /// <c>Deserialize&lt;TEventBase&gt;</c> path UNCONDITIONALLY. "The sniffer did not recognise this
+    /// line" is never turned into a new error: a corpus written before bindings existed, and a base with a
+    /// custom discriminator, keep reading exactly as they do today.
+    /// </para>
     /// </summary>
     private IDomainEvent DeserializeLine(byte[] line, string path)
     {
+        var sniffed = TryReadDiscriminator(line, out var tag);
+        var unboundTag = sniffed ? tag : null;
+
+        if (sniffed && _bindings.TryGetReadBinding(tag, out var boundType, out var read))
+        {
+            try
+            {
+                if (read(line) is { } boundEvent)
+                {
+                    Interlocked.Increment(ref _deserializedEvents);
+                    return boundEvent;
+                }
+
+                // The reader answered null for a line that is not JSON null: tag and payload disagree.
+                throw new FormatException("the line deserialized to null");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // The binding's OWN message: [PicoDerivedType] advice is wrong for a bound event.
+                throw WrapBound(ex, "deserialize", path, tag, boundType);
+            }
+        }
+
         try
         {
             if (JsonSerializer.Deserialize<TEventBase>(line) is { } domainEvent)
@@ -1602,13 +1744,29 @@ public sealed class JsonlEventStore<TEventBase>
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            throw Wrap(ex, path, "deserialize");
+            // A tag that WAS sniffed and is not bound rides along, so the failure names the tags this
+            // store could have read — the exception type and the existing wording are untouched.
+            throw Wrap(ex, path, "deserialize", unboundTag);
         }
 
-        throw Wrap(new FormatException("the line deserialized to null"), path, "deserialize");
+        throw Wrap(
+            new FormatException("the line deserialized to null"),
+            path,
+            "deserialize",
+            unboundTag
+        );
     }
 
-    private static Exception Wrap(Exception inner, string path, string action)
+    /// <summary>
+    /// The unbound-line wrap: the three documented PicoJetson failures, with the message naming the base
+    /// type and the ONE registration form. The alternative is a bare "Unknown type discriminator" from a
+    /// generator the consumer never sees.
+    /// </summary>
+    /// <param name="unboundTag">
+    /// The discriminator the line carried when nothing was bound to it, or null when the sniffer found
+    /// none. It only ADDS a clause: the failure is the existing one either way.
+    /// </param>
+    private Exception Wrap(Exception inner, string path, string action, string? unboundTag = null)
     {
         var message =
             $"Cannot {action} '{path}' as {typeof(TEventBase).FullName}: {inner.Message} "
@@ -1616,9 +1774,65 @@ public sealed class JsonlEventStore<TEventBase>
             + $"{typeof(TEventBase).FullName} in the assembly that declares it — that is where the "
             + "PicoJetson serializer is generated.";
 
+        if (unboundTag is not null)
+        {
+            message +=
+                $" The tag \"{unboundTag}\" is not one of this store's event type bindings either "
+                + $"({_bindings.DescribeTags()}), so neither route could read it: bind the type with "
+                + $"{nameof(EventTypeBindings)}.{nameof(EventTypeBindings.Add)} before constructing the "
+                + "store if that tag names a bound event.";
+        }
+
         // The exception TYPE is preserved: the docs distinguish the three failures — FormatException
         // for a bad/unknown discriminator or an unregistered derived type, InvalidOperationException
         // when the base itself was never generated.
+        return inner is InvalidOperationException
+            ? new InvalidOperationException(message, inner)
+            : new FormatException(message, inner);
+    }
+
+    /// <summary>
+    /// The BOUND path's failure, on either leg, wrapped by ONE helper whose advice FITS a bound event.
+    /// <see cref="Wrap"/> is deliberately not reused: its remedy ("register the event on
+    /// <c>TEventBase</c>") is wrong for a type that cannot derive from the base and does not need to — a
+    /// bound type is serialized by its OWN generated serializer, in its OWN assembly. So this message
+    /// names the tag, the bound type, the file and WHICH registration the tag came from, because
+    /// "look at the binding" is useless advice when the operator never wrote one.
+    /// </summary>
+    private Exception WrapBound(
+        Exception inner,
+        string action,
+        string path,
+        string tag,
+        Type boundType
+    )
+    {
+        var source = _bindings.IsFrameworkDefaultTag(tag)
+            ? "a framework default this package seeds in the store's constructor"
+            : $"a consumer {nameof(EventTypeBindings)}.{nameof(EventTypeBindings.Add)}<{boundType.Name}>(\"{tag}\") call";
+
+        var remedy =
+            inner is InvalidOperationException
+                // "no serializer registered": routable, but not serializable. The one failure whose
+                // remedy is a GENERATION POINT in the assembly that declares the type.
+                ? $"there is no generated serializer for {boundType.FullName} reachable from this store, "
+                    + "and binding a type registers ROUTING ONLY — it does not make that type "
+                    + "serializable. Generate one where the type is declared: "
+                    + $"[GenerateSerializer(typeof({boundType.Name}))] on one of that assembly's types, "
+                    + $"or a literal JsonSerializer.Serialize/Deserialize<{boundType.Name}> call there."
+                // A FormatException family failure: the payload is not this type's JSON.
+                : $"the payload does not fit the tag: a line tagged \"{tag}\" must carry "
+                    + $"{boundType.FullName}'s own JSON behind the discriminator. Check that the tag is "
+                    + "bound to this type, and that the file holds lines this store wrote.";
+
+        var message =
+            $"Cannot {action} '{path}' as {boundType.FullName} through the event type binding "
+            + $"\"{tag}\": {inner.Message} The tag is registered by {source}, and a bound event is "
+            + "serialized by its own type's generated serializer, in the assembly that declares it. "
+            + remedy;
+
+        // The type is preserved exactly as Wrap preserves it: the docs distinguish a bad payload
+        // (FormatException) from a missing serializer (InvalidOperationException).
         return inner is InvalidOperationException
             ? new InvalidOperationException(message, inner)
             : new FormatException(message, inner);

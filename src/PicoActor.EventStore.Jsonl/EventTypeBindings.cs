@@ -28,13 +28,30 @@ public sealed class EventTypeBindings
     private readonly object _gate = new();
 
     private readonly Dictionary<Type, string> _tagByType = new();
-    private readonly Dictionary<string, Type> _typeByTag = new(StringComparer.Ordinal);
+
+    // ORDINAL-IGNORE-CASE, and not for tidiness: the generated polymorphic reader matches the
+    // discriminator VALUE case-insensitively (TextHelpers.Eq(…, ignoreCase: false) in the emitted
+    // deserializer), so this store's read path must too — and a tag map that answered "not bound" for a
+    // differently-cased spelling of a bound tag would send a perfectly readable line down the fallback
+    // path. Registration follows the READER: two tags that differ only in case are ONE tag, and binding
+    // a second type to the other spelling is refused like any other duplicate.
+    private readonly Dictionary<string, Type> _typeByTag = new(StringComparer.OrdinalIgnoreCase);
 
     // The append path's half of the same registration: the CLOSED generic that serializes the concrete
     // bound type (D9). Captured HERE because a generic method's type argument is the only moment this
     // package can name the type — the store serializes through a type PARAMETER, so it can never reach
     // a concrete event, and a runtime Type cannot be turned into a call site without reflection.
     private readonly Dictionary<Type, Func<IDomainEvent, byte[]>> _writeByType = new();
+
+    // The read path's half of the same registration (D4): the CLOSED generic that deserializes the
+    // concrete bound type. Keyed by TAG, because a line names a tag and knows nothing else.
+    private readonly Dictionary<string, Func<byte[], IDomainEvent?>> _readByTag = new(
+        StringComparer.OrdinalIgnoreCase
+    );
+
+    // WHICH tags came from this package's framework seeds rather than from a consumer's
+    // Add<T> — carried so a read failure can name the registration an operator has to look at.
+    private readonly HashSet<string> _defaultTags = new(StringComparer.OrdinalIgnoreCase);
 
     private int _frameworkDefaultCount;
     private bool _frozen;
@@ -101,7 +118,7 @@ public sealed class EventTypeBindings
         {
             ThrowIfFrozen();
             ValidateTag(tag);
-            AddCore(typeof(T), tag, WriterFor<T>());
+            AddCore(typeof(T), tag, WriterFor<T>(), ReaderFor<T>());
         }
 
         return this;
@@ -135,6 +152,8 @@ public sealed class EventTypeBindings
             _tagByType.Add(type, tag);
             _typeByTag.Add(tag, type);
             _writeByType.Add(type, WriterFor<T>());
+            _readByTag.Add(tag, ReaderFor<T>());
+            _defaultTags.Add(tag);
             _frameworkDefaultCount++;
             return true;
         }
@@ -166,6 +185,8 @@ public sealed class EventTypeBindings
                 _tagByType,
                 _typeByTag,
                 _writeByType,
+                _readByTag,
+                _defaultTags,
                 _frameworkDefaultCount
             );
             _frozenBy = frozenBy;
@@ -175,7 +196,12 @@ public sealed class EventTypeBindings
     }
 
     /// <summary>The matrix (D1b) for a legal tag: one type, one tag; one tag, one type.</summary>
-    private void AddCore(Type type, string tag, Func<IDomainEvent, byte[]> write)
+    private void AddCore(
+        Type type,
+        string tag,
+        Func<IDomainEvent, byte[]> write,
+        Func<byte[], IDomainEvent?> read
+    )
     {
         if (_tagByType.TryGetValue(type, out var existingTag))
         {
@@ -202,6 +228,7 @@ public sealed class EventTypeBindings
         _tagByType.Add(type, tag);
         _typeByTag.Add(tag, type);
         _writeByType.Add(type, write);
+        _readByTag.Add(tag, read);
     }
 
     /// <summary>
@@ -217,6 +244,24 @@ public sealed class EventTypeBindings
     private static Func<IDomainEvent, byte[]> WriterFor<T>()
         where T : class, IDomainEvent =>
         domainEvent => JsonSerializer.SerializeToUtf8Bytes((T)domainEvent);
+
+    /// <summary>
+    /// The read path's delegate for <typeparamref name="T"/>: the CONCRETE deserializer, resolved once at
+    /// registration. The call site names a type PARAMETER, so it generates nothing either — the reader
+    /// must already exist in some loaded assembly, which is the same rule the writer obeys and the same
+    /// one the read path reports when it is broken.
+    /// <para>
+    /// The concrete reader is the right one for a bound line: it is the serializer of the type the tag
+    /// names, and it TOLERATES the leading <c>$type</c> member this store splices in front of it (the
+    /// generated readers skip members they do not map), which is what makes a bound line a line of its
+    /// own type and not a second wire format.
+    /// </para>
+    /// </summary>
+    private static Func<byte[], IDomainEvent?> ReaderFor<T>()
+        where T : class, IDomainEvent =>
+        // AsSpan() picks the ReadOnlySpan<byte> overload explicitly: the other one takes a string, and a
+        // byte[] must never be reinterpreted as text.
+        data => JsonSerializer.Deserialize<T>(data.AsSpan());
 
     /// <summary>
     /// The tag grammar. A tag is spliced between the quotes of the <c>$type</c> member with no escaping,
@@ -277,17 +322,26 @@ internal sealed class EventTypeBindingsTable
     private readonly FrozenDictionary<Type, string> _tagByType;
     private readonly FrozenDictionary<string, Type> _typeByTag;
     private readonly FrozenDictionary<Type, Func<IDomainEvent, byte[]>> _writeByType;
+    private readonly FrozenDictionary<string, Func<byte[], IDomainEvent?>> _readByTag;
+    private readonly FrozenSet<string> _defaultTags;
 
     internal EventTypeBindingsTable(
         IReadOnlyDictionary<Type, string> tagByType,
         IReadOnlyDictionary<string, Type> typeByTag,
         IReadOnlyDictionary<Type, Func<IDomainEvent, byte[]>> writeByType,
+        IReadOnlyDictionary<string, Func<byte[], IDomainEvent?>> readByTag,
+        IReadOnlyCollection<string> defaultTags,
         int frameworkDefaultCount
     )
     {
         _tagByType = tagByType.ToFrozenDictionary();
-        _typeByTag = typeByTag.ToFrozenDictionary(StringComparer.Ordinal);
+        // Case-insensitive in BOTH directions lookups the read path makes: the generated polymorphic
+        // reader compares the discriminator value case-insensitively, so a differently-cased spelling of
+        // a bound tag is still that tag (see the registration comment).
+        _typeByTag = typeByTag.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
         _writeByType = writeByType.ToFrozenDictionary();
+        _readByTag = readByTag.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+        _defaultTags = defaultTags.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
         FrameworkDefaultCount = frameworkDefaultCount;
     }
 
@@ -346,6 +400,61 @@ internal sealed class EventTypeBindingsTable
         write = null!;
         return false;
     }
+
+    /// <summary>
+    /// Everything the READ path needs for a sniffed tag in ONE lookup: the bound type and the closed
+    /// generic that deserializes it (D4). One lookup for the same reason the write side takes one — the
+    /// tag, the type and the two delegates are one registration.
+    /// </summary>
+    internal bool TryGetReadBinding(
+        string tag,
+        out Type eventType,
+        out Func<byte[], IDomainEvent?> read
+    )
+    {
+        ArgumentNullException.ThrowIfNull(tag);
+
+        if (
+            _typeByTag.TryGetValue(tag, out var found)
+            && _readByTag.TryGetValue(tag, out var reader)
+        )
+        {
+            eventType = found;
+            read = reader;
+            return true;
+        }
+
+        eventType = null!;
+        read = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Was this tag applied by the package's own framework seeds rather than by a consumer's
+    /// <see cref="EventTypeBindings.Add{T}"/>? The read path names the source in a failure, because
+    /// "look at the binding" is useless advice when the operator never wrote one.
+    /// </summary>
+    internal bool IsFrameworkDefaultTag(string tag)
+    {
+        ArgumentNullException.ThrowIfNull(tag);
+        return _defaultTags.Contains(tag);
+    }
+
+    /// <summary>
+    /// Every tag this table can read, as a sorted, quoted list for a failure message. Sorted because a
+    /// <see cref="FrozenDictionary{TKey,TValue}"/> has no enumeration order worth putting in a message an
+    /// operator may match on.
+    /// </summary>
+    internal string DescribeTags() =>
+        _tagByType.Count == 0
+            ? "none registered"
+            : string.Join(
+                ", ",
+                _tagByType
+                    .Values.Distinct()
+                    .Order(StringComparer.Ordinal)
+                    .Select(t => "\"" + t + "\"")
+            );
 
     /// <summary>
     /// The type a tag deserializes into — the read path's lookup. A miss is not an error: the read path
