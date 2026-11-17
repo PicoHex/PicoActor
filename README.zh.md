@@ -389,13 +389,18 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   在 `TypePrefix` 下，落在所有已注册**类型**前缀之外的名字（`unknown-<id>.jsonl`，宿主自己的分类）**按 id 可达**、按类型枚举不可见、
   不计入 `ForeignFormatFiles`、也不会触发整目录抛。前缀不含 `-`；同短名共用一个前缀。
 - **`SagaCompleted.Result` 是 `object?`，而序列化器根本写不出非 null 的值**（生成的 writer 只写出成员名、
-  不写值）。`null`——框架今天唯一产生的形状——能正常往返；其它任何值都会当场失败，且一个字节也不会写入。
+  不写值）。`null`——**持久化存储**今天唯一接受的形状——能正常往返；其它任何值都会当场失败，且一个字节也
+  不会写入。带非 null 结果的 `MarkComplete(result)` 无法持久化：终态批次直接抛，什么都不会写入。
   持久化存储里请让 `Result` 保持 `null`。
 - **注册规则。** 绑定挂在 options 实例上——在构造 store **之前**调用
   `options.EventTypeBindings.Add<T>(tag)`：构造函数会**冻结并拷贝**这张表，之后的 `Add` 会抛异常，而不是被
-  静默忽略。一个类型只有一个 tag，一个 tag 只命名一个类型（同一对重复调用是 no-op；tag 非空且不含引号、
-  反斜杠或控制字符）。会把框架事件一并覆盖的基类（例如 `IDomainEvent` 本身）在构造时被拒绝——否则它们既
-  是普通事件又是 bound 事件；可赋值给 `TEventBase` 的 bound 类型同样被拒绝。
+  静默忽略。一个类型只有一个 tag，一个 tag 只命名一个类型（同一对重复调用是 no-op，但仅限**冻结前**；
+  tag 非空且不含引号、反斜杠或控制字符）。会把框架事件一并覆盖的基类（例如 `IDomainEvent` 本身）在构造
+  时被拒绝——否则它们既是普通事件又是 bound 事件；可赋值给 `TEventBase` 的 bound 类型同样被拒绝。`with`
+  复制的是**引用**：副本与原件共用同一张表（含冻结状态），因此副本上的 `Add` 会抛，且消息点名「另一个」
+  store——要独立的一张表请用 `new JsonlEventStoreOptions()`。
+- **绑定的 tag 必须与 `TEventBase` 上每一个 `[PicoDerivedType]` 判别值都不同。** sniffer 优先，所以一旦
+  撞上，基类的行会被读成 bound 类型——不抛异常、不警告，完全静默。
 
 ### Idle Passivation (opt-in)（空闲钝化，可选）
 
