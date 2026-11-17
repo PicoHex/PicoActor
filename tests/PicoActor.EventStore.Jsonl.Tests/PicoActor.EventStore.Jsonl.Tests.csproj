@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- CS0436: the Mediator bridge generator emits a dispatcher per assembly; a consumer assembly
+         and Abs both see one, and each caller correctly uses its own copy. -->
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="TUnit" />
+    <!-- PicoJetson: this is a REGISTRATION CONSUMER. The store's serializer is generated in the
+         assembly that declares the [PicoDerivedType] base, so the test events declared here need the
+         generator in this compilation. -->
+    <PackageReference Include="PicoJetson" />
+    <ProjectReference Include="..\..\src\PicoActor.EventStore.Jsonl\PicoActor.EventStore.Jsonl.csproj" />
+    <ProjectReference Include="..\PicoActor.TestSupport\PicoActor.TestSupport.csproj" />
+  </ItemGroup>
+</Project>

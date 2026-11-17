@@ -22,6 +22,17 @@ public abstract class EventLogReaderConformanceBase
     /// </summary>
     protected abstract (IEventStore Store, IEventLogReader Reader) Create();
 
+    /// <summary>
+    /// Append blank lines to an existing stream WITHOUT appending an event, when the store's medium
+    /// has lines at all (a file). The default does nothing: a store whose streams are lists cannot
+    /// hold a blank line, and the blank-line cases then assert only that the stream is intact.
+    /// <para>
+    /// The three shapes every reader must ignore are trailing ASCII spaces, a lone tab and a bare
+    /// carriage return — all newline-TERMINATED, so the file is not torn, only wasteful.
+    /// </para>
+    /// </summary>
+    protected virtual Task InjectBlankLinesAsync(Guid actorId) => Task.CompletedTask;
+
     /// <summary>Append <paramref name="count"/> events — versions 1..count — to a fresh stream.</summary>
     private static async Task<Guid> SeedAsync(IEventStore store, int count)
     {
@@ -243,5 +254,57 @@ public abstract class EventLogReaderConformanceBase
         await Assert
             .That(async () => await cursor.MoveNextAsync(cancelled.Token))
             .Throws<OperationCanceledException>();
+    }
+
+    [Test, Timeout(15000)]
+    public async Task BlankLines_NeitherCountedNorPositionedOver(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var (store, reader) = Create();
+        var id = await SeedAsync(store, Seeded);
+
+        // Blank lines are not events: the count, the loader and the cursor must all skip them, and
+        // the cursor's byte positioning must not land ON one (positioning counts events, not lines).
+        await InjectBlankLinesAsync(id);
+
+        await Assert.That(await reader.GetVersionAsync(id)).IsEqualTo((ulong)Seeded);
+        await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(Seeded);
+
+        await using var cursor = await reader.OpenAsync(id, 2);
+
+        await Assert.That(cursor.End).IsEqualTo(3UL);
+
+        var versions = new List<ulong>();
+        while (await cursor.MoveNextAsync())
+            versions.Add(cursor.CurrentVersion);
+
+        await Assert.That(versions.SequenceEqual([2UL, 3UL])).IsTrue();
+    }
+
+    [Test, Timeout(15000)]
+    public async Task BlankLines_AfterLastEvent_AreTerminatedAndKeepTheStreamAppendable(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        var (store, reader) = Create();
+        var id = await SeedAsync(store, Seeded);
+
+        // A trailing blank line is TERMINATED — it is not the torn tail a crash leaves — so the
+        // stream still ends at version Seeded, a cursor past the end is empty, and the next append
+        // is accepted at that version.
+        await InjectBlankLinesAsync(id);
+
+        await using (var past = await reader.OpenAsync(id, Seeded + 1))
+        {
+            await Assert.That(past.End).IsEqualTo((ulong)Seeded);
+            await Assert.That(await past.MoveNextAsync()).IsFalse();
+        }
+
+        await Assert
+            .That(await store.AppendAsync(id, Seeded, [new SSnapshotAdded(Seeded + 1)]))
+            .IsEqualTo((ulong)Seeded + 1);
     }
 }

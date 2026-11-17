@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageId>PicoActor.EventStore.Jsonl</PackageId>
+    <Description>Durable JSONL event store for PicoActor: one file per aggregate, append-only with optimistic concurrency, tail-only rebuild through the cursor read port, atomic snapshot sidecars. AOT-safe, source-generated serialization (PicoJetson), single-process.</Description>
+    <PackageTags>PicoHex;PicoActor;AOT;JSONL event store;Durable event store;Event sourcing</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PicoActor.EventStore.Jsonl.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- PicoJetson: deliberately NO PrivateAssets. Its generator and build/PicoJetson.targets must
+         flow to the CONSUMER, because that is where [PicoDerivedType] registration happens — the
+         generator ignores type parameters, so a Serialize<TEventBase> call in this package generates
+         nothing. PrivateAssets would make "registration in the consumer assembly" false. -->
+    <PackageReference Include="PicoJetson" />
+    <!-- PicoLog.Abs: Build-private (the repo convention). It ships an analyzers/dotnet/cs dll and a
+         props file that no JSONL consumer needs; the logger seam itself is compiled in. -->
+    <PackageReference Include="PicoLog.Abs" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
+    <!-- PrivateAssets=Build: let Abs's buildTransitive analyzer flow downstream
+         (nuspec edge would otherwise become exclude="Build,Analyzers") -->
+    <ProjectReference Include="..\PicoActor.Abs\PicoActor.Abs.csproj" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
+    <PackageReference Include="PicoActor.Abs" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+</Project>
