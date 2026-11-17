@@ -20,7 +20,7 @@ internal enum StreamNameKind
     /// because a directory of one format with many stream types is the NORMAL case, not a mixture.
     /// <para>
     /// Produced by the ENUMERATION side (a <see cref="ConfiguredMatch"/> whose type differs from the
-    /// query), never by <see cref="JsonlNames.Classify"/>, which knows nothing about the query.
+    /// query), never by <c>JsonlNames.Classify</c>, which knows nothing about the query.
     /// </para>
     /// </summary>
     ConfiguredOtherType,
@@ -195,6 +195,6 @@ internal static class JsonlNames
     /// </summary>
     internal static string Describe(FileNameFormat format) =>
         format == FileNameFormat.TypePrefix
-            ? "TypePrefix (<type>-<id>.jsonl)"
-            : "IdOnly (<id>.jsonl)";
+            ? "TypePrefix (<type>-<id:D>.jsonl)"
+            : "IdOnly (<id:D>.jsonl)";
 }

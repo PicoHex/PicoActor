@@ -591,6 +591,20 @@ public sealed class FileNameFormatTests
             .That(error.Message.Contains(Path.GetFileName(otherPath), StringComparison.Ordinal))
             .IsTrue();
 
+        // The remedy names the ONE assignment that adopts the directory as it is: a TypePrefix store
+        // reading a file of the other layout is an IdOnly store that was configured as the wrong format.
+        await Assert
+            .That(error.Message.Contains("= FileNameFormat.IdOnly", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(
+                error.Message.Contains(
+                    "move the files that do not belong to this store",
+                    StringComparison.Ordinal
+                )
+            )
+            .IsTrue();
+
         // Refused BEFORE a byte was written: the configured stream is untouched.
         await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
     }
@@ -979,17 +993,31 @@ public sealed class FileNameFormatTests
         await Assert.That(message.Contains("configured: 0", StringComparison.Ordinal)).IsTrue();
         await Assert.That(message.Contains("other-format: 1", StringComparison.Ordinal)).IsTrue();
 
-        // ... and both formats, spelled so the operator knows which one to migrate to.
+        // ... and both formats, spelled so the operator knows which one to migrate to. The token is the
+        // FILE NAME GRAMMAR, <id:D> included: "<id>" alone is ambiguous about the guid format.
         await Assert
-            .That(message.Contains("IdOnly (<id>.jsonl)", StringComparison.Ordinal))
+            .That(message.Contains("IdOnly (<id:D>.jsonl)", StringComparison.Ordinal))
             .IsTrue();
         await Assert
-            .That(message.Contains("TypePrefix (<type>-<id>.jsonl)", StringComparison.Ordinal))
+            .That(message.Contains("TypePrefix (<type>-<id:D>.jsonl)", StringComparison.Ordinal))
             .IsTrue();
 
-        // ... plus the remedy.
+        // ... plus the remedy, in the two shapes an operator can act on: migrate the directory (or move
+        // the files that are not this store's), or flip the option — spelled as an assignment to the
+        // enum VALUE, which is what a config file needs.
         await Assert
-            .That(message.Contains("Migrate the directory or set", StringComparison.Ordinal))
+            .That(message.Contains("Migrate the directory,", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(
+                message.Contains(
+                    "move the files that do not belong to this store",
+                    StringComparison.Ordinal
+                )
+            )
+            .IsTrue();
+        await Assert
+            .That(message.Contains("= FileNameFormat.TypePrefix", StringComparison.Ordinal))
             .IsTrue();
 
         // The rule holds for ANY scan, including the one a TypePrefix store performs at CONSTRUCTION to
@@ -1255,6 +1283,384 @@ public sealed class FileNameFormatTests
         await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(3UL);
     }
 
+    // ── B: the miss path — one pass, one latch, one count ───────────────────────────────────────
+
+    /// <summary>
+    /// A TypePrefix MISS costs ONE directory pass, whatever the concurrency. The pass is the only way to
+    /// learn a prefix, so a host that peeks a thousand unknown ids would otherwise sweep its whole
+    /// directory a thousand times — seconds of IO to answer "no such stream". Eight readers of an id
+    /// nobody has must resolve against ONE pass, not eight.
+    /// </summary>
+    [Test, Timeout(60000)]
+    public async Task B1_TypePrefix_ConcurrentMisses_ShareOnePass(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var known = Guid.NewGuid();
+        await new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix()).AppendAsync(
+            known,
+            0,
+            [new SSnapshotAdded(1)]
+        );
+
+        // One pass has already been paid, at construction: the count of interest is the DELTA.
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var missing = Guid.NewGuid();
+        var before = store.DirectoryScans;
+
+        var readers = Enumerable
+            .Range(0, 8)
+            .Select(_ => Task.Run(async () => (await store.LoadAsync(missing)).Count))
+            .ToArray();
+
+        foreach (var count in await Task.WhenAll(readers))
+            await Assert.That(count).IsEqualTo(0);
+
+        await Assert.That(store.DirectoryScans).IsEqualTo(before + 1);
+    }
+
+    /// <summary>
+    /// The SECOND observation of the same absent id does not look at the directory at all: the miss is
+    /// remembered, not re-derived. A negative cache is bounded on purpose — it is a fact about THIS
+    /// instance's map, worthless the moment that map grows.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B1b_TypePrefix_RepeatedMiss_ScansOnce(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var missing = Guid.NewGuid();
+        var before = store.DirectoryScans;
+
+        await Assert.That(await store.LoadAsync(missing)).IsEmpty();
+        await Assert.That(store.DirectoryScans).IsEqualTo(before + 1);
+
+        // Two more observations, through two different members: neither pays a pass.
+        await Assert.That(await store.LoadAsync(missing)).IsEmpty();
+        await Assert.That(await store.GetVersionAsync(missing)).IsEqualTo(0UL);
+        await Assert.That(store.DirectoryScans).IsEqualTo(before + 1);
+    }
+
+    /// <summary>
+    /// A remembered miss is CLEARED by a successful append: the append learns the id's prefix, so an id
+    /// that was absent a moment ago resolves again — and the version read back is the one just written.
+    /// An entry that outlived the append would answer "no stream" for a stream that exists.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B1c_TypePrefix_AppendClearsTheRememberedMiss(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var id = Guid.NewGuid();
+
+        await Assert.That(await store.LoadAsync(id)).IsEmpty();
+        var afterMiss = store.DirectoryScans;
+
+        await Assert
+            .That(await store.AppendAsync(id, 0, [new SSnapshotAdded(1), new SSnapshotAdded(2)]))
+            .IsEqualTo(2UL);
+
+        // The map hit answered both: the append learned the prefix, so no pass was needed to read back
+        // what was just written.
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(2UL);
+        await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(2);
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss);
+
+        // ... and the clear is WHOLESALE, which is what keeps a remembered absence from outliving the map
+        // it was recorded against. The next probe of an id this store still does not have must RE-READ the
+        // directory: a stream written by another process while the id was remembered would otherwise stay
+        // invisible for as long as the entry lived.
+        var absent = Guid.NewGuid();
+        await Assert.That(await store.LoadAsync(absent)).IsEmpty();
+        var afterAbsence = store.DirectoryScans;
+
+        // Remembered: the second probe answers without touching the directory...
+        await Assert.That(await store.LoadAsync(absent)).IsEmpty();
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterAbsence);
+
+        // ... until an append GROWS the map, which invalidates every entry at once. (That append is a
+        // miss of its own, so the pass it pays is excluded: the count below is the NEXT probe's.)
+        await Assert
+            .That(await store.AppendAsync(Guid.NewGuid(), 0, [new SSnapshotAdded(4)]))
+            .IsEqualTo(1UL);
+        var afterAppend = store.DirectoryScans;
+
+        await Assert.That(await store.LoadAsync(absent)).IsEmpty();
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterAppend + 1);
+        await Assert
+            .That(File.Exists(Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl")))
+            .IsTrue();
+    }
+
+    /// <summary>
+    /// The append LEARNS through the same primitive a scan uses, so a rival prefix that appears between
+    /// the path resolution and the write is REGISTERED as a conflict — and the next append for that id
+    /// is refused instead of silently extending one of two coexisting histories.
+    /// <para>
+    /// The window is reached DETERMINISTICALLY, without threads: the batch is the seam. Reading its
+    /// SECOND element happens inside <c>Encode</c> — after the path was resolved, before the prefix is
+    /// learned — so the hook there stands in for an external writer that claims a prefix for the same id
+    /// in exactly that window.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B2_Append_LearnsThroughLearnPrefix_RegistersRivalPrefix(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var id = Guid.NewGuid();
+        var rivalPath = Path.Combine(temp.Root, $"Rival-{id:D}.jsonl");
+
+        var batch = new PrefixRivalBatch(
+            [new SSnapshotAdded(1), new SSnapshotAdded(2)],
+            () =>
+            {
+                File.WriteAllText(rivalPath, "{\"$type\":\"ss-added\",\"Delta\":7}\n");
+                store.LearnPrefix(id, "Rival");
+            }
+        );
+
+        await Assert.That(await store.AppendAsync(id, 0, batch)).IsEqualTo(2UL);
+
+        // Two names for one id are two histories: the refusal names BOTH, and it costs no byte.
+        var error = await CaptureAppendErrorAsync(store, id, 2, new SSnapshotAdded(3));
+        await Assert.That(error is InvalidOperationException).IsTrue();
+        await Assert
+            .That(error!.Message.Contains(Path.GetFileName(rivalPath), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(
+                error.Message.Contains(
+                    $"{nameof(SSnapshotAdded)}-{id:D}.jsonl",
+                    StringComparison.Ordinal
+                )
+            )
+            .IsTrue();
+    }
+
+    /// <summary>
+    /// An IO failure during the lazy pass is LATCHED like a misconfiguration: raised again on the next
+    /// observation instead of decaying into "empty aggregate", and paid for exactly once. A store root
+    /// that is a FILE is the cheapest reproducible IO failure — the store can neither enumerate it nor
+    /// write beside it, and every observation must say so.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B3_LazyPass_LatchesIoFailure(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var rootFile = Path.Combine(temp.Root, "store");
+        await File.WriteAllTextAsync(rootFile, "not a directory", cancellationToken);
+
+        var store = new JsonlEventStore<ConformanceEvent>(rootFile);
+        var first = await CaptureAsync(async () => await store.LoadAsync(Guid.NewGuid()));
+
+        await Assert.That(first is IOException).IsTrue();
+        await Assert.That(store.DirectoryScans).IsEqualTo(1L);
+
+        // The SAME failure, from a DIFFERENT member, and no second pass.
+        var second = await CaptureAsync(async () => await store.GetVersionAsync(Guid.NewGuid()));
+        await Assert.That(second is IOException).IsTrue();
+        await Assert.That(store.DirectoryScans).IsEqualTo(1L);
+
+        // ... and an ENUMERATION says the same thing instead of "no aggregates yet": a root that exists
+        // as a file is a broken store, not an empty one.
+        var listing = await CaptureAsync(async () =>
+            await store.ListAggregateIdsAsync(nameof(SSnapshotAdded))
+        );
+        await Assert.That(listing is IOException).IsTrue();
+    }
+
+    /// <summary>
+    /// The IdOnly mixed-directory guard reads the directory, so it counts as a pass: one append in a
+    /// directory that holds the other layout costs exactly ONE scan, and <see cref="JsonlEventStore{TEventBase}.DirectoryScans"/>
+    /// is the only honest way to see that cost.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B4_MixedDirectory_AppendCountsItsScan(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        var id = Guid.NewGuid();
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        // Seed the monotonic gate: one pass sees a stream of the OTHER layout...
+        await File.WriteAllTextAsync(
+            Path.Combine(temp.Root, $"Other-{Guid.NewGuid():D}.jsonl"),
+            "{\"$type\":\"ss-added\",\"Delta\":5}\n",
+            cancellationToken
+        );
+        await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+        await Assert.That(store.ForeignFormatFiles).IsEqualTo(1L);
+
+        // ... after which EVERY append pays the guard's pass, and pays it visibly.
+        var before = store.DirectoryScans;
+        await Assert.That(await store.AppendAsync(id, 1, [new SSnapshotAdded(2)])).IsEqualTo(2UL);
+        await Assert.That(store.DirectoryScans).IsEqualTo(before + 1);
+    }
+
+    /// <summary>
+    /// The whole-directory rule counts HISTORIES, not names. A directory whose only stream-shaped names
+    /// are ZERO-LENGTH files in the other layout holds no history at all — a failed append leaves such
+    /// leftovers — so it is an empty store, not a misconfiguration. Counting names would make the lazy
+    /// pass throw and latch, and every later observation of that (empty) store would raise it.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B5_ZeroLengthOtherFormatOnly_IsNotMisconfigured(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        await File.WriteAllBytesAsync(
+            Path.Combine(temp.Root, $"A-{id:D}.jsonl"),
+            [],
+            cancellationToken
+        );
+        await File.WriteAllBytesAsync(
+            Path.Combine(temp.Root, $"B-{id:D}.jsonl"),
+            [],
+            cancellationToken
+        );
+
+        // The FIRST observation of a stream that is not there runs the lazy pass: it must not throw.
+        var reader = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        await Assert.That(await reader.LoadAsync(Guid.NewGuid())).IsEmpty();
+        await Assert.That(reader.DirectoryScans).IsEqualTo(1L);
+        await Assert.That(reader.ForeignFormatFiles).IsEqualTo(2L);
+
+        // ... and the enumeration answers "no aggregates yet", in silence.
+        var enumerator = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        await Assert.That(await enumerator.ListAggregateIdsAsync(nameof(SSnapshotAdded))).IsEmpty();
+    }
+
+    /// <summary>
+    /// <see cref="JsonlEventStore{TEventBase}.FilesOpened"/> measures what a read COSTS, so it counts
+    /// opens that SUCCEEDED: a handle another process refuses to share is not an open, and counting it
+    /// would make an enumeration look more expensive than it is. The counter answers "one open per
+    /// stream", not "one attempt per stream".
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B6_FilesOpened_CountsOnlySuccessfulOpens(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        var id = Guid.NewGuid();
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        // A WRITE handle is not an open for this counter's purpose.
+        await Assert.That(store.FilesOpened).IsEqualTo(0L);
+
+        var path = Path.Combine(temp.Root, id.ToString("D") + ".jsonl");
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var refused = await CaptureAsync(async () => await store.GetVersionAsync(id));
+            await Assert.That(refused is IOException or UnauthorizedAccessException).IsTrue();
+            await Assert.That(store.FilesOpened).IsEqualTo(0L);
+        }
+
+        // ... and the open that DOES succeed counts exactly one.
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
+        await Assert.That(store.FilesOpened).IsEqualTo(1L);
+    }
+
+    /// <summary>
+    /// A stream NAME that exists as a DIRECTORY is not a missing stream: the path is occupied, and both
+    /// halves of the store — the read that would report "empty aggregate" and the append that would
+    /// throw a bare sharing error — must name the real problem and say what to do about it.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B7_StreamNameOccupiedByDirectory_IsDiagnosed(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        Directory.CreateDirectory(Path.Combine(temp.Root, id.ToString("D") + ".jsonl"));
+
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+
+        var read = await CaptureAsync(async () => await store.LoadAsync(id));
+        await Assert.That(read is InvalidOperationException).IsTrue();
+        await Assert
+            .That(
+                read!.Message.Contains(
+                    "occupied by a directory",
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            .IsTrue();
+
+        var append = await CaptureAppendErrorAsync(store, id, 0, new SSnapshotAdded(1));
+        await Assert.That(append is InvalidOperationException).IsTrue();
+        await Assert
+            .That(
+                append!.Message.Contains(
+                    "occupied by a directory",
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            .IsTrue();
+    }
+
+    /// <summary>
+    /// A read that resolves through a CONFLICTED id still answers — the read path is not a guard — but it
+    /// says so once, because an operator reading a stream that two files claim needs to see it in the log
+    /// and not only in the append that will eventually refuse.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B8_ReadOfConflictedId_WarnsOnce(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var id = Guid.NewGuid();
+        var first = Path.Combine(temp.Root, $"A-{id:D}.jsonl");
+        var second = Path.Combine(temp.Root, $"B-{id:D}.jsonl");
+        await File.WriteAllTextAsync(
+            first,
+            "{\"$type\":\"ss-added\",\"Delta\":7}\n",
+            cancellationToken
+        );
+        await File.WriteAllTextAsync(
+            second,
+            "{\"$type\":\"ss-added\",\"Delta\":8}\n",
+            cancellationToken
+        );
+
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions
+            {
+                FileNameFormat = FileNameFormat.TypePrefix,
+                Logger = logger,
+            }
+        );
+
+        // The read ANSWERS: one history is still readable, and the count is that file's.
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
+        await Assert.That(logger.Contains($"B-{id:D}.jsonl")).IsTrue();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────────────────────
 
     private static JsonlEventStoreOptions TypePrefix() =>
@@ -1310,5 +1716,35 @@ public sealed class FileNameFormatTests
         var end = cursor.End;
         await cursor.DisposeAsync();
         return (end, events);
+    }
+
+    /// <summary>
+    /// An <see cref="IReadOnlyList{T}"/> of events whose SECOND element is produced once with a side
+    /// effect. An append reads its batch twice — once for the type name, once to encode it — and the
+    /// encode happens after the path is resolved and before the prefix is learned: this is that window,
+    /// with no threads and no sleeping.
+    /// </summary>
+    private sealed class PrefixRivalBatch(IReadOnlyList<IDomainEvent> events, Action onSecondRead)
+        : IReadOnlyList<IDomainEvent>
+    {
+        private int _fired;
+
+        public IDomainEvent this[int index]
+        {
+            get
+            {
+                if (index > 0 && Interlocked.Exchange(ref _fired, 1) == 0)
+                    onSecondRead();
+
+                return events[index];
+            }
+        }
+
+        public int Count => events.Count;
+
+        public IEnumerator<IDomainEvent> GetEnumerator() => events.GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
     }
 }

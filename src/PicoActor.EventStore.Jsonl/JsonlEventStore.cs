@@ -17,6 +17,44 @@ namespace PicoActor.EventStore.Jsonl;
 /// and a concurrent write to the same stream fails with an <see cref="IOException"/> (file sharing) —
 /// that is the documented outcome, not something retried.
 /// </para>
+/// <para>
+/// THE EXCEPTION SURFACE. Beyond its own argument errors, this store raises
+/// <see cref="InvalidOperationException"/> for the three shapes it must never merge or silently ignore:
+/// </para>
+/// <list type="bullet">
+/// <item>
+/// A directory that is ENTIRELY in the other naming format — no stream of the configured layout in it.
+/// Every path that classifies the directory raises it: <see cref="ListAggregateIdsAsync"/>, the
+/// construction of a <see cref="FileNameFormat.TypePrefix"/> store, and the FIRST observation of a
+/// stream an <see cref="FileNameFormat.IdOnly"/> store does not have (<see cref="LoadAsync"/>,
+/// <see cref="GetVersionAsync"/>, <see cref="OpenAsync"/>, <see cref="PeekFirstAsync"/>, an empty batch
+/// and an append of a new id). Enumerating such a directory would report an empty system, which is how a
+/// whole history disappears from view.
+/// </item>
+/// <item>
+/// One aggregate id with a NON-EMPTY stream in BOTH layouts: two histories, and no append can tell which
+/// one it belongs to.
+/// </item>
+/// <item>
+/// One aggregate id under SEVERAL prefixes of the configured layout (a
+/// <see cref="FileNameFormat.TypePrefix"/> directory): the prefix is fixed at creation, so the same
+/// ambiguity applies.
+/// </item>
+/// </list>
+/// <para>
+/// The remedy is the same for all three and it is always stated in the message: migrate the directory to
+/// one layout, move the files that do not belong to this store out of it, or set
+/// <see cref="JsonlEventStoreOptions.FileNameFormat"/> to the layout the directory was WRITTEN with.
+/// Nothing is deleted, moved or merged on the caller's behalf.
+/// </para>
+/// <para>
+/// A root that cannot be READ is the fourth: the first pass that looks at it — the enumeration, the
+/// construction of a <see cref="FileNameFormat.TypePrefix"/> store, or the lazy pass a first absent
+/// stream triggers — raises <see cref="IOException"/> instead of answering "no events" (including when
+/// the root exists as a FILE), and an <see cref="UnauthorizedAccessException"/> stays an
+/// <see cref="UnauthorizedAccessException"/>. A lazy pass LATCHES it, so it costs one failed attempt,
+/// never one per call.
+/// </para>
 /// </summary>
 public sealed class JsonlEventStore<TEventBase>
     : IEventStore,
@@ -62,8 +100,17 @@ public sealed class JsonlEventStore<TEventBase>
     private long _directoryScans;
     private long _foreignFormatFiles;
 
+    // The ids a TypePrefix MISS already failed to resolve, so a host that probes streams it does not
+    // have pays ONE directory pass per unknown id instead of one per probe. BOUNDED and cleared
+    // wholesale: an entry is a fact about this instance's map, worthless the moment that map grows —
+    // and an unbounded set would be a leak in the one path a probe loop drives.
+    private const int MissingTypeCapacity = 4096;
+    private readonly HashSet<Guid> _missingTypes = new();
+
     // One lock, one state and one latched failure: the whole cost of the IdOnly lazy pass, which is
     // read on every observation of a stream that is not there and written at most once per instance.
+    // The SAME lock serializes a TypePrefix MISS — the other pass that must run at most once for a whole
+    // burst of concurrent readers. No instance is both formats, so the two never contend for it.
     private readonly object _lazyScanGate = new();
     private int _lazyScanState = LazyScanNotRun;
     private Exception? _lazyScanFailure;
@@ -153,6 +200,16 @@ public sealed class JsonlEventStore<TEventBase>
     /// cache update. A rejected append never changes the stream's content (a missing stream may be left
     /// as a zero-length file, which enumeration skips), and the cache is what makes the steady state
     /// O(1) per append instead of a rescan.
+    /// <para>
+    /// An append is also where a misconfigured root is diagnosed, because a host that only appends by id
+    /// never enumerates: a directory that is entirely in the other naming format raises
+    /// <see cref="InvalidOperationException"/> BEFORE a byte is written (otherwise the store would fork a
+    /// second history beside the file it cannot see). The same exception refuses the two ambiguous
+    /// shapes — an aggregate with a non-empty stream in both layouts, and an aggregate with several
+    /// prefixes — and a stream name occupied by a directory. The remedy is named in the message: migrate
+    /// the directory, move the files that do not belong to this store out of it, or set
+    /// <see cref="JsonlEventStoreOptions.FileNameFormat"/>.
+    /// </para>
     /// </remarks>
     public async ValueTask<ulong> AppendAsync(
         Guid actorId,
@@ -187,7 +244,12 @@ public sealed class JsonlEventStore<TEventBase>
             //    A TypePrefix miss has already paid for its own pass inside PathFor.
             var existing = PathFor(actorId);
             if (existing is null || !File.Exists(existing))
+            {
+                // A name occupied by a DIRECTORY is not an absent stream: appending would fail on the
+                // directory handle, so the refusal names the real obstacle before anything is created.
+                ThrowIfOccupiedByDirectory(existing);
                 ObserveMissingStream();
+            }
 
             // 4. A NEW id takes the name its first event gives it; an EXISTING stream keeps the prefix
             //    it was created with, whatever this batch's first event happens to be called.
@@ -260,9 +322,12 @@ public sealed class JsonlEventStore<TEventBase>
             entry.Seed(version, stream.Length);
 
             // The prefix is fixed at CREATION: the map learns it once the bytes are on disk, so an id
-            // that is later recreated keeps pointing at the file its first event named.
+            // that is later recreated keeps pointing at the file its first event named. It learns
+            // through the SAME primitive a classification pass uses, so a rival prefix that appeared
+            // while this append was encoding is REGISTERED as a conflict instead of being dropped —
+            // a silent TryAdd would leave two names for one id with the guard none the wiser.
             if (existing is null)
-                _typeById.TryAdd(actorId, typeName);
+                LearnPrefix(actorId, typeName);
 
             return version;
         }
@@ -324,13 +389,30 @@ public sealed class JsonlEventStore<TEventBase>
         // file, and it must not create one.
         if (path is null || !File.Exists(path))
         {
+            ThrowIfOccupiedByDirectory(path);
             ObserveMissingStream();
             return (0UL, 0L);
         }
 
-        using var stream = OpenRead(path);
-        var length = stream.Length;
-        return (ScanStream(stream, fromVersion: 1, path).Count, length);
+        FileStream stream;
+        try
+        {
+            stream = OpenRead(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // The file was there for the check above and gone for the open: an empty batch interrupted by
+            // a deletion is a MISSING stream, not a failure — the answer is the same one the check above
+            // gives, and an observation under IdOnly is where a misconfigured root is diagnosed.
+            ObserveMissingStream();
+            return (0UL, 0L);
+        }
+
+        using (stream)
+        {
+            var length = stream.Length;
+            return (ScanStream(stream, fromVersion: 1, path).Count, length);
+        }
     }
 
     /// <inheritdoc/>
@@ -338,6 +420,13 @@ public sealed class JsonlEventStore<TEventBase>
     /// Fully materialized on purpose: the contract permits a lazy view, and this store chooses eager so
     /// a caller may index the list after the store's handle is closed. A rebuild that must not pay for
     /// the head uses <see cref="OpenAsync"/> instead.
+    /// <para>
+    /// A load is also an OBSERVATION of a stream that is not there, so under
+    /// <see cref="FileNameFormat.IdOnly"/> it is the first call that can diagnose a misconfigured root:
+    /// a directory entirely in the other naming format raises <see cref="InvalidOperationException"/>
+    /// instead of answering "no events" (and an unreadable root raises <see cref="IOException"/>). The
+    /// failure is latched — one directory pass in total, then the same exception on every later call.
+    /// </para>
     /// </remarks>
     public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     {
@@ -368,6 +457,13 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// "No first event" has three causes and this member returns null for all of them: an absent stream,
+    /// an empty file and a first line that is not a deserializable event. An absent stream is an
+    /// OBSERVATION, so under <see cref="FileNameFormat.IdOnly"/> a peek of an id the store does not have
+    /// can raise the same <see cref="InvalidOperationException"/> a misconfigured root raises everywhere
+    /// else — once, latched — and an unreadable root raises <see cref="IOException"/>.
+    /// </remarks>
     public async ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
     {
         var path = ExistingPathFor(actorId);
@@ -413,6 +509,12 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Version 0 means "no events in this layout", not "the store is fine": an absent stream is an
+    /// observation, so under <see cref="FileNameFormat.IdOnly"/> this call can raise the
+    /// misconfigured-root <see cref="InvalidOperationException"/> (latched) and an unreadable root raises
+    /// <see cref="IOException"/>. An argument error is never hidden behind an observation.
+    /// </remarks>
     public ValueTask<ulong> GetVersionAsync(Guid actorId, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -426,6 +528,14 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The version argument is validated FIRST: <c>fromVersion == 0</c> is an
+    /// <see cref="ArgumentOutOfRangeException"/> whether or not the aggregate exists. Past that, an absent
+    /// stream yields an empty cursor — but it is an observation, so under
+    /// <see cref="FileNameFormat.IdOnly"/> it can raise the misconfigured-root
+    /// <see cref="InvalidOperationException"/> (latched) and an unreadable root raises
+    /// <see cref="IOException"/>.
+    /// </remarks>
     public ValueTask<IEventCursor> OpenAsync(
         Guid actorId,
         ulong fromVersion,
@@ -538,12 +648,29 @@ public sealed class JsonlEventStore<TEventBase>
     /// <remarks>
     /// Under <see cref="FileNameFormat.IdOnly"/> the type is not in the name, so every stream is OPENED
     /// once to read its first event. Under <see cref="FileNameFormat.TypePrefix"/> the type IS the name:
-    /// the ids come from <see cref="JsonlNames.Classify"/> alone, so the enumeration opens NOTHING.
+    /// the ids come from <c>JsonlNames.Classify</c> alone, so the enumeration opens NOTHING.
     /// <para>
     /// One deviation follows from that, and it is deliberate: a stream whose first LINE is corrupt is
     /// enumerated under TypePrefix (its name is a valid stream name) and not under IdOnly (which has no
     /// other way to learn the type). The runtime peeks every id it is given, so recovery still filters
     /// it out.
+    /// </para>
+    /// <para>
+    /// The result is a SNAPSHOT of the moment it was taken: a stream created afterwards is missing from
+    /// it, and a stream deleted afterwards may still be in it (the classification pass reads the length
+    /// from directory metadata and never opens the files). Callers that must act on a current view read
+    /// again, per aggregate, through <see cref="LoadAsync"/> or <see cref="GetVersionAsync"/>.
+    /// </para>
+    /// <para>
+    /// This member owns the loudest case of the store's exception surface: a directory that is ENTIRELY
+    /// in the other naming format raises <see cref="InvalidOperationException"/> naming both layouts and
+    /// both counts, because enumerating it would report an empty system instead of a misconfigured one.
+    /// So does the directory of a <see cref="FileNameFormat.TypePrefix"/> store whose construction
+    /// already refused it, and so does the lazy pass a first absent stream triggers. An unreadable root
+    /// raises <see cref="IOException"/>. A ZERO-LENGTH file of the other layout is a leftover, not a
+    /// history, and does not make a directory misconfigured. The remedy is in the message: migrate the
+    /// directory, move the files that do not belong to this store out of it, or set
+    /// <see cref="JsonlEventStoreOptions.FileNameFormat"/> to the layout the directory was written with.
     /// </para>
     /// </remarks>
     public async ValueTask<IReadOnlyList<Guid>> ListAggregateIdsAsync(string firstEventType)
@@ -552,7 +679,15 @@ public sealed class JsonlEventStore<TEventBase>
 
         var result = new List<Guid>();
         if (!Directory.Exists(_root))
+        {
+            // A missing root is an empty store. A root that exists as a FILE is not — it is the same
+            // misconfiguration <c>ScanRoot</c> raises, so an enumeration answers the same way the first
+            // lazy pass would instead of reporting "no aggregates yet".
+            if (File.Exists(_root))
+                throw RootIsAFile(_root);
+
             return result;
+        }
 
         if (_options.FileNameFormat == FileNameFormat.TypePrefix)
             return ListTypePrefixedIds(firstEventType);
@@ -618,8 +753,16 @@ public sealed class JsonlEventStore<TEventBase>
     /// </summary>
     private FileStream OpenRead(string path)
     {
+        // Counted AFTER the handle exists: the counter measures what a read COSTS, and an open another
+        // process refused to share cost this store nothing but an exception.
+        var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete
+        );
         Interlocked.Increment(ref _filesOpened);
-        return new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return stream;
     }
 
     /// <summary>
@@ -639,10 +782,80 @@ public sealed class JsonlEventStore<TEventBase>
             return IdOnlyPathFor(actorId);
 
         if (_typeById.TryGetValue(actorId, out var type))
-            return PrefixedPathFor(actorId, type);
+            return KnownPathFor(actorId, type);
 
-        ScanTypeMap();
-        return _typeById.TryGetValue(actorId, out type) ? PrefixedPathFor(actorId, type) : null;
+        return ResolveTypeMiss(actorId);
+    }
+
+    /// <summary>
+    /// The path a RESOLVED prefix names, plus the one warning the read path owes: an id that two prefixes
+    /// claim is still readable (a read is not a guard), but an operator who only ever loads the stream
+    /// must not have to wait for a refused append to learn that a second history exists beside it.
+    /// </summary>
+    private string KnownPathFor(Guid actorId, string type)
+    {
+        if (_conflictingPrefixes.TryGetValue(actorId, out var conflicting))
+        {
+            string[] others;
+            lock (conflicting)
+                others = [.. conflicting];
+
+            _logger?.Warning(
+                $"Reading aggregate '{actorId:D}' through prefix '{type}': "
+                    + $"{others.Length + 1} stream names in '{_root}' claim this id — "
+                    + string.Join(", ", others.Select(path => "'" + path + "'"))
+                    + ". An append will be refused until one of them is archived."
+            );
+        }
+
+        return PrefixedPathFor(actorId, type);
+    }
+
+    /// <summary>
+    /// Resolve a <see cref="FileNameFormat.TypePrefix"/> MISS — one directory pass per unknown id, and one
+    /// pass for a whole BURST of them, because a probe loop over ids the store does not have is not a
+    /// reason to re-read the directory per probe.
+    /// <para>
+    /// TWO caches make that true: the double-check inside the gate (the common case — a concurrent reader
+    /// that arrived while the winner was scanning), and a bounded set of ids the map is known not to hold.
+    /// The negative entry is dropped wholesale whenever the map GROWS (a pass that learned something, or a
+    /// successful append of a new id): an absence recorded against an older map is not evidence about the
+    /// current one.
+    /// </para>
+    /// </summary>
+    private string? ResolveTypeMiss(Guid actorId)
+    {
+        lock (_lazyScanGate)
+        {
+            if (_typeById.TryGetValue(actorId, out var known))
+                return KnownPathFor(actorId, known);
+
+            if (_missingTypes.Contains(actorId))
+                return null;
+
+            ScanTypeMap();
+
+            if (_typeById.TryGetValue(actorId, out var type))
+                return KnownPathFor(actorId, type);
+
+            // Bounded on purpose: past the capacity the set is emptied rather than grown, because the
+            // cost it saves (one pass) is worth less than an unbounded allocation.
+            if (_missingTypes.Count >= MissingTypeCapacity)
+                _missingTypes.Clear();
+
+            _missingTypes.Add(actorId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Forget every remembered miss. Called under the same gate a miss takes, and whenever the map GROWS —
+    /// the one event that can turn a remembered absence into a stream that is there.
+    /// </summary>
+    private void ForgetMissingTypes()
+    {
+        lock (_lazyScanGate)
+            _missingTypes.Clear();
     }
 
     /// <summary>
@@ -676,8 +889,25 @@ public sealed class JsonlEventStore<TEventBase>
         if (path is not null && File.Exists(path))
             return path;
 
+        ThrowIfOccupiedByDirectory(path);
         ObserveMissingStream();
         return null;
+    }
+
+    /// <summary>
+    /// A stream NAME occupied by a DIRECTORY: the store can neither open it nor create it, and the honest
+    /// answer is not "this aggregate is empty" (the read path) or a bare sharing violation (the append
+    /// path) but the one sentence that says what is in the way. A null path is just a miss.
+    /// </summary>
+    private static void ThrowIfOccupiedByDirectory(string? path)
+    {
+        if (path is null || !Directory.Exists(path))
+            return;
+
+        throw new InvalidOperationException(
+            $"The stream path '{path}' is a directory: the name is occupied by a directory, so no stream "
+                + "file can be read or created there. Move or rename that directory, then retry."
+        );
     }
 
     /// <summary>
@@ -697,6 +927,14 @@ public sealed class JsonlEventStore<TEventBase>
     /// the directory is never re-scanned per operation.
     /// </para>
     /// </summary>
+    /// <exception cref="IOException">
+    /// The directory could not be read. LATCHED: the same failure is raised by every later observation
+    /// instead of decaying into "this aggregate is empty".
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The directory is entirely in the OTHER naming format — see
+    /// <see cref="MisconfiguredDirectory"/>.
+    /// </exception>
     private void ObserveMissingStream()
     {
         // TypePrefix resolves a miss with its own pass (construction, or PathFor), so the lazy pass is an
@@ -708,8 +946,10 @@ public sealed class JsonlEventStore<TEventBase>
         if (state == LazyScanNotRun)
             state = RunLazyScan();
 
+        // The ORIGINAL exception is re-raised, stack trace and all: an IOException stays an IOException
+        // and a misconfiguration keeps the message the operator has to act on.
         if (state == LazyScanFailed)
-            throw new InvalidOperationException(_lazyScanFailure!.Message, _lazyScanFailure);
+            ExceptionDispatchInfo.Capture(_lazyScanFailure!).Throw();
     }
 
     /// <summary>
@@ -730,9 +970,13 @@ public sealed class JsonlEventStore<TEventBase>
                 ScanRoot();
                 state = LazyScanDone;
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex)
+                when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
             {
-                // The whole-directory misconfiguration: remembered, never treated as "already scanned".
+                // The whole-directory misconfiguration AND an unreadable directory are remembered, never
+                // treated as "already scanned": a store whose root cannot be read must not start
+                // answering "empty aggregate" after one loud failure, and a miss that is retried per
+                // observation would pay the failing pass forever.
                 _lazyScanFailure = ex;
                 state = LazyScanFailed;
             }
@@ -792,11 +1036,21 @@ public sealed class JsonlEventStore<TEventBase>
 
         var root = new DirectoryInfo(_root);
         if (!root.Exists)
+        {
+            // A root that does not exist is an EMPTY store — a store that only reads must not create it.
+            // A root that exists as a FILE is not: nothing can be enumerated, opened or written there, so
+            // the pass raises the IO failure the enumeration would have raised. The lazy pass LATCHES it,
+            // which is what keeps a misconfigured root from costing one failing pass per observation.
+            if (File.Exists(_root))
+                throw RootIsAFile(_root);
+
             return [];
+        }
 
         var streams = new List<StreamEntry>();
         long configured = 0;
         long other = 0;
+        long otherNonEmpty = 0;
 
         foreach (var file in root.EnumerateFiles())
         {
@@ -832,7 +1086,13 @@ public sealed class JsonlEventStore<TEventBase>
                     break;
 
                 case StreamNameKind.OtherFormat:
+                    // Counted twice, and the two counts answer two different questions. By NAME for the
+                    // warning and the monotonic duplicate gate (every foreign entry is worth reporting),
+                    // by HISTORY for the whole-directory diagnosis below: a zero-length leftover in the
+                    // other layout holds no history at all, so a directory of leftovers is an EMPTY store.
                     other++;
+                    if (file.Length > 0)
+                        otherNonEmpty++;
                     break;
 
                 default:
@@ -853,11 +1113,25 @@ public sealed class JsonlEventStore<TEventBase>
             );
         }
 
-        if (configured == 0 && other > 0)
-            throw MisconfiguredDirectory(configured, other);
+        // HISTORIES, not names: a directory holding nothing but zero-length files of the other layout is
+        // not misconfigured, it is empty — and treating it as misconfigured would throw, latch and raise
+        // on every later observation of a store that has no history to lose.
+        if (configured == 0 && otherNonEmpty > 0)
+            throw MisconfiguredDirectory(configured, otherNonEmpty);
 
         return streams;
     }
+
+    /// <summary>
+    /// The root of a store that cannot have streams: the path exists, and it is a FILE. The IO failure is
+    /// the honest answer — the enumeration, the opens and the creates all fail on it — and it is the one
+    /// a caller can act on, unlike the empty enumeration a silent "not a directory" would produce.
+    /// </summary>
+    private static IOException RootIsAFile(string root) =>
+        new(
+            $"The store root '{root}' is a file, not a directory: no stream can be enumerated, opened or "
+                + "created there. Point the store at a directory."
+        );
 
     /// <summary>
     /// The loud outcome for a store pointed at a directory of the OTHER layout. Both formats are named,
@@ -870,8 +1144,10 @@ public sealed class JsonlEventStore<TEventBase>
                 + $"store reads {JsonlNames.Describe(_options.FileNameFormat)} names and found none, while "
                 + $"{other} file(s) are named for "
                 + $"{JsonlNames.Describe(JsonlNames.Opposite(_options.FileNameFormat))}. Enumerating it "
-                + "would report an empty system instead of a misconfigured one. Migrate the directory or "
-                + $"set '{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.FileNameFormat)}'."
+                + "would report an empty system instead of a misconfigured one. Migrate the directory, or "
+                + "move the files that do not belong to this store out of it, or set "
+                + $"'{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.FileNameFormat)} = "
+                + $"FileNameFormat.{JsonlNames.Opposite(_options.FileNameFormat)}'."
         );
 
     /// <summary>
@@ -880,10 +1156,17 @@ public sealed class JsonlEventStore<TEventBase>
     /// coexisting prefixes for one id are two histories, so an append for that id must refuse instead of
     /// extending whichever name the map happened to learn first.
     /// </summary>
-    private void LearnPrefix(Guid id, string type)
+    internal void LearnPrefix(Guid id, string type)
     {
         if (_typeById.TryAdd(id, type))
+        {
+            // The map GREW, and that is the one event that can turn a remembered absence into a stream
+            // that is there: a pass that learns any prefix saw a file the absences did not. Clearing
+            // wholesale (rather than per id) is what keeps a negative entry BOUNDED — it can never
+            // outlive the map it was recorded against.
+            ForgetMissingTypes();
             return;
+        }
 
         if (!_typeById.TryGetValue(id, out var known))
             return;
@@ -924,7 +1207,7 @@ public sealed class JsonlEventStore<TEventBase>
             //    never gated: a mixed directory cannot grow a second history through this store.
             var otherPath = IdOnlyPathFor(actorId);
             if (new FileInfo(otherPath) is { Exists: true, Length: > 0 })
-                throw MixedLayout(actorId, streamPath, otherPath);
+                throw MixedLayout(actorId, streamPath, otherPath, _options.FileNameFormat);
 
             return;
         }
@@ -952,7 +1235,7 @@ public sealed class JsonlEventStore<TEventBase>
         // The pass returned NON-EMPTY names only, so the single candidate is a second history for this
         // id and the append is refused.
         if (candidates.Count == 1)
-            throw MixedLayout(actorId, streamPath, candidates[0]);
+            throw MixedLayout(actorId, streamPath, candidates[0], _options.FileNameFormat);
     }
 
     /// <summary>
@@ -989,6 +1272,10 @@ public sealed class JsonlEventStore<TEventBase>
     /// </summary>
     private List<string> OtherLayoutPathsFor(Guid actorId)
     {
+        // This is a directory pass like any other, and it is the only one an append in a MIXED directory
+        // pays: leaving it uncounted would hide the exact cost the guard exists to make visible.
+        Interlocked.Increment(ref _directoryScans);
+
         var matches = new List<string>();
 
         var root = new DirectoryInfo(_root);
@@ -1017,13 +1304,16 @@ public sealed class JsonlEventStore<TEventBase>
     private static InvalidOperationException MixedLayout(
         Guid actorId,
         string streamPath,
-        string otherPath
+        string otherPath,
+        FileNameFormat configured
     ) =>
         new(
             $"Aggregate '{actorId:D}' already has a non-empty stream in the OTHER naming format: "
                 + $"'{otherPath}'. This append targets '{streamPath}'. The two layouts are never merged, "
-                + "so one of the two histories would be lost. Migrate the directory or set "
-                + $"'{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.FileNameFormat)}'."
+                + "so one of the two histories would be lost. Migrate the directory, move the files that "
+                + "do not belong to this store out of it, or set "
+                + $"'{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.FileNameFormat)} = "
+                + $"FileNameFormat.{JsonlNames.Opposite(configured)}'."
         );
 
     /// <summary>

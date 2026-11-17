@@ -2,8 +2,9 @@ namespace PicoActor.EventStore.Jsonl;
 
 /// <summary>
 /// How a stream file is NAMED in the store's root directory. The content format is identical in both
-/// modes — only the file name differs — so an existing directory keeps working, and a mixed directory
-/// is diagnosed rather than merged.
+/// modes — only the file name differs — so every directory must be read with the layout it was WRITTEN
+/// with: a mixed directory is diagnosed rather than merged, and a directory of the other layout raises
+/// instead of enumerating as empty.
 /// </summary>
 public enum FileNameFormat
 {
