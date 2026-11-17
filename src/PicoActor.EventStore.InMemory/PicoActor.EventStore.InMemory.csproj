@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageId>PicoActor.EventStore.InMemory</PackageId>
+    <Description>In-memory event store for PicoActor: thread-safe, per-actor serialized, with snapshots and aggregate enumeration. Development, testing and single-process production.</Description>
+    <PackageTags>PicoHex;PicoActor;AOT;In-memory event store</PackageTags>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
+    <!-- PrivateAssets=Build: let Abs's buildTransitive analyzer flow downstream
+         (nuspec edge would otherwise become exclude="Build,Analyzers") -->
+    <ProjectReference Include="..\PicoActor.Abs\PicoActor.Abs.csproj" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
+    <PackageReference Include="PicoActor.Abs" PrivateAssets="Build" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+</Project>

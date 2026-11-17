@@ -1,3 +1,5 @@
+using PicoActor.EventStore.InMemory;
+
 namespace PicoActor;
 
 /// <summary>PicoDI registration extensions for PicoActor.</summary>

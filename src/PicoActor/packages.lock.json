@@ -69,6 +69,12 @@
           "PicoMediator.Abs": "[2026.11.*, )"
         }
       },
+      "picoactor.eventstore.inmemory": {
+        "type": "Project",
+        "dependencies": {
+          "PicoActor.Abs": "[0.0.0-dev, )"
+        }
+      },
       "PicoMediator": {
         "type": "CentralTransitive",
         "requested": "[2026.11.*, )",

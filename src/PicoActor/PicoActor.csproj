@@ -23,6 +23,15 @@
   <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
     <PackageReference Include="PicoActor.Abs" PrivateAssets="Build" />
   </ItemGroup>
+  <!-- INTERIM: the in-memory store now lives in its own package, but the DI default still
+       constructs it. This edge exists ONLY until the next commit, which makes the core
+       store-free (the resolve-time throw + AddPicoActorInMemoryStore()) and deletes it. -->
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'true'">
+    <ProjectReference Include="..\PicoActor.EventStore.InMemory\PicoActor.EventStore.InMemory.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
+    <PackageReference Include="PicoActor.EventStore.InMemory" />
+  </ItemGroup>
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>

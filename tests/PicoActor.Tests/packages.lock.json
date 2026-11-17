@@ -169,6 +169,7 @@
         "type": "Project",
         "dependencies": {
           "PicoActor.Abs": "[0.0.0-dev, )",
+          "PicoActor.EventStore.InMemory": "[0.0.0-dev, )",
           "PicoDI.Abs": "[2026.11.*, )",
           "PicoLog.Abs": "[2026.11.*, )",
           "PicoMediator.Abs": "[2026.11.*, )"
@@ -180,6 +181,12 @@
           "PicoDI.Abs": "[2026.11.*, )",
           "PicoMediator": "[2026.11.*, )",
           "PicoMediator.Abs": "[2026.11.*, )"
+        }
+      },
+      "picoactor.eventstore.inmemory": {
+        "type": "Project",
+        "dependencies": {
+          "PicoActor.Abs": "[0.0.0-dev, )"
         }
       },
       "picoactor.gen": {

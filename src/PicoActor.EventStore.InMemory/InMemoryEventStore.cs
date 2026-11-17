@@ -1,4 +1,4 @@
-namespace PicoActor;
+namespace PicoActor.EventStore.InMemory;
 
 /// <summary>
 /// Thread-safe in-memory event store for development, testing, and single-process
