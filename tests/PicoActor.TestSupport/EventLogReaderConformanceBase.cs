@@ -23,9 +23,15 @@ public abstract class EventLogReaderConformanceBase
     protected abstract (IEventStore Store, IEventLogReader Reader) Create();
 
     /// <summary>
-    /// Append blank lines to an existing stream WITHOUT appending an event, when the store's medium
-    /// has lines at all (a file). The default does nothing: a store whose streams are lists cannot
-    /// hold a blank line, and the blank-line cases then assert only that the stream is intact.
+    /// Rewrite an existing stream so that blank lines sit BETWEEN its events (and after the last
+    /// one), when the store's medium has lines at all (a file). The default does nothing: a store
+    /// whose streams are lists cannot hold a blank line, and the blank-line cases then assert only
+    /// that the stream is intact.
+    /// <para>
+    /// BETWEEN the events is the load-bearing placement: a blank block only at the tail never
+    /// exercises the cursor's byte positioning, which counts EVENTS, not lines — a reader that
+    /// counted lines would open in the middle of the stream and drift by one event per block.
+    /// </para>
     /// <para>
     /// The three shapes every reader must ignore are trailing ASCII spaces, a lone tab and a bare
     /// carriage return — all newline-TERMINATED, so the file is not torn, only wasteful.

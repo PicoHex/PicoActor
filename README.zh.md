@@ -59,11 +59,13 @@ PicoActor 是**消息驱动**的：一切交互都是消息。命令（`ICommand
 
 ```bash
 dotnet add package PicoActor
+dotnet add package PicoActor.EventStore.InMemory   # 存储已是独立包(v2026.9)
 ```
 
 ```csharp
 using PicoActor;
 using PicoActor.Abs;
+using PicoActor.EventStore.InMemory;
 
 // 1. 初始化
 var store = new InMemoryEventStore();
@@ -120,7 +122,7 @@ var rebuilt = await system.GetAsync<Counter>(counter.Id);
 | 类型 | 角色 |
 |------|------|
 | `ActorSystem` | 默认 `IActorSystem`——ConcurrentDictionary 注册表、工厂注册、消息路由 |
-| `InMemoryEventStore` | 内存存储——每流加锁，乐观并发（基于 ConcurrentDictionary） |
+| `InMemoryEventStore` | 已移入 **`PicoActor.EventStore.InMemory`**（v2026.9）——内存存储：每流加锁，乐观并发（基于 ConcurrentDictionary）；用 `AddPicoActorInMemoryStore()` 注册 |
 | `ActorConfig` | 配置 POCO——可从 PicoCfg 绑定 |
 | `ActorSystemOptions` | 选项——必填 EventStore、可选 Logger、可选 DomainEventPublisher;由 `ActorSystem` 构造函数消费 |
 | `MediatorDomainEventPublisher` | 默认 `IDomainEventPublisher`——逐事件发布 `DomainEventEnvelope`，逐事件隔离 |
@@ -265,6 +267,62 @@ while (await cursor.MoveNextAsync())
   让带快照的重建只读快照之后的尾部（文件存储可以只分类头部、只反序列化尾部）；
   没有实现读取面的存储继续走 `LoadAsync`，即读出并反序列化整条事件流。
 - `InMemoryEventStore` 已实现 `IEventLogReader`；对其它存储而言，实现它是可选的、纯增量的。
+
+### JSONL Event Store (opt-in)（JSONL 事件存储，可选）
+
+`PicoActor` 只负责运行 Actor,自身不再内置存储。提供存储的是两个包:
+`PicoActor.EventStore.InMemory`(内存默认实现,用 `AddPicoActorInMemoryStore()` 注册)
+与 `PicoActor.EventStore.Jsonl`(持久化,本节即讲它)。
+
+`PicoActor.EventStore.Jsonl` 为每个聚合保存一个只追加的 JSONL 文件
+(`<root>/<aggregateId>.jsonl`,一行一个 JSON 对象),快照作为 sidecar 原子地写入同级的
+`<root>-snapshots` 目录。它实现 `IEventStore`、`IEventLogReader`、`IEventStoreSnapshot`
+与 `IEventStoreEnumerator`,AOT 安全(PicoJetson 源生成),并且是**单进程**的:同一目录上的
+两个 store 实例不共享门闩,并发写入会直接报错,而不是撕裂事件流。
+
+```bash
+dotnet add package PicoActor.EventStore.Jsonl
+```
+
+```csharp
+using PicoActor.EventStore.Jsonl;
+
+// Registration lives on the event BASE, in YOUR assembly: one [PicoDerivedType] per concrete
+// event. [PicoSerializable] on the derived type is NOT enough — the generator ignores type
+// parameters, so a bare derived type leaves TEventBase without a serializer and the FIRST
+// append throws.
+[PicoDerivedType(typeof(CounterCreated), "counter-created")]
+[PicoDerivedType(typeof(CounterIncremented), "counter-incremented")]
+public abstract record CounterEvent : IDomainEvent;
+
+public sealed record CounterCreated(int Initial) : CounterEvent;
+
+public sealed record CounterIncremented(int Delta) : CounterEvent;
+
+var store = new JsonlEventStore<CounterEvent>(
+    "/var/lib/myapp/streams",
+    new JsonlEventStoreOptions { FlushToDisk = true }
+);
+var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
+```
+
+- **漏写注册在构建期暴露,而不是首次写入时才炸**:包里内嵌了 `PICOSTORE001` 分析器,
+  会标出没有任何 `[PicoDerivedType]` 列出的领域事件(只用内存存储的项目不为它付出代价)。
+- **撕裂尾部与损坏是两件事。** 未以换行结尾的最后一行——进程崩溃唯一会留下的形状——被忽略,
+  既不计入也不抛出;下一次追加会把它截断。而**已终止**却无法反序列化的行属于损坏,会抛出
+  (包括最后一行),存储不会去修复它,因为修复就是猜。这就是把 `FlushToDisk` 留在默认
+  `false` 的书面代价:字节到达操作系统(另一个读取者立刻能看到该事件)却没有落盘,
+  掉电就可能留下一个已终止的垃圾行。设 `FlushToDisk = true` 即每次追加都 fsync。
+- **游标与仅尾部重建。** `GetVersionAsync`、游标的 `End` 及其字节定位来自同一次廉价扫描
+  (完整、非空白、已终止的行——不校验 JSON,不经过反序列化器),因此带快照的重建从
+  `snapshot.Version + 1` 打开,只反序列化尾部(`N − v` 个事件)。省下的是反序列化与分配,
+  而不是磁盘 I/O:头部仍要被读一次(只读字节)。不需要序列化层的"跳过"探针——通用事件流里
+  只有事件,读不出来的行就是损坏,不是外来记录。
+- `MaxAggregateLocks`(默认 `1024`)为每聚合门闩表设上界;被淘汰的条目只会让该聚合的下一次
+  追加多扫一遍,不影响正确性。`Logger` 独立于 DI 的 `ILoggerFactory`:要看到存储的告警,
+  就把同一个 logger 显式传进来。
+- 本次发布不含:多进程写入、归档/保留/压缩、外来(非事件)行、加密/压缩,以及框架事件的
+  第二套编解码器。
 
 ### Idle Passivation (opt-in)（空闲钝化，可选）
 
@@ -423,7 +481,8 @@ protected override async ValueTask<object?> OnMessageAsync(ICommand command)
 
 ```csharp
 var container = new SvcContainer();
-container.AddPicoActor();  // 注册 IActorSystem + InMemoryEventStore
+container.AddPicoActor();               // 注册 IActorSystem——不再注册存储
+container.AddPicoActorInMemoryStore();  // PicoActor.EventStore.InMemory:内存默认实现
 
 // 自定义事件存储
 var store = new InMemoryEventStore();
@@ -436,6 +495,10 @@ container.AddPicoActor(cfg);
 
 `IActorSystem` 注册为 **Singleton**。若注册了 `ILoggerFactory`，
 日志记录器会自动注入。
+
+`AddPicoActor()` 不再注册任何存储,但注册时不会失败:只在解析 `IActorSystem` 时抛出
+`InvalidOperationException`,消息里点名 `AddPicoActorInMemoryStore()`(注册顺序因此仍然自由,
+显式 `AddPicoActor(store)` 依旧优先)。
 
 ### 自定义 IEventStore
 
@@ -533,7 +596,9 @@ var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
 | 包 | 目标框架 | 描述 |
 |---------|--------|-------------|
 | [PicoActor.Abs](https://www.nuget.org/packages/PicoActor.Abs) | `net10.0` | 核心抽象：`IActor`、`IActorSystem`、`ICommand`、`IDomainEvent`、`IEventStore`、`Actor`、`EventSourcedActor`、`SagaActor`——另含订阅类型（`IDomainEventSubscriber<TEvent>`、`DomainEventEnvelope`、`ICommandSender`）与内嵌 `PicoActor.Gen` 分析器（declare-and-subscribe） |
-| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 运行时：`ActorSystem`、`InMemoryEventStore`、`MediatorDomainEventPublisher`（信封事件流出）、PicoDI 集成（`AddPicoActor` 自动接线 IMediator + ICommandSender） |
+| [PicoActor](https://www.nuget.org/packages/PicoActor) | `net10.0` | 运行时：`ActorSystem`、`MediatorDomainEventPublisher`（信封事件流出）、PicoDI 集成（`AddPicoActor` 自动接线 IMediator + ICommandSender） |
+| [PicoActor.EventStore.InMemory](https://www.nuget.org/packages/PicoActor.EventStore.InMemory) | `net10.0` | 内存存储（`InMemoryEventStore`，v2026.9 从 `PicoActor` 移出）+ `AddPicoActorInMemoryStore()` |
+| [PicoActor.EventStore.Jsonl](https://www.nuget.org/packages/PicoActor.EventStore.Jsonl) | `net10.0` | 持久化 JSONL 事件存储：只追加、乐观并发、经 `IEventLogReader` 的仅尾部重建、原子快照 sidecar、AOT 安全（PicoJetson）——另含内嵌 `PICOSTORE001` 注册分析器 |
 
 ---
 

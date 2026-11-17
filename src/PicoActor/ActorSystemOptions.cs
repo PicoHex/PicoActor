@@ -50,9 +50,10 @@ public sealed class ActorSystemOptions
     /// aggregate cannot restore is refused, and a missing/corrupt/out-of-range snapshot falls back
     /// to a full replay. A store that does not implement
     /// <see cref="Abs.IEventStoreSnapshot"/> disables the feature regardless of this value.
-    /// The bundled <c>InMemoryEventStore</c> keeps at most one snapshot per actor (the latest);
-    /// a custom store should follow the same contract — older snapshots are superseded
-    /// accelerators, not history.
+    /// A store keeps AT MOST ONE snapshot per actor (the latest): both store packages do
+    /// (<c>PicoActor.EventStore.InMemory</c> and <c>PicoActor.EventStore.Jsonl</c>), and a custom
+    /// store must follow the same contract — older snapshots are superseded accelerators, not
+    /// history.
     /// </para>
     /// <para>A value below 1 is rejected here: it can only be a host bug.</para>
     /// </summary>

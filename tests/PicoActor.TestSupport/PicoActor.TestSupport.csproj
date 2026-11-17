@@ -12,8 +12,11 @@
     <PackageReference Include="TUnit" />
     <!-- PicoJetson: this project is a REGISTRATION CONSUMER, not a serializer consumer.
          [PicoDerivedType] on the seed base is what generates the polymorphic serializer in
-         THIS assembly — the shape every JSONL store consumer must reproduce. -->
-    <PackageReference Include="PicoJetson" />
+         THIS assembly — the shape every JSONL store consumer must reproduce. PrivateAssets="none"
+         is spelled out for that reason: this project is not packed, but it is the template a
+         consumer copies, and the default (contentfiles;analyzers;build) would cut the generator
+         and build/PicoJetson.targets off. -->
+    <PackageReference Include="PicoJetson" PrivateAssets="none" />
     <ProjectReference Include="..\..\src\PicoActor.Abs\PicoActor.Abs.csproj" />
   </ItemGroup>
 </Project>

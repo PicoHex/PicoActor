@@ -169,6 +169,69 @@ if ! dotnet build "${REPO_ROOT}/PicoActor.slnx" -c Release --nologo -nodeReuse:f
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pack lock-file guard — every packages.lock.json is snapshotted before the first
+# pack and put back after the last one (and from the trap, so a `die 5` in the
+# middle of the pack loop cannot leave a rewritten lock file behind).
+#
+# Why: `dotnet pack -p:UseProjectReferences=false` restores the project in PACKAGE
+# mode — the published shape — and that restore REWRITES the checked-in lock file
+# (project-reference entries become package references to the staged feed). It is a
+# generated artefact of packaging, not a change to keep, and it would trip the R4
+# clean-tree check below with exit 6, blaming the build for the packer's own
+# bookkeeping. scripts/verify-package.sh (283-297) snapshots the single lock file it
+# touches for exactly this reason; this script packs every packable project, so it
+# snapshots all of them. Restoration is idempotent: the success path calls it once,
+# the trap may call it again, and the second call is a no-op.
+# ─────────────────────────────────────────────────────────────────────────────
+lock_work="$(mktemp -d)" || die 5 "cannot create the lock-file backup directory"
+lock_list="${lock_work}.list"
+locks_restored=0
+locks_saved=0
+
+list_locks() {
+    find "${REPO_ROOT}" -name packages.lock.json         -not -path '*/obj/*' -not -path '*/bin/*' 2>/dev/null | sort
+}
+
+restore_locks() {
+    [ "${locks_restored}" -eq 0 ] || return 0
+    locks_restored=1
+    [ -d "${lock_work}" ] && [ -f "${lock_list}" ] || return 0
+
+    local i=0 lock
+    while IFS= read -r lock; do
+        [ -n "${lock}" ] || continue
+        i=$((i + 1))
+        [ -f "${lock_work}/${i}" ] || continue
+        cp "${lock_work}/${i}" "${lock}" ||
+            printf 'release-build: warning: could not restore %s
+' "${lock}" >&2
+    done <"${lock_list}"
+
+    # A lock file that did not exist on entry is packaging residue: remove it.
+    list_locks | comm -13 "${lock_list}" - | while IFS= read -r extra; do
+        [ -n "${extra}" ] && rm -f "${extra}"
+    done
+
+    if [ "${locks_saved}" -gt 0 ]; then
+        note "restored ${locks_saved} packages.lock.json file(s) rewritten by the package-mode restore"
+    fi
+    rm -rf "${lock_work}" "${lock_list}"
+    lock_work=""
+}
+
+trap restore_locks EXIT
+trap 'restore_locks; exit 5' INT TERM
+
+list_locks >"${lock_list}" || die 5 "cannot enumerate packages.lock.json"
+i=0
+while IFS= read -r lock; do
+    [ -n "${lock}" ] || continue
+    i=$((i + 1))
+    cp "${lock}" "${lock_work}/${i}" || die 5 "cannot back up ${lock}"
+    locks_saved=$((locks_saved + 1))
+done <"${lock_list}"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Pack — same order and flags as .github/workflows/release.yml, but the staged
 # feed is OUT, never artifacts/nupkg inside the tree.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +276,10 @@ for proj in "${ordered[@]}"; do
         die 5 "dotnet pack failed for ${rel}; nothing was released"
     fi
 done
+
+# Put every packages.lock.json back BEFORE the R4 clean-tree check: the package-mode
+# restore above rewrote them, and that rewrite is not this build's output.
+restore_locks
 
 # ─────────────────────────────────────────────────────────────────────────────
 # R5 — product fingerprints: per-file size + sha256, plus a digest for the set

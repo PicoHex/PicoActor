@@ -68,6 +68,11 @@ Today the loader's skip rule is "try `DomainEventSerializer.Deserialize`, treat 
 - **Prerequisite P1**: a public probe on the serializer layer, e.g.
   `bool CanResolveDiscriminator(string typeName)` over **the same** registry used by
   `Deserialize`. It is a PicoSerDe / PicoAgent.Domain change, not part of `PicoActor`.
+  **P1 is not a prerequisite of the generic JSONL store** (v2026.9.0): a stream that holds only
+  events has no skippable lines, so an un-deserializable line is corruption and throws — the
+  head costs a byte scan, not a deserialization, without any discriminator probe. P1 is only the
+  prerequisite for PicoAgent's **skip** semantics (foreign/unknown-`$type` lines), which
+  `PicoActor.EventStore.Jsonl` deliberately does not have.
 - Until P1 exists, a file store must either (a) parse each head line into a `JsonDocument`
   just to read `$type` and compare it against a **copy** of the registry — rejected, because a
   copy drifts and drift corrupts the tail offset — or (b) deserialize the head exactly as
@@ -160,13 +165,18 @@ implement the reader first (including `JsonRpcStoreBinding`, or its retirement).
 ## Semantics (fixed)
 
 - **Versions**: 1-based, one per event, `version ≡ count`. `GetVersionAsync` returns 0 for a
-  missing/empty stream. A store uses the **same** line-classification rule for
-  `GetVersionAsync`, `LoadAsync` and `OpenAsync`: a line the loader skips is neither counted
-  nor yielded.
-- **`GetVersionAsync` error semantics**: for the same stream it either succeeds and equals
-  `(await LoadAsync(id)).Count`, or throws the **same** exception `LoadAsync` throws. The
-  last-line tolerance is identical (a torn final line is skipped, not thrown); a corrupt
-  non-final line throws in both.
+  missing/empty stream. The count and `OpenAsync`'s positioning use the **same** cheap scan of
+  the underlying medium — complete, non-blank, terminated lines (records) — never a
+  deserialization: a blank line is neither counted nor positioned over, and an unterminated
+  final line (the crash tail) is neither counted nor thrown.
+- **`GetVersionAsync` error semantics** (revised with v2026.9.0: the count is a LINE count, not a
+  validity check): for a **clean** stream it equals `(await LoadAsync(id)).Count`. For a damaged
+  one it may exceed that number: a TERMINATED line that fails to deserialize makes `LoadAsync`
+  and the cursor throw, while the count scan still counts it (counting must not require a
+  deserializer). The last-line tolerance is the same shape as the loader's, but not the same
+  exception surface: a torn final line is skipped by both; a corrupt terminated line throws in
+  `LoadAsync` and the cursor. A store may therefore report a version for a stream it cannot
+  load — the count is a length, the loader is the validity gate.
 - **`OpenAsync(id, fromVersion)`**: `fromVersion` is 1-based; `0` throws
   `ArgumentOutOfRangeException`. A value beyond the end is **allowed** and yields an empty
   cursor whose `End` is the actual length — the rollback path depends on this, and it is what
