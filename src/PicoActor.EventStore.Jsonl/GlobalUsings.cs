@@ -3,6 +3,7 @@
 // not in the implicit usings. ExceptionDispatchInfo re-raises a LATCHED failure as the failure it was.
 global using System.Buffers.Binary;
 global using System.Collections.Concurrent;
+global using System.Collections.Frozen;
 global using System.Runtime.ExceptionServices;
 global using System.Text;
 global using PicoActor.Abs;

@@ -20,6 +20,19 @@ public sealed record JsonlEventStoreOptions
     public int MaxAggregateLocks { get; init; } = 1024;
 
     /// <summary>
+    /// The event types this store may write and read IN ADDITION to its generic argument, each bound to
+    /// the tag its lines carry in <c>$type</c>. EMPTY here: the store's constructor is the only owner of
+    /// the framework defaults, so there is exactly one seeding mechanism and
+    /// <see cref="EventTypeBindings.FrameworkDefaultCount"/> says how many of them were applied.
+    /// <para>
+    /// Bind BEFORE constructing the store: the constructor freezes this table and copies it, so a later
+    /// <see cref="EventTypeBindings.Add{T}"/> is refused rather than silently ignored. One store per
+    /// options instance remains the supported shape.
+    /// </para>
+    /// </summary>
+    public EventTypeBindings EventTypeBindings { get; } = new();
+
+    /// <summary>
     /// How a stream FILE is named in the store's root directory. Default
     /// <see cref="FileNameFormat.IdOnly"/> — <c>&lt;id:D&gt;.jsonl</c>, the historical layout, which
     /// this store reproduces byte-for-byte (names, enumeration, counts).

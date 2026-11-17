@@ -89,6 +89,11 @@ public sealed class JsonlEventStore<TEventBase>
     private readonly ILogger? _logger;
     private readonly JsonlLockTable _locks;
 
+    // The FROZEN event-type table (D8): the append path asks it which tag a bound type is written with,
+    // the read path which type a tag deserializes into, and neither ever sees the mutable table the
+    // options own — a store's accepted set is fixed at construction.
+    private readonly EventTypeBindingsTable _bindings;
+
     // The id → type map TypePrefix resolution needs, because IEventStore carries only the aggregate id.
     // Never consulted under IdOnly, where the name IS the id.
     private readonly ConcurrentDictionary<Guid, string> _typeById = new();
@@ -154,11 +159,65 @@ public sealed class JsonlEventStore<TEventBase>
         _options = options;
         _logger = options.Logger;
 
+        // ── Event-type bindings (D1/D1b/D5/D8) ──────────────────────────────────────────────────────
+        // A base the framework's own terminal events already satisfy is refused FIRST, before anything
+        // is frozen: an interface base cannot carry [PicoDerivedType] at all, and a base that
+        // SagaCompleted/SagaFailed already derive from would make them ordinary TEventBase events AND
+        // bound ones — two routes to one type, which is how an event ends up with two tags.
+        if (
+            typeof(TEventBase).IsAssignableFrom(typeof(SagaCompleted))
+            || typeof(TEventBase).IsAssignableFrom(typeof(SagaFailed))
+        )
+        {
+            throw new InvalidOperationException(
+                $"JsonlEventStore<{typeof(TEventBase).FullName}> cannot use that type as its event base: "
+                    + "the framework's terminal events PicoActor.Abs.SagaCompleted and SagaFailed are "
+                    + "assignable to it, so they would be both an ordinary event and a bound one. Use a "
+                    + "CLASS base of your own and let "
+                    + "JsonlEventStoreOptions.EventTypeBindings carry the framework events."
+            );
+        }
+
+        // The store is the ONLY owner of the framework defaults, and it seeds them inside the SAME
+        // critical section that freezes the table: a consumer that bound SagaCompleted to its own tag
+        // keeps it (the seeds use TryAdd), FrameworkDefaultCount reports what was APPLIED rather than
+        // what the framework ships, and a concurrent second construction sees the frozen table instead
+        // of seeding it twice.
+        _bindings = options.EventTypeBindings.Freeze(
+            typeof(JsonlEventStore<TEventBase>).FullName!,
+            static bindings =>
+            {
+                bindings.TryAddDefault<SagaCompleted>(FrameworkEventTags.SagaCompleted);
+                bindings.TryAddDefault<SagaFailed>(FrameworkEventTags.SagaFailed);
+            }
+        );
+
+        // A bound type that is ALSO a TEventBase is refused: one type, one registration (D5). Checked
+        // AFTER the seed, because the framework defaults are the bindings that make this reachable.
+        foreach (var bound in _bindings.BoundTypes)
+        {
+            if (!typeof(TEventBase).IsAssignableFrom(bound))
+                continue;
+
+            throw new InvalidOperationException(
+                $"{bound.FullName} is bound in JsonlEventStoreOptions.EventTypeBindings and is also a "
+                    + $"{typeof(TEventBase).FullName}: a type is registered ONCE. Remove the binding, or "
+                    + "register the event's own base type as the store's generic argument."
+            );
+        }
+
         // A TypePrefix store learns its map from ONE filename pass. IdOnly pays nothing here: the id
         // alone is the name, so there is nothing to learn.
         if (_options.FileNameFormat == FileNameFormat.TypePrefix)
             ScanTypeMap();
     }
+
+    /// <summary>
+    /// The FROZEN binding table this store was constructed with: the framework defaults plus every
+    /// consumer binding, as the store sees them. Internal — the public report is the two counters on
+    /// <see cref="EventTypeBindings"/>.
+    /// </summary>
+    internal EventTypeBindingsTable Bindings => _bindings;
 
     /// <summary>Events this store has DESERIALIZED (a load or a cursor move), not lines it has read.</summary>
     internal long DeserializedEventCount => Interlocked.Read(ref _deserializedEvents);
