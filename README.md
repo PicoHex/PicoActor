@@ -430,9 +430,13 @@ is how many defaults were actually applied, `0…2`, and `RegisteredCount` is th
   type assignable to `TEventBase`. `with` copies the **reference**: a clone and its original share one
   table, frozen state included, so a clone's `Add` throws and names the *other* store — build
   `new JsonlEventStoreOptions()` for an independent table.
-- **A binding's tag must differ from every `[PicoDerivedType]` discriminator on `TEventBase`.** The sniff
-  takes precedence, so a collision reads base lines as the bound type — silently, with no throw and no
-  warning.
+- **A binding's tag must differ from every `[PicoDerivedType]` discriminator on `TEventBase`.** One tag
+  has one owner, and the read path asks the **bindings** first: a collision would read the base's own lines
+  as the bound type, losing that event type and its members. The constructor therefore **refuses** it with
+  an `InvalidOperationException` naming the tag, before anything is frozen — no silent substitution is
+  possible. (The one residual hole: a derived event whose reader *recognises* the tag and then throws — its
+  own validation, not a missing registration — which the construction-time probe cannot distinguish from an
+  unknown tag.)
 
 ### Idle Passivation (opt-in)
 

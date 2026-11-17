@@ -416,7 +416,10 @@ public sealed class BoundEventWriteTests
 
         // Every row but `{}` needs a writer that emits the payload; a generated one writes `{}` and
         // nothing else, so those are the consumer hook again.
-        JsonSerializer.RegisterCustom(new ShapedPayloadSerializer(), new ShapedPayloadDeserializer());
+        JsonSerializer.RegisterCustom(
+            new ShapedPayloadSerializer(),
+            new ShapedPayloadDeserializer()
+        );
         // The `{}` row is MilestoneReached's own generated writer (Bnd1b pins that exact path).
         _ = JsonSerializer.SerializeToUtf8Bytes(new MilestoneReached());
 
@@ -490,7 +493,10 @@ public sealed class BoundEventWriteTests
     )
     {
         _ = cancellationToken;
-        JsonSerializer.RegisterCustom(new ShapedPayloadSerializer(), new ShapedPayloadDeserializer());
+        JsonSerializer.RegisterCustom(
+            new ShapedPayloadSerializer(),
+            new ShapedPayloadDeserializer()
+        );
 
         // One of each whitespace byte JSON allows, then a real object. A generated writer never emits
         // this; the consumer hook does, and the refusal must not call it a non-object.
@@ -513,6 +519,75 @@ public sealed class BoundEventWriteTests
         var reloaded = await store.LoadAsync(id);
         await Assert.That(reloaded.Count).IsEqualTo(1);
         await Assert.That(reloaded[0].GetType()).IsEqualTo(typeof(ShapedPayloadEvent));
+    }
+
+    // ── Bnd18d: nothing behind the brace is not an object either (D2) ───────────────────────────────
+
+    /// <summary>
+    /// Every memberless row above has a <c>}</c> to find. <c>{</c> followed by nothing but blanks has no
+    /// closing brace and no member, so it is the ONE shape where "skip the blanks behind the brace" runs off
+    /// the end of the payload: a check that stopped at <c>Length - 1</c>, or that only asked "is the first
+    /// byte a <c>{</c>", would splice it into <c>{"$type":"shaped",   </c> — a separator with nothing behind
+    /// it, invalid JSON, invisible at write time and fatal on read-back. The refusal is the SAME one a
+    /// <c>[1,2]</c> payload gets, because the payload is equally not an object.
+    /// <para>
+    /// The bytes come from the consumer hook (<see cref="JsonSerializer.RegisterCustom{T}"/>), which is the
+    /// only way to reach this shape: a generated writer always closes its brace.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd18d_NothingBehindTheBrace_IsRefusedAndWritesNothing(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        JsonSerializer.RegisterCustom(
+            new ShapedPayloadSerializer(),
+            new ShapedPayloadDeserializer()
+        );
+
+        // `{` alone, then `{` with blanks only — the two spellings of the same truncated object. The
+        // second is the one a "stop at Length - 1" test would have let through.
+        string[] payloads = ["{", "{   "];
+
+        foreach (var payload in payloads)
+        {
+            using var temp = new TempRoot();
+            var options = new JsonlEventStoreOptions();
+            options.EventTypeBindings.Add<ShapedPayloadEvent>("shaped");
+            var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
+            var id = Guid.NewGuid();
+
+            var error = await CaptureAsync(async () =>
+            {
+                _ = await store.AppendAsync(id, 0, [new ShapedPayloadEvent(payload)]);
+            });
+
+            // This store's own FormatException, not an index failure from inside the splice and not a
+            // malformed line on disk.
+            await Assert.That(error).IsTypeOf<FormatException>().Because(payload);
+
+            var message = error!.Message;
+
+            await Assert
+                .That(message.Contains("\"shaped\"", StringComparison.Ordinal))
+                .IsTrue()
+                .Because(payload);
+            await Assert
+                .That(
+                    message.Contains(typeof(ShapedPayloadEvent).FullName!, StringComparison.Ordinal)
+                )
+                .IsTrue()
+                .Because(payload);
+            await Assert
+                .That(message.Contains("must be a JSON object", StringComparison.Ordinal))
+                .IsTrue()
+                .Because(payload);
+
+            // Nothing was written: no line, no file, no version.
+            await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(0).Because(payload);
+            await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(0UL).Because(payload);
+        }
     }
 
     /// <summary>
@@ -568,7 +643,6 @@ public sealed record ArrayPayloadEvent : IDomainEvent;
 /// </summary>
 public sealed record ShapedPayloadEvent(string Payload) : IDomainEvent;
 
-
 /// <summary>Writes <c>[1,2]</c> for every <see cref="ArrayPayloadEvent"/>.</summary>
 internal sealed class ArrayPayloadSerializer : ISerializer<ArrayPayloadEvent>
 {
@@ -594,4 +668,3 @@ internal sealed class ShapedPayloadDeserializer : IDeserializer<ShapedPayloadEve
 {
     public ShapedPayloadEvent Deserialize(ReadOnlySpan<byte> data) => new(string.Empty);
 }
-

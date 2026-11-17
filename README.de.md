@@ -460,8 +460,13 @@ Defaults, `0…2`, `RegisteredCount` die Gesamtzahl).
   sich eine Tabelle samt Einfrierzustand, ein `Add` auf dem Klon wirft also und nennt den *anderen* Store —
   für eine unabhängige Tabelle `new JsonlEventStoreOptions()` bauen.
 - **Der Tag einer Bindung muss sich von jedem `[PicoDerivedType]`-Diskriminator auf `TEventBase`
-  unterscheiden.** Der Sniff hat Vorrang: bei einer Kollision werden Basiszeilen als der gebundene Typ
-  gelesen — still, ohne Exception und ohne Warnung.
+  unterscheiden.** Ein Tag hat genau einen Besitzer, und der Lesepfad fragt **zuerst die Bindings**: bei
+  einer Kollision würden die vom Basis-Typ selbst geschriebenen Zeilen als der gebundene Typ gelesen —
+  Ereignistyp und Member gehen verloren. Deshalb wirft der Konstruktor schon `InvalidOperationException`
+  (die Meldung nennt den Tag) und lehnt vor dem Einfrieren ab — eine stille Ersetzung ist nicht möglich.
+  (Die eine verbleibende Lücke: ein abgeleitetes Ereignis, dessen Reader den Tag *erkennt* und dann wirft —
+  seine eigene Validierung, keine fehlende Registrierung —, was die Prüfung im Konstruktor nicht von einem
+  unbekannten Tag unterscheiden kann.)
 
 ### Idle Passivation (opt-in) (Idle-Passivierung, optional)
 

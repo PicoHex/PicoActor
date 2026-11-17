@@ -458,9 +458,13 @@ le total).
   ordinaires et liés — et de même pour un type lié assignable à `TEventBase`. `with` copie la **référence** :
   un clone et son original partagent une seule table, état de gel compris, donc un `Add` sur le clone lève et
   nomme l'*autre* store — pour une table indépendante, construisez `new JsonlEventStoreOptions()`.
-- **Le tag d'une liaison doit différer de tout discriminant `[PicoDerivedType]` de `TEventBase`.** Le sniff a
-  la priorité : une collision lit les lignes de la base comme le type lié — en silence, sans exception ni
-  avertissement.
+- **Le tag d'une liaison doit différer de tout discriminant `[PicoDerivedType]` de `TEventBase`.** Un tag
+  n'a qu'un propriétaire, et le chemin de lecture interroge **d'abord les liaisons** : une collision lirait
+  les lignes écrites par la base elle-même comme le type lié, en perdant ce type d'événement et ses
+  membres. Le constructeur lève donc `InvalidOperationException` (le message nomme le tag) et refuse avant
+  le gel — aucune substitution silencieuse n'est possible. (Le seul trou restant : un événement dérivé dont
+  le reader *reconnaît* le tag puis lève une exception — sa propre validation, pas une inscription
+  manquante —, ce que la sonde du constructeur ne sait pas distinguer d'un tag inconnu.)
 
 ### Idle Passivation (opt-in) (Passivation par inactivité, optionnel)
 

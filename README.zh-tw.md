@@ -399,8 +399,11 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   時被拒絕——否則它們既是普通事件又是 bound 事件；可指派給 `TEventBase` 的 bound 型別同樣被拒絕。`with`
   複製的是**參照**：複本與原件共用同一張表（含凍結狀態），因此複本上的 `Add` 會拋，且訊息點名「另一個」
   store——要獨立的一張表請用 `new JsonlEventStoreOptions()`。
-- **繫結的 tag 必須與 `TEventBase` 上每一個 `[PicoDerivedType]` 判別值都不同。** sniffer 優先，所以一旦
-  撞上，基底的行會被讀成 bound 型別——不拋例外、不警告，完全靜默。
+- **繫結的 tag 必須與 `TEventBase` 上每一個 `[PicoDerivedType]` 判別值都不同。** 一個 tag 只能有一個主人，
+  而讀取路徑**先問繫結**：一旦撞上，基底自己寫下的行就會被讀成 bound 型別，原事件型別與成員一併遺失。因此
+  建構期即拋 `InvalidOperationException`（訊息點名該 tag），在凍結之前就拒絕——不存在靜默替換。（唯一殘留
+  的洞：某個衍生型別的 reader *認得* 該 tag 卻在解碼時拋例外——那是它自身的驗證，不是缺註冊——建構期的探針
+  無法把它與「未知 tag」區分開。）
 
 ### Idle Passivation (opt-in)（閒置鈍化，可選）
 

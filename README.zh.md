@@ -399,8 +399,11 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   时被拒绝——否则它们既是普通事件又是 bound 事件；可赋值给 `TEventBase` 的 bound 类型同样被拒绝。`with`
   复制的是**引用**：副本与原件共用同一张表（含冻结状态），因此副本上的 `Add` 会抛，且消息点名「另一个」
   store——要独立的一张表请用 `new JsonlEventStoreOptions()`。
-- **绑定的 tag 必须与 `TEventBase` 上每一个 `[PicoDerivedType]` 判别值都不同。** sniffer 优先，所以一旦
-  撞上，基类的行会被读成 bound 类型——不抛异常、不警告，完全静默。
+- **绑定的 tag 必须与 `TEventBase` 上每一个 `[PicoDerivedType]` 判别值都不同。** 一个 tag 只能有一个主人，
+  而读路径**先问绑定**：一旦撞车，基类自己写下的行就会被读成 bound 类型，原事件类型与成员一并丢失。因此
+  构造期即抛 `InvalidOperationException`（消息点名该 tag），在冻结之前就拒绝——不存在静默替换。（唯一残留
+  的洞：某个派生类型的 reader *认得* 该 tag 却在解码时抛异常——那是它自身的校验，不是缺注册——构造期的探针
+  无法把它与「未知 tag」区分开。）
 
 ### Idle Passivation (opt-in)（空闲钝化，可选）
 

@@ -452,9 +452,13 @@ enruta los eventos del framework al mismo store: el framework pre-registra
   vinculados — y también un tipo vinculado asignable a `TEventBase`. `with` copia la **referencia**: el clon y
   el original comparten una sola tabla, incluido el estado de congelación, así que un `Add` sobre el clon lanza
   y nombra el *otro* store — construye `new JsonlEventStoreOptions()` para una tabla independiente.
-- **El tag de un vínculo debe diferir de todo discriminador `[PicoDerivedType]` de `TEventBase`.** El sniff
-  tiene prioridad, así que una colisión lee las líneas de la base como el tipo vinculado — en silencio, sin
-  excepción y sin aviso.
+- **El tag de un vínculo debe diferir de todo discriminador `[PicoDerivedType]` de `TEventBase`.** Un tag
+  tiene un solo dueño, y la ruta de lectura pregunta **primero a los vínculos**: una colisión leería las
+  líneas que la propia base escribió como el tipo vinculado, perdiendo ese tipo de evento y sus miembros.
+  Por eso el constructor ya lanza `InvalidOperationException` (el mensaje nombra el tag) y rechaza antes de
+  congelar — no hay sustitución silenciosa posible. (El único agujero restante: un evento derivado cuyo
+  reader *reconoce* el tag y luego lanza — su propia validación, no una entrada que falte —, que la sonda
+  del constructor no puede distinguir de un tag desconocido.)
 
 ### Idle Passivation (opt-in) (Pasivación por inactividad, opcional)
 

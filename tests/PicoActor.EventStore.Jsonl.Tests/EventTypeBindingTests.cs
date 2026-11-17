@@ -347,9 +347,10 @@ public sealed class EventTypeBindingTests
     /// <summary>
     /// The collision that produced a SILENT misread. <see cref="ConformanceEvent"/> declares
     /// <c>[PicoDerivedType(typeof(SSnapshotAdded), "ss-added")]</c>, so a consumer who bound some OTHER
-    /// type to the tag <c>"ss-added"</c> got a store that wrote its lines happily and read them back as an
-    /// <see cref="SSnapshotAdded"/> — the base's polymorphic reader answers for that discriminator before
-    /// the binding is ever asked, and nothing about the write side can notice.
+    /// type to the tag <c>"ss-added"</c> got a store that wrote its lines happily — and, because the READ
+    /// path asks the bindings FIRST, read back every <c>ss-added</c> line the base had already written as
+    /// that other type, losing <see cref="SSnapshotAdded"/> and its members. Nothing on the write side can
+    /// notice; the construction refuses instead.
     /// <para>
     /// Binding <see cref="SSnapshotAdded"/> itself is refused EARLIER, by the assignability check (Bnd7), so
     /// the collision has to be spelled with a type that cannot derive from the base:
@@ -394,6 +395,81 @@ public sealed class EventTypeBindingTests
         options.EventTypeBindings.Add<SagaFailed>("y");
         await Assert.That(options.EventTypeBindings.RegisteredCount).IsEqualTo(2);
         await Assert.That(options.EventTypeBindings.FrameworkDefaultCount).IsEqualTo(0);
+    }
+
+    // ── Bnd19b: the RESIDUAL HOLE — a derived reader that recognises the tag and then THROWS ───────
+
+    /// <summary>
+    /// The hole the guard cannot see, pinned as a FACT. The probe asks the base's polymorphic reader about
+    /// the tag, and takes "the call THREW" to mean "this tag is not claimed". <see cref="GuardedEventBase"/>
+    /// declares <c>[PicoDerivedType(typeof(GuardedDeltaEvent), "hole-tag")]</c>, whose reader RECOGNISES the
+    /// tag and then rejects the memberless payload — its constructor refuses the default arguments the probe
+    /// supplies. So the probe throws for a reason that is NOT "unknown tag", the guard reads it as free, and
+    /// a binding on <c>hole-tag</c> is accepted.
+    /// <para>
+    /// The damage is the one the guard exists to prevent, in the direction it really happens: the READ path
+    /// asks the bindings first, so the base's own <c>hole-tag</c> lines — written by the base's own writer,
+    /// readable by the base's own reader — come back from <c>LoadAsync</c> as the BOUND type, with
+    /// <see cref="GuardedDeltaEvent"/> and its <c>Delta</c> gone. The public API has no separate "is this
+    /// discriminator declared?" signal (the reader is the only oracle and answers with an event or an
+    /// exception), so this is DOCUMENTED behaviour, not a bug to re-report: the test exists so a later
+    /// reader of the suite finds the known hole stated instead of rediscovering it as a new one.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd19b_ResidualHole_DerivedReaderThrowsOnEmptyObject_IsDocumented(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+
+        // The consumer hook that gives the bound type its serializer: this type is deliberately NOT a
+        // GuardedEventBase, so the assignability refusal (Bnd7) cannot be what answers here.
+        JsonSerializer.RegisterCustom(new HoleBoundSerializer(), new HoleBoundDeserializer());
+
+        var options = new JsonlEventStoreOptions();
+        options.EventTypeBindings.Add<HoleBoundEvent>("hole-tag");
+
+        // The mechanism, asserted rather than described: the very probe the guard runs THROWS for this
+        // tag — and not because the tag is unknown, which would be the FormatException the guard looks
+        // for. That is precisely the answer it has to read as "not claimed".
+        var probe = Catch(() =>
+        {
+            _ = JsonSerializer.Deserialize<GuardedEventBase>(
+                Encoding.UTF8.GetBytes("{\"$type\":\"hole-tag\"}")
+            );
+        });
+        await Assert.That(probe is ArgumentOutOfRangeException).IsTrue();
+
+        // The hole, as a fact: the probe's throw is read as "this tag is not claimed", so the binding is
+        // ACCEPTED. Construction succeeds — this is the documented behaviour, not an expectation.
+        var store = new JsonlEventStore<GuardedEventBase>(temp.Root, options);
+
+        // The line the BASE writes for its own event, produced by its own polymorphic writer…
+        var baseLine = JsonSerializer.SerializeToUtf8Bytes<GuardedEventBase>(
+            new GuardedDeltaEvent(5)
+        );
+
+        // …and decoded by its own polymorphic reader, member and all: the tag really is the base's.
+        var baseEvent = JsonSerializer.Deserialize<GuardedEventBase>(baseLine);
+        await Assert.That(baseEvent).IsEqualTo(new GuardedDeltaEvent(5));
+
+        // Put that line in a stream this store reads.
+        var id = Guid.NewGuid();
+        await File.WriteAllTextAsync(
+            StreamPath(temp.Root, id),
+            Encoding.UTF8.GetString(baseLine) + "\n",
+            cancellationToken
+        );
+
+        var loaded = await store.LoadAsync(id);
+
+        // THE HOLE: the read path asks the binding FIRST, so the base's own line comes back as the BOUND
+        // type. GuardedDeltaEvent, its Delta and the fact that the line was ever a base event are all
+        // gone, with nothing thrown and nothing logged — the substitution the guard exists to refuse.
+        await Assert.That(loaded.Count).IsEqualTo(1);
+        await Assert.That(loaded[0].GetType()).IsEqualTo(typeof(HoleBoundEvent));
     }
 
     // ── Bnd20: a log SINK that throws cannot poison the table the construction just froze (M8) ─────
@@ -441,6 +517,10 @@ public sealed class EventTypeBindingTests
             )
             .IsTrue();
     }
+
+    /// <summary>The path the default (<see cref="FileNameFormat.IdOnly"/>) format gives one stream.</summary>
+    private static string StreamPath(string root, Guid id) =>
+        Path.Combine(root, id.ToString("D") + ".jsonl");
 
     /// <summary>Run <paramref name="action"/> and hand back what it threw, or <c>null</c>.</summary>
     private static Exception? Catch(Action action)
@@ -533,6 +613,46 @@ public class FrameworkSerializerTripswireTests
         await Assert.That(failedJson).IsEqualTo("{\"Reason\":\"boom\"}");
         await Assert.That(failedBack).IsEqualTo(failed);
     }
+}
+
+/// <summary>
+/// Bnd19b's base: its ONE registration names a derived event that VALIDATES its arguments, so the
+/// construction-time tag probe — which deserializes a memberless discriminator-only object — constructs
+/// that event with defaults and the constructor throws. The probe therefore cannot tell "this tag is
+/// unknown" from "this tag is declared and undecodable", which is the residual hole Bnd19b documents.
+/// </summary>
+[PicoDerivedType(typeof(GuardedDeltaEvent), "hole-tag")]
+public abstract record GuardedEventBase : IDomainEvent;
+
+/// <summary>
+/// An ordinary domain event with an invariant — a delta is positive. Nothing exotic: a guard clause in a
+/// domain event is idiomatic, and it is all it takes to make the base's reader throw for a tag it
+/// recognises. A payload that CARRIES the member decodes normally (Bnd19b asserts that half too).
+/// </summary>
+public sealed record GuardedDeltaEvent(int Delta) : GuardedEventBase
+{
+    public int Delta { get; init; } =
+        Delta > 0
+            ? Delta
+            : throw new ArgumentOutOfRangeException(nameof(Delta), "a delta must be positive");
+}
+
+/// <summary>The type Bnd19b binds to <c>hole-tag</c>: an <see cref="IDomainEvent"/> and nothing else.</summary>
+public sealed record HoleBoundEvent() : IDomainEvent;
+
+/// <summary>Writes <c>{}</c> for every <see cref="HoleBoundEvent"/> — the write leg is not Bnd19b's subject.</summary>
+internal sealed class HoleBoundSerializer : ISerializer<HoleBoundEvent>
+{
+    public void Serialize(IBufferWriter<byte> writer, HoleBoundEvent value) => writer.Write("{}"u8);
+}
+
+/// <summary>
+/// Reads nothing and answers a fresh event: Bnd19b asks which TYPE the store hands back for a line the
+/// base wrote, so the binding's reader must succeed on whatever bytes it is given.
+/// </summary>
+internal sealed class HoleBoundDeserializer : IDeserializer<HoleBoundEvent>
+{
+    public HoleBoundEvent Deserialize(ReadOnlySpan<byte> data) => new();
 }
 
 /// <summary>

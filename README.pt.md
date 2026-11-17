@@ -447,8 +447,13 @@ e `RegisteredCount` é o total).
   vinculados — e o mesmo vale para um tipo vinculado atribuível a `TEventBase`. `with` copia a **referência**:
   o clone e o original compartilham uma só tabela, incluindo o estado de congelação, então um `Add` no clone
   lança e nomeia o *outro* store — construa `new JsonlEventStoreOptions()` para uma tabela independente.
-- **O tag de um vínculo deve diferir de todo discriminador `[PicoDerivedType]` de `TEventBase`.** O sniff tem
-  precedência: uma colisão lê as linhas da base como o tipo vinculado — em silêncio, sem exceção e sem aviso.
+- **O tag de um vínculo deve diferir de todo discriminador `[PicoDerivedType]` de `TEventBase`.** Um tag
+  tem um único dono, e o caminho de leitura pergunta **primeiro aos vínculos**: uma colisão leria as linhas
+  que a própria base escreveu como o tipo vinculado, perdendo esse tipo de evento e seus membros. Por isso
+  o construtor já lança `InvalidOperationException` (a mensagem nomeia o tag) e recusa antes de congelar —
+  não há substituição silenciosa possível. (O único buraco restante: um evento derivado cujo reader
+  *reconhece* o tag e então lança — a validação dele, não um registo faltante —, o que a sonda do
+  construtor não distingue de um tag desconhecido.)
 
 ### Idle Passivation (opt-in) (Passivação por inatividade, opcional)
 

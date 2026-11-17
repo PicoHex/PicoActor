@@ -181,10 +181,12 @@ public sealed record JsonlEventStoreOptions
 ```
 
 - **The tag is the `$type` a bound event is written with**, spliced verbatim, and the value the read path
-  dispatches on (`Ordinal`, first member only). One type ⇄ one tag: a second `Add<T>` for the same type
-  with another tag, or a second type on a taken tag, throws at the call; the same pair again is an
-  idempotent no-op. The grammar is non-blank and free of `"`, `\` and control characters, because the
-  splice is unescaped and the damage would only surface on read-back.
+  dispatches on (first member only, and **case-insensitively** — `OrdinalIgnoreCase`, the rule the generated
+  polymorphic reader applies to a discriminator VALUE, which is what makes `Bnd6`'s "the same pair in either
+  case is a no-op" and the sniffer's `TryGetReadBinding` agree about what a tag is). One type ⇄ one tag: a
+  second `Add<T>` for the same type with another tag, or a second type on a taken tag, throws at the call;
+  the same pair again is an idempotent no-op. The grammar is non-blank and free of `"`, `\` and control
+  characters, because the splice is unescaped and the damage would only surface on read-back.
 - **The table is frozen and copied at construction** (`FrozenDictionary` per direction): the append and
   read paths take no lock, and `Add` after a store exists throws naming what froze the table instead of
   registering a rule that applies to nothing. A second store over the same options instance sees the same
@@ -482,8 +484,17 @@ refuses at its FIRST bound write — with no file created and no silent substitu
 | `TEventBase` already covers `SagaCompleted`/`SagaFailed` (`IDomainEvent` itself, or any base they derive from) | at **construction**, before the freeze | `InvalidOperationException`: they would be both ordinary and bound events — two routes, hence two tags — and the message says to use a class base of your own and let `EventTypeBindings` carry the framework events |
 | a bound type assignable to `TEventBase` (the framework defaults make this reachable) | at **construction**, after the seed | `InvalidOperationException`: one type, one registration |
 | a bound type with **no generation point** in any loaded assembly | at the **first append** that carries it | `InvalidOperationException` naming the type and the missing serializer, with the remedy (a closed call site in the consumer's assembly). Nothing is written: no partial batch, no truncated line, no fallback encode as `TEventBase` |
+| a bound tag that a `[PicoDerivedType]` registration on `TEventBase` already declares (the base's own reader resolves it) | at **construction**, after the seed and before the freeze is committed | `InvalidOperationException` naming the tag and both types: **one tag, one owner**. The read path asks the bindings FIRST, so the collision would decode the base's own lines as the bound type — that event and its members gone, with no error on the line — which is why the store refuses instead |
+| a bound payload that is not a JSON object (`[1,2]`, `42`, `null`, `{` with nothing behind it, `{` followed by blanks only) | at the **first append** that carries it, before any byte reaches the buffer | `FormatException` naming the tag, the bound type and what arrived; nothing written — no file, no version. Reachable from a consumer through `JsonSerializer.RegisterCustom<T>`, which replaces the top-level writer |
 | a `$type` the table does not know, on read | the read path | **not a failure**: unconditional fallback to `Deserialize<TEventBase>`, so a stream with custom discriminators of its own — or one written before the tags existed — reads exactly as before |
 
+- **The tag-clash refusal is the base's READER that decides, and it has one documented blind spot.** The
+  store asks `Deserialize<TEventBase>` about a discriminator-only object and reads "an event came back" as
+  "this tag is taken". A reader that RECOGNISES the tag and then throws — a derived event whose constructor
+  rejects the default arguments a memberless object supplies — is indistinguishable from an unknown tag
+  through the public API (there is no separate "is this discriminator declared?" signal), so the binding is
+  accepted and the base's own lines under that tag are read as the bound type. `Bnd19b` pins that as
+  documented behaviour, not as a bug to re-report.
 - **Mixed batches do not degrade the single-write contract.** `TEventBase ∪ bound` in one `AppendAsync`
   is one buffer, one write and one flush: a bound element never starts a second batch, opens a second
   handle or pays a second fsync, and a batch refused for any reason above has written nothing.
@@ -753,6 +764,28 @@ number; element and flush counts, the exact bytes on disk, and the log are the o
 So the two refusals of D5 sit in different files — `Bnd12` (the base cannot be an interface) and `Bnd7` (a
 bound type that is also the base) — and the "same pair again" row is asserted inside `Bnd6` rather than in a
 case of its own. A later delta continues from `Bnd21`; the numbering above is the suite, not a plan.
+
+#### The revisions after the first delta: `Bnd18`–`Bnd21`
+
+These are the cases the guard revisions added, and they live in the same three files.
+
+- **Bnd18/Bnd18b/Bnd18c/Bnd18d — the payload guard** (`BoundEventWriteTests.cs`): a bound payload that is
+  not a JSON object is refused with the store's own `FormatException` and nothing is written; the memberless
+  shapes (`{}`, `{ }`, `{  }`, `{}\n`, `{ }\n`) write the tag ALONE, with no dangling separator; an object
+  behind leading whitespace is framed as if the payload began at its brace; and `{` with nothing — or only
+  blanks — behind it is refused rather than spliced into `{"$type":"t",   `. The last two are the rows a
+  length test and a "the brace sits at `Length - 1`" test got wrong.
+- **Bnd19/Bnd19b — the tag clash** (`EventTypeBindingTests.cs`): a tag a `[PicoDerivedType]` registration on
+  `TEventBase` already declares is refused at construction — tag, base and bound type named, no file and the
+  options still usable — and Bnd19b documents the residual blind spot above by pinning that, when the
+  derived reader throws for its own reasons, the construction SUCCEEDS and the base's own line comes back
+  from `LoadAsync` as the bound type.
+- **Bnd20 — a throwing log sink** (`EventTypeBindingTests.cs`): construction completes although every log
+  call throws, the frozen table is committed whole in both directions, and the store is usable; the table
+  still refuses a late `Add`.
+- **Bnd21 — the sniffer's classification** (`BoundEventReadTests.cs`): a table of whitespace and control
+  bytes around the discriminator, asserted by CLASSIFICATION (dispatch or fallback) instead of by one
+  example per shape.
 
 ## Repo surface
 

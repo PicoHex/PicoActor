@@ -219,10 +219,7 @@ public sealed class BoundEventReadTests
         // other in a single edit; the assertion below is the half that had no test.
         await Assert
             .That(
-                message.Contains(
-                    "the file holds lines this store wrote",
-                    StringComparison.Ordinal
-                )
+                message.Contains("the file holds lines this store wrote", StringComparison.Ordinal)
             )
             .IsTrue();
         await Assert

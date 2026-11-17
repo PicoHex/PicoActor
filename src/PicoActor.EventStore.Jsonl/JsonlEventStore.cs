@@ -144,9 +144,13 @@ public sealed class JsonlEventStore<TEventBase>
     /// <c>event type bindings: {RegisteredCount} registered ({FrameworkDefaultCount} framework-default)</c>,
     /// carrying the counts of the table THIS store reads. It is emitted LAST, so a construction that
     /// throws (a refused base, a doubly-registered type, a root the TypePrefix pass rejects) logs
-    /// nothing — it never produced a store to attest to. A sink that THROWS does not fail the
-    /// construction either: the line is the last thing the constructor does, the bindings are already
-    /// frozen, and the store is complete without it.
+    /// nothing — it never produced a store to attest to. The attestation line does not fail the
+    /// construction either: it is the last thing the constructor does, the bindings are already frozen,
+    /// and the store is complete without it. That guard covers THIS line and no other: under
+    /// <see cref="FileNameFormat.TypePrefix"/> the constructor also runs the type-map pass, whose
+    /// <c>ScanRoot</c> Warning goes to the same sink UNGUARDED — a sink that throws there still escapes
+    /// the constructor. That hole is known and out of scope here (guarding every log call is a different
+    /// contract); it is named so this one guarded line is not mistaken for the rule.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="rootDirectory"/> is null, empty or whitespace.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><see cref="JsonlEventStoreOptions.MaxAggregateLocks"/> is not positive.</exception>
@@ -240,10 +244,14 @@ public sealed class JsonlEventStore<TEventBase>
                         );
                     }
 
-                    // The other way a binding can lose to the base type, and the SILENT one (I1): the
-                    // bound type cannot derive from TEventBase, but the TAG it was given already belongs
-                    // to a [PicoDerivedType] registration on TEventBase. The write path splices the tag it
-                    // was given, so nothing here fails — the line is simply read back as that OTHER event.
+                    // The other way a binding can take a tag that already has an owner, and the SILENT
+                    // one (I1): the bound type cannot derive from TEventBase, but the TAG it was given
+                    // already belongs to a [PicoDerivedType] registration on TEventBase. The READ path
+                    // asks the bindings FIRST (DeserializeLine tries the tag's binding before it falls
+                    // back to the polymorphic reader), so the damage lands on the base's OWN lines: every
+                    // line already on disk under that tag is deserialized as the BOUND type, and the
+                    // event type and members the base wrote are gone. Nothing on the write side can
+                    // notice — it splices whatever tag it was given.
                     // The probe runs on the CANDIDATE table, i.e. against the tags this store will really
                     // carry (framework defaults included), and before the freeze is committed.
                     if (table.TryGetTag(bound, out var boundTag))
@@ -1730,17 +1738,21 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <summary>
-    /// Construction-time guard (I1): a bound tag that <typeparamref name="TEventBase"/>'s own polymorphic
-    /// reader ALREADY recognises can never be dispatched to its binding — the base's reader answers for
-    /// that discriminator BEFORE any binding is consulted, so every line this store writes under the tag is
-    /// read back as the derived event that registration names. The write path cannot notice (it splices
-    /// whatever tag it was given), which is what made this a SILENT error instead of a refusal.
+    /// Construction-time guard (I1): a tag may have ONE owner. A bound tag that
+    /// <typeparamref name="TEventBase"/>'s own polymorphic reader ALREADY recognises belongs to the
+    /// <c>[PicoDerivedType]</c> registration that declares it, and the READ path asks the BINDINGS first
+    /// (<c>DeserializeLine</c> tries the tag's binding before the polymorphic reader ever runs), so a
+    /// binding on that tag does not lose to the base — it WINS, and every line the base already wrote
+    /// under the tag is deserialized as the bound type, with the base's event type and its members gone.
+    /// The write path cannot notice (it splices whatever tag it was given), which is what makes this a
+    /// SILENT substitution instead of a failure.
     /// <para>
     /// The probe is the READ PATH'S OWN CALL — <c>Deserialize&lt;TEventBase&gt;</c> over a
     /// discriminator-only object — not an attribute scan: the same closed call site keeps AOT and the
     /// reader's semantics identical to the ones a real read gets, and it costs one deserialization per
     /// bound tag, once per store. A derived event whose members are missing deserializes happily from an
-    /// otherwise empty object, so "RETURNED instead of throwing" is the signal.
+    /// otherwise empty object, so "RETURNED instead of throwing" is the signal: a returned event means
+    /// the base's reader SUCCESSFULLY parsed this tag, i.e. the tag is taken.
     /// </para>
     /// <para>
     /// A throw means the base's reader does not claim this tag — a <see cref="FormatException"/> for a
@@ -1748,6 +1760,17 @@ public sealed class JsonlEventStore<TEventBase>
     /// throws <see cref="InvalidOperationException"/> for EVERY payload) is equally NOT evidence of a
     /// clash. Refusing on those would make the store unconstructible over a base type that is merely
     /// unwritable, which is a different failure with its own diagnosis, on the first write.
+    /// </para>
+    /// <para>
+    /// KNOWN RESIDUAL HOLE — the criterion is "the base's reader SUCCESSFULLY parses the tag, therefore
+    /// the tag is taken", and the public API carries no second signal to ask: "is this discriminator
+    /// declared?" has no separate entry point, and the reader is the only oracle — it answers with an
+    /// event or an exception. So a derived type whose reader RECOGNISES the tag and then THROWS (a member
+    /// the generated decoder cannot honour, a constructor that rejects the default arguments the
+    /// memberless probe supplies) reads as "not claimed" and slips through: the construction succeeds,
+    /// and the tagged lines the base wrote are then decoded by the binding. <c>Bnd19b</c> pins that as a
+    /// documented fact rather than a bug report; a consumer whose event validates its arguments should
+    /// give the binding a distinct tag instead of relying on this guard.
     /// </para>
     /// <para>
     /// The attempt leaves NOTHING behind: a deserialization reads its bytes and returns, so the store's
@@ -1776,9 +1799,11 @@ public sealed class JsonlEventStore<TEventBase>
                 + $"{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.EventTypeBindings)}, "
                 + $"but it already names a derived type of {typeof(TEventBase).FullName}: a "
                 + $"[PicoDerivedType] registration on {typeof(TEventBase).FullName} declares that same "
-                + "$type, and the base's polymorphic reader answers for it before any binding is "
-                + "consulted - so every line written under this tag would be read back as that other "
-                + "event, silently. Give the binding a tag of its own, or delete the Add line."
+                + "$type. The read path asks the bindings BEFORE the polymorphic reader, so a binding on "
+                + "this tag wins: every line the base already wrote under it is read back as "
+                + $"{boundType.FullName} - the base's event type and its members are lost, silently, "
+                + "with no error on the line that names them. One tag, one owner: give the binding a "
+                + "tag of its own, or delete the Add line."
         );
     }
 
