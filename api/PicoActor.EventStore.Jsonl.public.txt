@@ -6,6 +6,7 @@ I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventLogReader
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventStore
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventStoreEnumerator
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventStoreSnapshot
+M:PicoActor.EventStore.Jsonl.EventTypeBindings.Add``1(string tag) : PicoActor.EventStore.Jsonl.EventTypeBindings
 M:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions..ctor() : void
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1..ctor(string rootDirectory, PicoActor.EventStore.Jsonl.JsonlEventStoreOptions options = null) : void
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.AppendAsync(System.Guid actorId, ulong expectedVersion, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask`1<ulong> override
@@ -16,10 +17,14 @@ M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.LoadSnapshotAsync(System.Guid act
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.OpenAsync(System.Guid actorId, ulong fromVersion, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IEventCursor> override
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> override
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.SaveSnapshotAsync(System.Guid actorId, PicoActor.Abs.ActorSnapshot snapshot, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask override
+P:PicoActor.EventStore.Jsonl.EventTypeBindings.FrameworkDefaultCount : int { get; }
+P:PicoActor.EventStore.Jsonl.EventTypeBindings.RegisteredCount : int { get; }
+P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.EventTypeBindings : PicoActor.EventStore.Jsonl.EventTypeBindings { get; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.FileNameFormat : PicoActor.EventStore.Jsonl.FileNameFormat { get; init; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.FlushToDisk : bool { get; init; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.Logger : PicoLog.Abs.ILogger { get; init; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.MaxAggregateLocks : int { get; init; }
+T:class PicoActor.EventStore.Jsonl.EventTypeBindings
 T:class PicoActor.EventStore.Jsonl.JsonlEventStoreOptions
 T:class PicoActor.EventStore.Jsonl.JsonlEventStore`1
 T:enum PicoActor.EventStore.Jsonl.FileNameFormat
