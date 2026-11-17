@@ -117,10 +117,10 @@ public sealed class BoundEventReadTests
     // ── The sniff agrees with the generated reader about what a tag IS: case does not matter ─────
 
     /// <summary>
-    /// The generated polymorphic reader compares the discriminator VALUE case-insensitively
-    /// (<c>TextHelpers.Eq(…, ignoreCase: false)</c> in the emitted deserializer), so this store's sniff
-    /// does too — the member name and the tag alike. Writing is unaffected: the tag the write path
-    /// splices is the one that was REGISTERED, verbatim, so a re-written line is canonical again.
+    /// The generated polymorphic reader compares the discriminator VALUE case-insensitively, so this
+    /// store's sniff does too — the member name and the tag alike. Writing is unaffected: the tag the
+    /// write path splices is the one that was REGISTERED, verbatim, so a re-written line is canonical
+    /// again.
     /// </summary>
     [Test, Timeout(15000)]
     public async Task Bnd4b_DiscriminatorIsMatchedCaseInsensitively(
@@ -211,6 +211,22 @@ public sealed class BoundEventReadTests
         // And never the wrong remedy.
         await Assert
             .That(message.Contains("[PicoDerivedType]", StringComparison.Ordinal))
+            .IsFalse();
+
+        // AND the leg is pinned, not just the source of the tag (I2). "The payload does not fit the tag"
+        // has its own remedy — look at the FILE — and the write leg's has the opposite one ("nothing was
+        // written: look at the type"). The two legs share one wrapper, so one wording can be lost to the
+        // other in a single edit; the assertion below is the half that had no test.
+        await Assert
+            .That(
+                message.Contains(
+                    "the file holds lines this store wrote",
+                    StringComparison.Ordinal
+                )
+            )
+            .IsTrue();
+        await Assert
+            .That(message.Contains("could not be written", StringComparison.Ordinal))
             .IsFalse();
     }
 

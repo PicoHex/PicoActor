@@ -2,7 +2,7 @@
 
 **Rev-6 delta — event type bindings (`EventTypeBindings`).** Added after the rev-5 / naming round and
 marked inline where it applies: §Public surface (`EventTypeBindings` + the option property),
-§Failure policy «Bindings and framework events», §Testing (`Bnd0`–`Bnd17`). The delta makes a **type
+§Failure policy «Bindings and framework events», §Testing (`Bnd0`–`Bnd21`). The delta makes a **type
 outside `TEventBase`** writable and readable — the framework's own `SagaCompleted`/`SagaFailed` first,
 because `SagaActor` persists them into the aggregate's stream in the same flush — and it is **additive
 on the wire**: a stream of `TEventBase` events is byte-identical to rev 5, an unrecognised `$type` still
@@ -645,7 +645,7 @@ read path's**, single-flight, bounded, invalidated per id — and that an append
 
 ### Bindings (rev-6 delta): the suites under `tests/PicoActor.EventStore.Jsonl.Tests/`
 
-`Bnd0`…`Bnd17` state the binding contract, and **the numbers below follow the suites as shipped** — the
+`Bnd0`…`Bnd21` state the binding contract (the write path, the read path, the two construction refusals, the tag-clash probe and the sniffing edge cases), and **the numbers below follow the suites as shipped** — the
 cases live in THREE files, not one: `EventTypeBindingTests.cs` (the table itself, plus one separate class
 for the generation tripwire), `BoundEventWriteTests.cs` (the append path) and `BoundEventReadTests.cs`
 (the read path). Each case is asserted **where the operator's fix belongs**: at the `Add` call, at the
@@ -752,7 +752,7 @@ number; element and flush counts, the exact bytes on disk, and the log are the o
 
 So the two refusals of D5 sit in different files — `Bnd12` (the base cannot be an interface) and `Bnd7` (a
 bound type that is also the base) — and the "same pair again" row is asserted inside `Bnd6` rather than in a
-case of its own. A later delta continues from `Bnd17`; the numbering above is the suite, not a plan.
+case of its own. A later delta continues from `Bnd21`; the numbering above is the suite, not a plan.
 
 ## Repo surface
 

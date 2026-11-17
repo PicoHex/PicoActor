@@ -399,10 +399,13 @@ public sealed class BoundEventWriteTests
     /// <summary>
     /// The separator is emitted only when there is a MEMBER to separate, and the payload the splice
     /// examines is whatever the type's own writer produced: <c>{}</c> for a memberless record, and
-    /// <c>{ }</c> for the same object written by a consumer's
-    /// <see cref="JsonSerializer.RegisterCustom{T}"/> serializer. A <c>Length &gt; 2</c> test calls the
-    /// second one "has members" and writes <c>{"$type":"t", }</c> — a trailing comma, invalid JSON,
-    /// invisible at write time and fatal on read-back. Both cases must produce the tag ALONE.
+    /// <c>{ }</c>, <c>{  }</c> or <c>{ }</c> followed by a newline for the SAME object written by a
+    /// consumer's <see cref="JsonSerializer.RegisterCustom{T}"/> serializer. A <c>Length &gt; 2</c> test
+    /// calls them "has members" and writes <c>{"$type":"t", }</c> — a trailing comma, invalid JSON,
+    /// invisible at write time and fatal on read-back. Neither a LENGTH nor a "the closing brace sits at
+    /// <c>Length - 1</c>" POSITION answers the question: the last row below is the one a positional test
+    /// got wrong, splicing a separator in front of a brace that had merely arrived early. Every row must
+    /// write the tag ALONE.
     /// </summary>
     [Test, Timeout(15000)]
     public async Task Bnd18b_MemberlessPayload_IsAlwaysWrittenWithoutASeparator(
@@ -411,13 +414,10 @@ public sealed class BoundEventWriteTests
     {
         _ = cancellationToken;
 
-        // The `{ }` half needs a writer that emits whitespace between the braces; a generated one never
-        // does, so this is the consumer hook again.
-        JsonSerializer.RegisterCustom(
-            new WhitespacePayloadSerializer(),
-            new WhitespacePayloadDeserializer()
-        );
-        // The `{}` half is MilestoneReached's own generated writer (Bnd1b pins that exact path).
+        // Every row but `{}` needs a writer that emits the payload; a generated one writes `{}` and
+        // nothing else, so those are the consumer hook again.
+        JsonSerializer.RegisterCustom(new ShapedPayloadSerializer(), new ShapedPayloadDeserializer());
+        // The `{}` row is MilestoneReached's own generated writer (Bnd1b pins that exact path).
         _ = JsonSerializer.SerializeToUtf8Bytes(new MilestoneReached());
 
         (string Label, IDomainEvent Event, string Expected)[] cases =
@@ -429,8 +429,23 @@ public sealed class BoundEventWriteTests
             ),
             (
                 "whitespace-only memberless payload ({ }):",
-                new WhitespaceOnlyEvent(),
-                "{\"$type\":\"whitespace\"}"
+                new ShapedPayloadEvent("{ }"),
+                "{\"$type\":\"shaped\"}"
+            ),
+            (
+                "wider whitespace-only memberless payload ({  }):",
+                new ShapedPayloadEvent("{  }"),
+                "{\"$type\":\"shaped\"}"
+            ),
+            (
+                "memberless payload with a trailing newline ({}\n):",
+                new ShapedPayloadEvent("{}\n"),
+                "{\"$type\":\"shaped\"}"
+            ),
+            (
+                "memberless payload with a space and a trailing newline ({ }\n):",
+                new ShapedPayloadEvent("{ }\n"),
+                "{\"$type\":\"shaped\"}"
             ),
         ];
 
@@ -440,7 +455,7 @@ public sealed class BoundEventWriteTests
             var options = new JsonlEventStoreOptions();
             // BOTH bindings on every store, so the loop differs only in the event it appends.
             options.EventTypeBindings.Add<MilestoneReached>("memberless");
-            options.EventTypeBindings.Add<WhitespaceOnlyEvent>("whitespace");
+            options.EventTypeBindings.Add<ShapedPayloadEvent>("shaped");
             var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
             var id = Guid.NewGuid();
 
@@ -449,7 +464,55 @@ public sealed class BoundEventWriteTests
             var lines = await File.ReadAllLinesAsync(StreamPath(temp.Root, id), cancellationToken);
             await Assert.That(lines.Length).IsEqualTo(1).Because(label);
             await Assert.That(lines[0]).IsEqualTo(expected).Because(label);
+
+            // …and it READS BACK as the bound type: what follows the tag must still be an object this
+            // store's own sniff routes, not a separator with nothing behind it.
+            var reloaded = await store.LoadAsync(id);
+            await Assert.That(reloaded.Count).IsEqualTo(1).Because(label);
+            await Assert.That(reloaded[0].GetType()).IsEqualTo(boundEvent.GetType()).Because(label);
         }
+    }
+
+    // ── Bnd18c: the payload's OBJECT may start after whitespace too (D2) ───────────────────────────
+
+    /// <summary>
+    /// The guard's question is "is the payload a JSON OBJECT", and whitespace in front of the brace does
+    /// not stop it from being one: a writer that indents, or that emits a leading newline, produced a
+    /// perfectly valid object. A <c>payload[0] != '{'</c> test refuses it with the wording that belongs
+    /// to <c>[1,2]</c> and <c>42</c> — the operator is told their type writes a non-object when it writes
+    /// one — while the splice drops a BRACE, not byte 0. The start check therefore skips the same
+    /// whitespace the memberless check does, and the line is framed as if the payload had begun at its
+    /// brace.
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd18c_PayloadWithLeadingWhitespace_IsStillAnObject(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        JsonSerializer.RegisterCustom(new ShapedPayloadSerializer(), new ShapedPayloadDeserializer());
+
+        // One of each whitespace byte JSON allows, then a real object. A generated writer never emits
+        // this; the consumer hook does, and the refusal must not call it a non-object.
+        const string payload = " \t\r\n{\"Result\":null}";
+
+        using var temp = new TempRoot();
+        var options = new JsonlEventStoreOptions();
+        options.EventTypeBindings.Add<ShapedPayloadEvent>("shaped");
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
+        var id = Guid.NewGuid();
+
+        await store.AppendAsync(id, 0, [new ShapedPayloadEvent(payload)]);
+
+        var lines = await File.ReadAllLinesAsync(StreamPath(temp.Root, id), cancellationToken);
+        await Assert.That(lines.Length).IsEqualTo(1);
+        // The blanks in front of the brace leave WITH the brace — they frame nothing — and the payload's
+        // own member list follows the tag unchanged.
+        await Assert.That(lines[0]).IsEqualTo("{\"$type\":\"shaped\",\"Result\":null}");
+
+        var reloaded = await store.LoadAsync(id);
+        await Assert.That(reloaded.Count).IsEqualTo(1);
+        await Assert.That(reloaded[0].GetType()).IsEqualTo(typeof(ShapedPayloadEvent));
     }
 
     /// <summary>
@@ -496,11 +559,15 @@ public sealed record MilestoneReached : IDomainEvent;
 public sealed record ArrayPayloadEvent : IDomainEvent;
 
 /// <summary>
-/// A bound type whose own serializer writes <c>{ }</c> — the SAME memberless object as
-/// <see cref="MilestoneReached"/>, with whitespace between the braces (Bnd18b). The splice decides
-/// "has members" from the JSON behind the dropped brace, never from the payload's length.
+/// A bound type whose own writer is the TEST's (Bnd18b/Bnd18c):
+/// <see cref="JsonSerializer.RegisterCustom{T}"/> replaces the top-level writer for the type it is given,
+/// so <see cref="Payload"/> is never serialized — those bytes ARE the payload. It is the one public hook
+/// into the payload's SHAPE, and the shapes a generated writer never produces (<c>{ }</c>, <c>{  }</c>,
+/// <c>{}</c> plus a newline, an object behind leading blanks) are exactly the ones the splice must
+/// survive: a downstream serializer is free to pretty-print.
 /// </summary>
-public sealed record WhitespaceOnlyEvent : IDomainEvent;
+public sealed record ShapedPayloadEvent(string Payload) : IDomainEvent;
+
 
 /// <summary>Writes <c>[1,2]</c> for every <see cref="ArrayPayloadEvent"/>.</summary>
 internal sealed class ArrayPayloadSerializer : ISerializer<ArrayPayloadEvent>
@@ -515,15 +582,16 @@ internal sealed class ArrayPayloadDeserializer : IDeserializer<ArrayPayloadEvent
     public ArrayPayloadEvent Deserialize(ReadOnlySpan<byte> data) => new();
 }
 
-/// <summary>Writes <c>{ }</c> for every <see cref="WhitespaceOnlyEvent"/>.</summary>
-internal sealed class WhitespacePayloadSerializer : ISerializer<WhitespaceOnlyEvent>
+/// <summary>Writes the test's own bytes, verbatim, for every <see cref="ShapedPayloadEvent"/>.</summary>
+internal sealed class ShapedPayloadSerializer : ISerializer<ShapedPayloadEvent>
 {
-    public void Serialize(IBufferWriter<byte> writer, WhitespaceOnlyEvent value) =>
-        writer.Write("{ }"u8);
+    public void Serialize(IBufferWriter<byte> writer, ShapedPayloadEvent value) =>
+        writer.Write(Encoding.UTF8.GetBytes(value.Payload));
 }
 
 /// <summary>Reads nothing, for the same reason as <see cref="ArrayPayloadDeserializer"/>.</summary>
-internal sealed class WhitespacePayloadDeserializer : IDeserializer<WhitespaceOnlyEvent>
+internal sealed class ShapedPayloadDeserializer : IDeserializer<ShapedPayloadEvent>
 {
-    public WhitespaceOnlyEvent Deserialize(ReadOnlySpan<byte> data) => new();
+    public ShapedPayloadEvent Deserialize(ReadOnlySpan<byte> data) => new(string.Empty);
 }
+

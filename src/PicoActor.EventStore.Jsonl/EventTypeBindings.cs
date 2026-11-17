@@ -30,10 +30,11 @@ public sealed class EventTypeBindings
     private readonly Dictionary<Type, string> _tagByType = new();
 
     // ORDINAL-IGNORE-CASE, and not for tidiness: the generated polymorphic reader matches the
-    // discriminator VALUE case-insensitively (TextHelpers.Eq(…, ignoreCase: false) in the emitted
-    // deserializer), so this store's read path must too — and a tag map that answered "not bound" for a
-    // differently-cased spelling of a bound tag would send a perfectly readable line down the fallback
-    // path. Registration follows the READER: two tags that differ only in case are ONE tag, and binding
+    // discriminator VALUE case-insensitively, so this store's read path must too — and a tag map that
+    // answered "not bound" for a differently-cased spelling of a bound tag would send a perfectly
+    // readable line down the fallback path. `Bnd4b` holds the two readers against each other with a
+    // differently-cased line, so the claim is measured rather than asserted. Registration follows the
+    // READER: two tags that differ only in case are ONE tag, and binding
     // a second type to the other spelling is refused like any other duplicate.
     private readonly Dictionary<string, Type> _typeByTag = new(StringComparer.OrdinalIgnoreCase);
 

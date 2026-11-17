@@ -1656,7 +1656,23 @@ public sealed class JsonlEventStore<TEventBase>
             // violate: it costs two comparisons, which is the right price for the only failure in this
             // method that could corrupt a file instead of throwing. The bound type is named, and so is
             // WHAT arrived, because the defect is in that type's own writer.
-            if (payload.Length < 2 || payload[0] != (byte)'{')
+            // "Is an object" is a question about the first BYTE OF JSON, not about byte 0: a writer that
+            // indents, or that opens with a newline, produced a perfectly valid object, and a `payload[0]`
+            // test refused it with the wording that belongs to `[1,2]`. So the same whitespace skip the
+            // memberless test uses runs first, and every index below is relative to the brace it finds.
+            // A payload with nothing behind its brace (`{`) is not an object either: there is nothing to
+            // frame, and splicing it would emit `{"$type":"t",` — so the memberless check refuses to run
+            // past the end rather than inventing a close.
+            var objectStart = 0;
+            SkipJsonWhitespace(payload, ref objectStart);
+            var opensAnObject = objectStart < payload.Length && payload[objectStart] == (byte)'{';
+            var memberStart = objectStart + 1;
+            if (opensAnObject)
+            {
+                SkipJsonWhitespace(payload, ref memberStart);
+            }
+
+            if (!opensAnObject || memberStart >= payload.Length)
             {
                 throw new FormatException(
                     $"Cannot serialize '{path}' as {domainEvent.GetType().FullName} through the event "
@@ -1668,7 +1684,7 @@ public sealed class JsonlEventStore<TEventBase>
             }
 
             // D2's byte splice, spelled out because every byte here is permanent wire format:
-            //   '{"$type":"' + tag + '"' [',' only if the payload has members] + payload[1..]
+            //   '{"$type":"' + tag + '"' [',' only if the payload has members] + payload[after the brace]
             // The payload's OPENING BRACE IS DROPPED and the payload itself is never rewritten:
             //   {"Result":null}  +  tag  ->  {"$type":"PicoActorSagaCompleted","Result":null}
             //   {}               +  tag  ->  {"$type":"<tag>"}
@@ -1677,23 +1693,26 @@ public sealed class JsonlEventStore<TEventBase>
             // gives {"$type":"t",{"Result":null}; joining a memberless payload with a comma gives
             // {"$type":"t",} — and a trailing comma is not JSON.
             // "Has members" is a question about the JSON behind the dropped brace, NOT about the payload's
-            // LENGTH: `{}` and `{ }` are the same memberless object, and a length test called the second
-            // one "has members" and wrote `{"$type":"t", }`. So the first non-whitespace byte is examined
-            // instead, and a memberless payload is closed right behind the discriminator (its own
-            // whitespace is the only thing left to write, and it is dropped with the brace).
+            // LENGTH and not about WHERE the closing brace sits: `{}`, `{ }`, `{  }` and a memberless
+            // payload that ends with a newline are ONE shape, and both a length test and a
+            // "the brace is at Length - 1" test called the whitespace ones "has members" — writing
+            // `{"$type":"t", }` and `{"$type":"t",}` respectively, neither of them JSON. So the first
+            // non-whitespace byte BEHIND the brace decides: a `}` means memberless, and the line is
+            // closed right behind the discriminator.
             // The opening bytes are the BINDING's, not this event's (M2): precomputed and frozen with the
             // table, so a bound append interpolates nothing and encodes nothing.
             buffer.Write(prefix);
-            var memberStart = 1;
-            SkipJsonWhitespace(payload, ref memberStart);
-            if (memberStart == payload.Length - 1 && payload[memberStart] == (byte)'}')
+            if (payload[memberStart] == (byte)'}')
             {
                 buffer.WriteByte((byte)'}');
                 return;
             }
 
+            // Written from just behind the BRACE, never from byte 0, so blanks a writer put in front of
+            // its object cannot drag in front of the discriminator; whatever sits between the brace and
+            // the first member follows the comma, which is exactly where JSON allows whitespace.
             buffer.WriteByte((byte)',');
-            buffer.Write(payload, 1, payload.Length - 1);
+            buffer.Write(payload, objectStart + 1, payload.Length - objectStart - 1);
             return;
         }
 
