@@ -332,7 +332,8 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   one re-scan on that aggregate's next append, never correctness. `Logger` is independent of the DI
   `ILoggerFactory`: pass the same logger explicitly to see the store's warnings in your log.
 - Not in this release: multi-process writers, archive/retention/compaction, foreign (non-event)
-  lines, encryption/compression, and a second codec for framework events.
+  lines, encryption/compression. Framework events need **no second codec**: bindings route them to
+  serializers generated in the store package (see «Framework events (event type bindings)» below).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -393,6 +394,38 @@ batch whose first event is of another type still appends to the name the stream 
   failed lazy pass (misconfiguration, unreadable root, root that is a file) is **latched**: the same
   exception is raised by every later observation and the directory is never re-scanned, so the only
   recovery is a new store instance once the directory is fixed.
+
+#### Framework events (event type bindings)
+
+`SagaCompleted`/`SagaFailed` are `sealed`, derive from `IDomainEvent` and not from your `TEventBase`, so a
+saga stream holds a type your serializer never met. `JsonlEventStoreOptions.EventTypeBindings` routes
+framework events into the same store — the framework pre-registers `SagaCompleted → PicoActorSagaCompleted`
+and `SagaFailed → PicoActorSagaFailed` (`TryAdd`, so your own `Add<T>(tag)` wins; `FrameworkDefaultCount`
+is how many defaults were actually applied, `0…2`, and `RegisteredCount` is the total).
+
+- **`Add<T>(tag)` routes only; it generates nothing.** The tag is the line's `$type` and what the read side
+  sniffs (first member, case-insensitive, unconditional fallback to `TEventBase`), so the type still needs
+  a generated serializer. `[GenerateSerializer(typeof(T))]` on a **positional record** does not work
+  (PicoSerDe's attribute pipeline cannot see a primary constructor: `CS7036`/`CS8852`); the working form is
+  a **closed call site** — the literal calls in `FrameworkEventSerializers.Generate()`. A bound type with
+  no generation point is refused at the **first append** (`InvalidOperationException`, with the remedy).
+- **Mixed batches are one write:** `TEventBase` and bound events share a batch — one buffer, one write,
+  one flush.
+- **Naming.** The two framework tags are the tags production corpora already carry, and permanent wire
+  format (no alias). A stream is named by its first event's CLR short name as usual; under `TypePrefix`,
+  a name outside every registered *type* prefix (`unknown-<id>.jsonl`, a host's own categorisation) is
+  reachable **by id**, invisible to type enumeration, never counted `ForeignFormatFiles` and never
+  triggers the whole-directory throw. A prefix contains no `-`; equal short names share one prefix.
+- **`SagaCompleted.Result` is `object?`, and the serializer cannot write a non-null value at all** (the
+  generated writer emits the member with no value). `null` — the only shape the framework produces today
+  — round-trips; anything else fails loudly and writes nothing. Keep `Result` null in a persistent store.
+- **Registration rules.** Bindings live on the options instance — `options.EventTypeBindings.Add<T>(tag)`
+  before the store is constructed: the constructor **freezes and copies** the table, so a later `Add`
+  throws instead of being silently ignored. One type has exactly one tag and one tag names exactly one
+  type (the same pair again is a no-op; a tag is non-blank and carries no quote, backslash or control
+  character). A base that already covers the framework events (`IDomainEvent` itself) is refused at
+  construction — they would be both ordinary and bound events — and so is a bound type assignable to
+  `TEventBase`.
 
 ### Idle Passivation (opt-in)
 

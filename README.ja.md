@@ -337,7 +337,8 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `ILoggerFactory` とは独立です:ストアの警告を自分のログで見たいなら同じ logger を明示的に
   渡してください。
 - 本リリースの対象外:マルチプロセス書き込み、アーカイブ/保持/コンパクション、外来(非イベント)行、
-  暗号化/圧縮、フレームワークイベント用の第 2 コーデック。
+  暗号化/圧縮。フレームワークイベントに**第 2 のコーデックは不要**です：バインディングは store パッケージで
+  生成されるシリアライザへルーティングするだけです（後述の「Framework events」参照）。
 
 #### Stream naming（ストリームのファイル命名、`FileNameFormat`）
 
@@ -400,6 +401,40 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   （誤設定、読めないルート、ファイルであるルート）は **latch** されます：以後のどの観測も同じ例外を
   投げ、ディレクトリが再スキャンされることはないため、唯一の回復手段はディレクトリを直したうえで
   **インスタンスを作り直す**ことです。
+
+#### Framework events (event type bindings)（フレームワークイベントの型バインディング）
+
+`SagaCompleted`/`SagaFailed` は `sealed` で、あなたの `TEventBase` ではなく `IDomainEvent` を実装しているため、
+saga ストリームにはシリアライザが一度も見たことのない型が入ります。`JsonlEventStoreOptions.EventTypeBindings`
+はフレームワークイベントを同じ store にルーティングします。フレームワークは
+`SagaCompleted → PicoActorSagaCompleted` と `SagaFailed → PicoActorSagaFailed` を事前登録しており（`TryAdd`
+なので、あなた自身の `Add<T>(tag)` が優先されます。`FrameworkDefaultCount` は実際に適用されたデフォルト数
+`0…2`、`RegisteredCount` は合計です）。
+
+- **`Add<T>(tag)` はルーティングのみで、生成はしません。** tag は行の `$type` であり、読み取り側が嗅ぐ値でも
+  あります（先頭メンバー、大文字小文字を区別しない、判別できなければ無条件に `TEventBase` へフォールバック）。
+  ただし型には生成済みシリアライザが必要です。**positional record** に対する `[GenerateSerializer(typeof(T))]`
+  は使えません（PicoSerDe の属性パイプラインは主コンストラクタを読めず `CS7036`/`CS8852`）。使えるのは
+  **閉じた呼び出し点**、すなわち `FrameworkEventSerializers.Generate()` 内のリテラル呼び出しです。生成点を持た
+  ない bound 型は**最初の書き込み**で拒否されます（`InvalidOperationException`、対処法を明示）。
+- **混在バッチも 1 回の書き込み：** `TEventBase` と bound イベントは同じバッチを共有します——1 つのバッファ、
+  1 回の書き込み、1 回の flush。
+- **命名。** 2 つのフレームワーク tag は本番コーパスが既に持つ tag であり、恒久的なワイヤ形式です（alias
+  なし）。ストリームは従来どおり先頭イベントの CLR 短名で命名されますが、`TypePrefix` では登録済み**型**
+  プレフィックスの外にある名前（`unknown-<id>.jsonl`、ホスト独自の分類）は **id で到達可能**、型の列挙には現れず、
+  `ForeignFormatFiles` にも数えられず、ディレクトリ全体の例外も引き起こしません。プレフィックスに `-` は
+  含まれず、同じ短名は同じプレフィックスを共有します。
+- **`SagaCompleted.Result` は `object?` で、しかもシリアライザは非 null の値を書き出せません**（生成された
+  writer はメンバー名だけを書き、値を書きません）。`null`——フレームワークが今日生成する唯一の形——は正常に
+  往復します。それ以外の値はその場で失敗し、1 バイトも書きません。永続ストアでは `Result` を `null` のままに
+  してください。
+- **登録のルール。** バインディングは options インスタンス上にあります——store を構築する**前に**
+  `options.EventTypeBindings.Add<T>(tag)` を呼びます。コンストラクタはこの表を**凍結してコピー**するため、
+  後からの `Add` は黙って無視されるのではなく例外になります。1 つの型に tag は 1 つ、1 つの tag が指す型も
+  1 つだけです（同じ組の再呼び出しは no-op。tag は非空で、引用符・バックスラッシュ・制御文字を含みません）。
+  フレームワークイベントを包含してしまう基底型（`IDomainEvent` そのものなど）は構築時に拒否されます——
+  それらは通常イベントと bound イベントの両方になってしまうからです。`TEventBase` に代入可能な bound 型
+  も同様に拒否されます。
 
 ### Idle Passivation (opt-in)（アイドルパッシベーション、オプション）
 

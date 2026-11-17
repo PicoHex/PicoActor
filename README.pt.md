@@ -343,7 +343,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `Logger` é independente do `ILoggerFactory` do DI: passe o mesmo logger explicitamente para ver
   os avisos do armazenamento no seu log.
 - Fora desta versão: escritores multiprocesso, arquivamento/retenção/compactação, linhas estranhas
-  (não eventos), criptografia/compressão e um segundo codec para eventos do framework.
+  (não eventos), criptografia/compressão. Eventos do framework **não pedem um segundo codec**: os vínculos
+  os encaminham para serializadores gerados no pacote do store (veja «Framework events (event type
+  bindings)» abaixo).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -407,6 +409,41 @@ posterior cujo primeiro evento seja de outro tipo continua anexando ao nome com 
   lazy pass que falha (má configuração, raiz ilegível, raiz que é um arquivo) fica **latcheado**: a mesma
   exceção é relançada em toda observação posterior e o diretório nunca é varrido de novo, então a única
   recuperação é uma **instância nova** depois de o diretório ser corrigido.
+
+#### Framework events (event type bindings) (eventos do framework: vínculos de tipo)
+
+`SagaCompleted`/`SagaFailed` são `sealed`, derivam de `IDomainEvent` e não do seu `TEventBase`, então um
+stream de saga guarda um tipo que o seu serializador nunca viu.
+`JsonlEventStoreOptions.EventTypeBindings` encaminha os eventos do framework para o mesmo store — o framework
+pré-registra `SagaCompleted → PicoActorSagaCompleted` e `SagaFailed → PicoActorSagaFailed` (`TryAdd`, então o
+seu próprio `Add<T>(tag)` vence; `FrameworkDefaultCount` é quantos padrões foram realmente aplicados, `0…2`,
+e `RegisteredCount` é o total).
+
+- **`Add<T>(tag)` só encaminha, não gera nada.** O tag é o `$type` da linha e o que o lado de leitura fareja
+  (primeiro membro, sem diferenciar maiúsculas, com queda incondicional para `TEventBase`), mas o tipo ainda
+  precisa de um serializador gerado. `[GenerateSerializer(typeof(T))]` em um **positional record** não
+  funciona (o pipeline de atributos do PicoSerDe não enxerga um construtor primário: `CS7036`/`CS8852`); a
+  forma que funciona é um **ponto de chamada fechado** — as chamadas literais em
+  `FrameworkEventSerializers.Generate()`. Um tipo vinculado sem ponto de geração é recusado no **primeiro
+  append** (`InvalidOperationException`, com o remédio na mensagem).
+- **Lotes mistos são uma só escrita:** `TEventBase` e eventos vinculados compartilham o lote — um buffer, uma
+  escrita, um flush.
+- **Nomes.** Os dois tags do framework são os tags que os corpora de produção já carregam, e são formato de
+  fio permanente (sem alias). Um stream é nomeado, como sempre, pelo nome curto CLR do seu primeiro evento;
+  com `TypePrefix`, um nome fora de todo prefixo de **tipo** registrado
+  (`unknown-<id>.jsonl`, categorização própria de um host) é **alcançável por id**, invisível à enumeração por tipo, nunca contado em `ForeignFormatFiles` e nunca
+  dispara o throw do diretório inteiro. Um prefixo não contém `-`; nomes curtos iguais compartilham prefixo.
+- **`SagaCompleted.Result` é `object?` — e seu serializador não sabe gravar nenhum valor não nulo** (o
+  writer gerado escreve só o nome do membro, sem valor). `null` — a única forma que o framework produz hoje
+  — faz ida e volta; qualquer outra coisa falha na hora e não grava um único byte. Num store persistente,
+  mantenha `Result` em `null`.
+- **Regras de registro.** Os vínculos ficam na instância de opções —
+  `options.EventTypeBindings.Add<T>(tag)` **antes** de construir o store: o construtor **congela e copia** a
+  tabela, então um `Add` posterior lança em vez de ser ignorado em silêncio. Um tipo tem exatamente um tag e
+  um tag nomeia exatamente um tipo (o mesmo par de novo é um no-op; um tag não é vazio e não contém aspas,
+  barra invertida nem caractere de controle). Uma base que já cobre os eventos do framework (`IDomainEvent`
+  em si) é recusada na construção — seriam ao mesmo tempo eventos comuns e vinculados — e o mesmo vale para um
+  tipo vinculado atribuível a `TEventBase`.
 
 ### Idle Passivation (opt-in) (Passivação por inatividade, opcional)
 

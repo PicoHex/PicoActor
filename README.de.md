@@ -347,8 +347,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `Logger` ist unabhängig von der DI-`ILoggerFactory`: übergeben Sie denselben Logger explizit,
   um die Warnungen des Speichers in Ihrem Log zu sehen.
 - Nicht in dieser Version: Mehrprozess-Schreiber, Archivierung/Aufbewahrung/Kompaktierung, fremde
-  (Nicht-Ereignis-)Zeilen, Verschlüsselung/Kompression und ein zweiter Codec für
-  Framework-Ereignisse.
+  (Nicht-Ereignis-)Zeilen, Verschlüsselung/Kompression. Framework-Ereignisse brauchen **keinen zweiten
+  Codec**: Bindungen routen sie an Serializer, die im Store-Paket generiert werden (siehe unten
+  «Framework events (event type bindings)»).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -418,6 +419,43 @@ Namen, mit dem der Stream geboren wurde.
   Freigabeverletzung. Ein fehlgeschlagener Lazy-Pass (Fehlkonfiguration, unlesbares Root, Root als Datei)
   wird **gelatcht**: jede spätere Beobachtung wirft dieselbe Ausnahme, und das Verzeichnis wird nie erneut
   gescannt — die einzige Erholung ist eine **neue Instanz**, sobald das Verzeichnis in Ordnung ist.
+
+#### Framework events (event type bindings) (Framework-Ereignisse: Typ-Bindungen)
+
+`SagaCompleted`/`SagaFailed` sind `sealed`, leiten von `IDomainEvent` ab und nicht von Ihrem `TEventBase` —
+ein Saga-Stream enthält also einen Typ, den Ihr Serializer nie gesehen hat.
+`JsonlEventStoreOptions.EventTypeBindings` leitet Framework-Ereignisse in denselben Store: Das Framework
+registriert `SagaCompleted → PicoActorSagaCompleted` und `SagaFailed → PicoActorSagaFailed` vorab (`TryAdd`,
+Ihr eigenes `Add<T>(tag)` gewinnt also; `FrameworkDefaultCount` ist die Zahl der tatsächlich angewandten
+Defaults, `0…2`, `RegisteredCount` die Gesamtzahl).
+
+- **`Add<T>(tag)` routet nur, es generiert nichts.** Der Tag ist das `$type` der Zeile und das, was die
+  Leseseite erschnüffelt (erstes Member, Groß-/Kleinschreibung egal, bei Unbekanntem unbedingter Rückfall auf
+  `TEventBase`) — der Typ braucht trotzdem einen generierten Serializer. `[GenerateSerializer(typeof(T))]` auf
+  einem **positional record** funktioniert nicht (PicoSerDes Attribut-Pipeline sieht keinen Primärkonstruktor:
+  `CS7036`/`CS8852`); die funktionierende Form ist eine **geschlossene Aufrufstelle** — die literalen Aufrufe
+  in `FrameworkEventSerializers.Generate()`. Ein gebundener Typ ohne Generierungsstelle wird beim **ersten
+  Append** abgelehnt (`InvalidOperationException`, mit dem Ausweg in der Meldung).
+- **Gemischte Batches sind ein Schreibvorgang:** `TEventBase` und gebundene Ereignisse teilen sich einen Batch
+  — ein Puffer, ein Schreibvorgang, ein Flush.
+- **Benennung.** Die beiden Framework-Tags sind die Tags, die Produktionskorpora bereits tragen, und
+  dauerhaftes Wire-Format (kein Alias). Ein Stream heißt wie üblich nach dem CLR-Kurznamen seines ersten
+  Ereignisses; unter `TypePrefix` ist ein Name außerhalb jedes registrierten **Typ**-Präfixes
+  (`unknown-<id>.jsonl`, die eigene Kategorisierung eines Hosts) **per id** erreichbar, in der Typ-Enumeration unsichtbar, zählt nie in
+  `ForeignFormatFiles` und löst nie den Verzeichnis-weiten Throw aus. Ein Präfix enthält kein `-`; gleiche
+  Kurznamen teilen sich ein Präfix.
+- **`SagaCompleted.Result` ist `object?` — und der Serializer kann einen Nicht-null-Wert gar nicht
+  schreiben** (der generierte Writer schreibt nur den Membernamen, keinen Wert). `null` — die einzige Form,
+  die das Framework heute erzeugt — geht hin und zurück; alles andere scheitert sofort und schreibt kein
+  Byte. In einem persistenten Store `Result` auf `null` halten.
+- **Regeln der Registrierung.** Bindungen liegen auf der options-Instanz —
+  `options.EventTypeBindings.Add<T>(tag)` **vor** dem Konstruieren des Stores: Der Konstruktor **friert die
+  Tabelle ein und kopiert sie**, ein späteres `Add` wirft also, statt still ignoriert zu werden. Ein Typ hat
+  genau einen Tag und ein Tag benennt genau einen Typ (dasselbe Paar erneut ist ein No-op; ein Tag ist
+  nicht leer und enthält kein Anführungszeichen, keinen Backslash und kein Steuerzeichen). Eine Basis, die
+  die Framework-Ereignisse bereits abdeckt (`IDomainEvent` selbst), wird beim Konstruieren abgelehnt — sie
+  wären zugleich gewöhnliche und gebundene Ereignisse — und ebenso ein gebundener Typ, der `TEventBase`
+  zuweisbar ist.
 
 ### Idle Passivation (opt-in) (Idle-Passivierung, optional)
 

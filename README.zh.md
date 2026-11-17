@@ -321,8 +321,8 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 - `MaxAggregateLocks`(默认 `1024`)为每聚合门闩表设上界;被淘汰的条目只会让该聚合的下一次
   追加多扫一遍,不影响正确性。`Logger` 独立于 DI 的 `ILoggerFactory`:要看到存储的告警,
   就把同一个 logger 显式传进来。
-- 本次发布不含:多进程写入、归档/保留/压缩、外来(非事件)行、加密/压缩,以及框架事件的
-  第二套编解码器。
+- 本次发布不含:多进程写入、归档/保留/压缩、外来(非事件)行、加密/压缩。框架事件**不需要第二套编解码器**：
+  绑定只是把它们路由到 store 包内生成的序列化器（见下文「Framework events」）。
 
 #### Stream naming（流文件命名，`FileNameFormat`）
 
@@ -371,6 +371,31 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `InvalidOperationException` 并指出障碍物——读路径与追加路径、两种布局都一样——而不是“空聚合”或
   一个裸的共享冲突。失败的 lazy pass（误配、根目录不可读、根目录是文件）会被 **latch**：之后每一次
   观察都抛同一个异常，而且目录不会再被扫描一次，因此唯一的恢复方式是目录修好后**重建实例**。
+
+#### Framework events (event type bindings)（框架事件：事件类型绑定）
+
+`SagaCompleted`/`SagaFailed` 是 `sealed`，派生自 `IDomainEvent` 而不是你的 `TEventBase`，因此 saga 流里躺着一个
+你的序列化器从未见过的类型。`JsonlEventStoreOptions.EventTypeBindings` 把框架事件路由进同一个 store——框架
+预注册 `SagaCompleted → PicoActorSagaCompleted` 与 `SagaFailed → PicoActorSagaFailed`（`TryAdd`，所以你自己
+的 `Add<T>(tag)` 优先；`FrameworkDefaultCount` 是实际应用了几个默认绑定，`0…2`，`RegisteredCount` 是总数）。
+
+- **`Add<T>(tag)` 只路由，不生成。** tag 就是行内的 `$type`，也是读侧嗅探的依据（首个成员、大小写不敏感、
+  认不出就无条件回落 `TEventBase`），但该类型仍需要一个已生成的序列化器。对 **positional record** 而言
+  `[GenerateSerializer(typeof(T))]` 不可用（PicoSerDe 的属性管线读不到主构造器：`CS7036`/`CS8852`）；
+  可用形式是**闭合调用点**——`FrameworkEventSerializers.Generate()` 里的字面调用。没有生成点的 bound
+  类型会在**首写**被拒绝（`InvalidOperationException`，消息里给出 remedy）。
+- **混批就是一次写：** `TEventBase` 与 bound 事件共用同一个 batch——一条 buffer、一次写、一次 flush。
+- **命名。** 两个框架 tag 就是生产语料已有的 tag，是永久线格式（无 alias）。流仍按首事件的 CLR 短名命名；
+  在 `TypePrefix` 下，落在所有已注册**类型**前缀之外的名字（`unknown-<id>.jsonl`，宿主自己的分类）**按 id 可达**、按类型枚举不可见、
+  不计入 `ForeignFormatFiles`、也不会触发整目录抛。前缀不含 `-`；同短名共用一个前缀。
+- **`SagaCompleted.Result` 是 `object?`，而序列化器根本写不出非 null 的值**（生成的 writer 只写出成员名、
+  不写值）。`null`——框架今天唯一产生的形状——能正常往返；其它任何值都会当场失败，且一个字节也不会写入。
+  持久化存储里请让 `Result` 保持 `null`。
+- **注册规则。** 绑定挂在 options 实例上——在构造 store **之前**调用
+  `options.EventTypeBindings.Add<T>(tag)`：构造函数会**冻结并拷贝**这张表，之后的 `Add` 会抛异常，而不是被
+  静默忽略。一个类型只有一个 tag，一个 tag 只命名一个类型（同一对重复调用是 no-op；tag 非空且不含引号、
+  反斜杠或控制字符）。会把框架事件一并覆盖的基类（例如 `IDomainEvent` 本身）在构造时被拒绝——否则它们既
+  是普通事件又是 bound 事件；可赋值给 `TEventBase` 的 bound 类型同样被拒绝。
 
 ### Idle Passivation (opt-in)（空闲钝化，可选）
 
