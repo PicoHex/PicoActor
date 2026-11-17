@@ -1,4 +1,10 @@
-# Generic JSONL event store — design (rev 5)
+# Generic JSONL event store — design (rev 5 + stream-naming delta)
+
+**Rev-5 delta — stream naming (`FileNameFormat`).** Added after the round-5 fixes and marked
+inline where it applies: §Intent (the rename is gone), §File layout «Name layouts», §Failure
+policy «Directory and name level», §Public surface (`FileNameFormat` + option), §Testing (G1a–G9).
+The delta is **name-level only**: the line format, the `PASJ` container and the cursor contract
+are unchanged, and `IdOnly` (the default) reproduces rev 5 byte for byte.
 
 Status: revised after four spec reviews (2026-11-16). Rev 5 closes the round-4 items (C1 registration form, C2 DI ownership, C3 CPM, I1 gen embedding, I2 dependency assets, I3 samples, I4 verify-package, I5/I6 append semantics, I7 layering deltas, I8 test support, M1–M5) and fixes the round-5 table damage; Option A remains the family decision.
 **Option A** (no `EventStore.Abs`; contracts stay in `PicoActor.Abs`), which removes the
@@ -26,11 +32,27 @@ contracts this repository already defines — `IEventStore`, `IEventLogReader`, 
 `IEventStoreSnapshot`, `IEventStoreEnumerator` (all in `PicoActor.Abs`).
 
 **Goal (narrow).** Behaviourally replaceable for **append / load / peek / enumerate / snapshot**.
-PicoAgent adoption is an **out-of-repo follow-up**: it needs a one-way file rename
-(`{type}-{id}.jsonl` → `<id:D>.jsonl`), a decision for lines only its decoder handles (framework
-saga events use a second codec; unknown `$type` lines are skipped), a snapshot rewrite (no `PASJ`
-header), replacements for ledger/checkpoint/fact scans and archive, and explicit acceptance of
-`FlushToDisk = false` (it fsyncs every append).
+PicoAgent adoption is an **out-of-repo follow-up**: it needs a decision for lines only its decoder
+handles (framework saga events use a second codec; unknown `$type` lines are skipped), a snapshot
+rewrite (no `PASJ` header), replacements for ledger/checkpoint/fact scans and archive, and explicit
+acceptance of `FlushToDisk = false` (it fsyncs every append). It needs **no file rename** — see the
+delta below.
+
+**Rev-5 delta — §Intent: the "one-way file rename" no longer holds.** Rev 5 assumed the new store's
+`<id:D>.jsonl` was the only layout, which turned `<type>-<id>.jsonl` (what PicoAgent already writes)
+into a migration debt: every stream renamed once, offline, with no way to tell a half-migrated
+directory from a healthy one. `FileNameFormat.TypePrefix` removes that debt at the **name** level:
+
+- `<type>-<id:D>.jsonl` becomes a first-class layout (prefix = `events[0]`'s concrete type name,
+  **fixed at creation**; enumeration resolves ids from names with **zero file opens**), so pointing
+  this store at a PicoAgent directory is a configuration change, not a migration.
+- The rename is not merely *tolerated*, it is **diagnosed**, and detection is **symmetric**: under
+  `TypePrefix` a bare `<id>.jsonl` is the other layout, under `IdOnly` a prefixed name is. Pointing a
+  store at a directory of the other layout is therefore a loud `InvalidOperationException` naming
+  both counts — never a silently empty system, which is how a whole history disappears from view.
+- `IdOnly` stays the **default** and stays the historical layout (names, enumeration, counts), so
+  nothing above changes for an existing deployment; the mixed-directory machinery is what makes
+  *either* direction safe, and it costs an `IdOnly` store nothing until it is actually mixed.
 
 ## Goals
 
@@ -119,7 +141,16 @@ public sealed record JsonlEventStoreOptions
 {
     public bool FlushToDisk { get; init; }        // default false
     public int MaxAggregateLocks { get; init; } = 1024;   // must be > 0
+    public FileNameFormat FileNameFormat { get; init; }   // default IdOnly; an undefined value
+                                                          // throws ArgumentOutOfRangeException
     public PicoLog.Abs.ILogger? Logger { get; init; }      // null = silent
+}
+
+// rev-5 delta: the NAME-level contract. The line format is identical in both modes.
+public enum FileNameFormat
+{
+    IdOnly = 0,      // <id:D>.jsonl — default, the historical layout, reproduced byte for byte
+    TypePrefix = 1,  // <type>-<id:D>.jsonl — prefix = events[0].GetType().Name, fixed at creation
 }
 ```
 
@@ -128,8 +159,24 @@ public sealed record JsonlEventStoreOptions
   materialized `List`** (the `IEventStore.LoadAsync` contract permits a lazy view; this store
   chooses eager).
 - Diagnostics: `internal long DeserializedEventCount`, `internal long TornTailLines`,
-  `internal long SkippedFileNames`, `internal int LockEntryCount` (read via
+  `internal long SkippedFileNames`, `internal long FilesOpened`, `internal long DirectoryScans`,
+  `internal long ForeignFormatFiles`, `internal int LockEntryCount` (read via
   `InternalsVisibleTo("PicoActor.EventStore.Jsonl.Tests")`).
+  - `FilesOpened` — read handles opened (a load, a cursor move, a count, a peek; a **write** handle is
+    not an open for this counter). It is the number that states the `TypePrefix` win: one open per
+    stream under `IdOnly`, **zero** under `TypePrefix`.
+  - `DirectoryScans` — classification passes. Every enumeration pays one in both modes (that pass is
+    where a foreign name, an unparseable id, the other layout and a whole-directory
+    misconfiguration are diagnosed). `TypePrefix` pays one more at construction (the map) and one per
+    resolved miss; `IdOnly` pays exactly ONE more and only lazily, at the first observation of a
+    stream it does not have — a store that only touches streams it already has never scans.
+  - `ForeignFormatFiles` — entries classified as the *other* layout, **MONOTONIC** because it is the
+    gate of the `IdOnly` duplicate guard: once any pass has seen another layout here, appends check.
+    Non-zero with zero configured-format names is a misconfiguration, not an empty store.
+- **The constructor can throw `InvalidOperationException`** (rev-5 delta): under `TypePrefix` it runs
+  the map pass, so a root whose streams are all in the other layout fails at construction instead of
+  at the first enumeration. Under `IdOnly` construction still touches nothing (no scan, no directory,
+  no throw) — the same misconfiguration surfaces at the first observation of a missing stream.
 - **Logger**: `Options.Logger` is independent of the DI `ILoggerFactory`; a host that wants the
   store's warnings in its log passes the same logger explicitly (the DI extension does not wire
   it).
@@ -197,6 +244,32 @@ Embeds in the Jsonl package (a project that only uses InMemory never pays):
 - `PASJ` is the file container; the actor's `PAS1` schema envelope lives **inside** the opaque
   payload.
 
+### Name layouts (rev-5 delta)
+
+`JsonlEventStoreOptions.FileNameFormat` chooses how a stream **file is named**. The line format is
+identical in both layouts, so the name is the only thing that distinguishes a stream of one from a
+stream of the other — which is exactly why a mixture has to be diagnosed rather than merged.
+
+| `FileNameFormat` | Stream file | Enumeration cost |
+|---|---|---|
+| `IdOnly` = `0` (**default**) | `<root>/<id:D>.jsonl` | one file OPEN per stream: the type is in the content, so the first event must be read |
+| `TypePrefix` = `1` | `<root>/<type>-<id:D>.jsonl` | zero opens: the type and the id come from the names |
+
+- `{type}` is `events[0].GetType().Name` — the concrete type of the stream's **first persisted
+  event**, backtick arity kept, never `FullName`. An empty prefix is impossible by construction:
+  only a non-empty batch creates a stream, and the batch is what supplies the type (`PathForNew`).
+- **The prefix is fixed at creation.** An existing stream keeps the name it was born with, whatever a
+  later batch's first event is called (G7). The `id → type` map is learned from the names (one pass
+  at construction, under `TypePrefix` only) and completed by every classification pass, so a cold
+  start costs one pass — and a resolved **miss** costs one more, never one per id.
+- **Name grammar lives in one place** (`JsonlNames`): strip `.jsonl` only **after** an `EndsWith`
+  guard (a `x.txt` is shorter than the suffix, and a bare slice throws inside a boot-time scan), then
+  split the type prefix at the **first** `-` — a `D` GUID contains four hyphens, so a
+  `LastIndexOf('-')` split would hand back the trailing twelve hex digits as the "id".
+- **Snapshots are name-format independent**: `<root>-snapshots/<id:D>.snap`, keyed by the aggregate
+  **id**, never by the stream's name. A snapshot survives its stream being archived, deleted or never
+  written at all, and the `PASJ` container is unchanged (G4).
+
 ## Semantics (fixed)
 
 - **Version model**: 1-based, one per event, `version ≡ count`.
@@ -258,6 +331,41 @@ Embeds in the Jsonl package (a project that only uses InMemory never pays):
   | `PeekFirstAsync` | first line only: empty file → null; torn first line → null; a terminated line that cannot deserialize → **null** (matches `IEventStore.PeekFirstAsync`'s existing contract: "returns null when … yields no deserializable event") |
   | `ListAggregateIdsAsync` | non-`*.jsonl`/non-Guid names skipped (warn + `SkippedFileNames`); empty file skipped; a corrupt first line yields no id (via `PeekFirstAsync` → null) — enumeration never aborts boot |
 
+### Directory and name level (rev-5 delta)
+
+Every scan is ONE classification pass (`JsonlNames.Classify`), and every directory entry lands in
+exactly one bucket. That is what turns a mixed directory into a diagnosis instead of an empty
+enumeration:
+
+| Bucket | Meaning | Counter / report |
+|---|---|---|
+| configured match | configured layout, name parsed (prefix + id) | none — a candidate for the query |
+| configured, other type | configured layout, prefix ≠ the queried `firstEventType` | **none**: many stream types in one directory is the NORMAL case, not a mixture |
+| other format | valid only under the *other* layout's rule (symmetric) | `ForeignFormatFiles` (monotonic) + **one** Warning per scan, not one per file |
+| unparseable id | configured SHAPE whose suffix is not a `D` GUID | `SkippedFileNames` + one warning per name |
+| foreign entry | anything else (a README, a lease, a non-`.jsonl` name, an empty stem) | `SkippedFileNames` + one warning per name |
+
+- **A whole directory in the other layout THROWS**: `configured == 0 && other > 0` →
+  `InvalidOperationException` naming the root, both counts, both formats and the two ways out
+  (migrate the directory, or set `FileNameFormat`). It is raised from **every** scan — enumeration,
+  construction (a `TypePrefix` map pass) and the `IdOnly` lazy pass — because "empty system" is the
+  one answer that lets an operator keep writing into a history it cannot see.
+- **Duplicate guard** (`AppendAsync`, before the encode, so a refused append has touched no file):
+
+  | Mode | Check | Cost |
+  |---|---|---|
+  | `TypePrefix` | the other layout's name IS derivable from the id | one `new FileInfo(path) is { Exists: true, Length: > 0 }` stat per append, ungated |
+  | `IdOnly` | the other layout's prefix lives in the NAME and is not derivable | one directory pass per append, gated on `ForeignFormatFiles > 0` |
+
+  A **zero-length** file is not a stream (rev 5 lets a failed append leave one), so it never blocks an
+  append; only a non-empty second history does. The price is stated, not hidden: `TypePrefix` pays one
+  stat per append — the `<id>.jsonl` layout's advantage is precisely that it needs none — and `IdOnly`
+  pays a directory pass per append only where a scan has already reported the directory as mixed.
+- **Two prefixes for one id** (`A-<id>.jsonl` **and** `B-<id>.jsonl` under `TypePrefix`) are two
+  histories of one aggregate: the classification pass records the conflict, the append refuses and
+  lists both candidates, and the store never invents a third name for a stream it will not extend.
+- **An empty batch** validates `expectedVersion` and creates nothing in either mode: no duplicate
+  guard, no file, no directory, no lazy pass (G9).
 - **Locks and caches**: one bounded LRU entry per aggregate holds the gate, the cached count and
   the length witness (`MaxAggregateLocks`, evict only when no holder/waiter; same rule as
   `RebuildGateTable`). Eviction costs one re-scan on the next append. **Deviation, documented**:
@@ -317,6 +425,58 @@ contains only events, so an un-deserializable line is corruption and throws.
 - **AOT proof**: extend the existing sample (published per RID and **run** by CI); `dotnet test`
   is JIT-run and proves nothing about ILC.
 
+### Naming (rev-5 delta): `tests/PicoActor.EventStore.Jsonl.Tests/FileNameFormatTests.cs`
+
+Counter assertions are **deltas** (read before, assert after), never totals, so each case states the
+cost model instead of a snapshot of it.
+
+- **G1a — `IdOnly` is untouched.** A store over a pre-written v2026.9.0 directory: `DirectoryScans`,
+  `ForeignFormatFiles` and `FilesOpened` are `0` after construction; an append to the existing stream
+  resolves with no scan (`DirectoryScans` still `0`); exactly one `<id:D>.jsonl` is on disk; the
+  enumeration that follows pays exactly ONE pass and opens ≥ 1 file.
+- **G2 — `TypePrefix` enumerates the NAMES, zero opens.** Three streams, then a COLD instance: the
+  enumeration moves `FilesOpened` by `0` and returns the same three ids as the `IdOnly` control,
+  whose enumeration moves it by `3`. The id set is asserted on its own (an empty set satisfies "zero
+  opens" too), and the on-disk names must be `<type>-<id:D>.jsonl`.
+- **G2b — the two buckets that must not be confused.** A stream of ANOTHER type under `TypePrefix` is
+  neither counted nor logged; a configured-SHAPE name with an unparseable id is one
+  `SkippedFileNames` plus one warning, with no exception.
+- **G3 — the read path is format independent.** Same events, two roots: `GetVersionAsync`, cursor
+  `Current`, peek and load answer identically. One documented deviation, asserted both ways: an id
+  whose FIRST line is corrupt is still enumerated under `TypePrefix` (its name is valid, nothing is
+  opened) and is not under `IdOnly` (the corrupt first line yields no id).
+- **G4 — snapshots are keyed by id.** `SaveSnapshotAsync` for an id with NO stream writes
+  `<root>-snapshots/<id:D>.snap`, creates no stream file, and keeps the `PASJ` bytes unchanged; a NEW
+  `TypePrefix` instance reads it back with `FilesOpened == 0`.
+- **G5a — one id in BOTH layouts, non-empty in the other one**: the append throws before a byte is
+  written (`GetVersionAsync` unchanged) — the store never opens a second history.
+- **G5b — the other layout's file is ZERO-LENGTH**: the append succeeds; a failed append's leftover
+  is not a stream.
+- **G5c — a short foreign name (`x.txt`)**: one `SkippedFileNames`, one warning, no throw — the
+  `EndsWith` guard precedes the slice exactly for this.
+- **G5d — ONE warning per SCAN**: two other-format entries count two in `ForeignFormatFiles` but
+  produce a single report; a half-migrated directory must not become a warning storm.
+- **G5e — duplicate prefixes**: under `IdOnly` (prefixed candidates, gate open after a scan) and
+  under `TypePrefix` (both names in the configured format) the append refuses, names both files and
+  writes no third name — both directions, because "foreign" depends only on the configured layout.
+- **G6 — a `TypePrefix`-only directory under `IdOnly` options throws**
+  `InvalidOperationException` from the ENUMERATION with `configured: 0` and `other-format: N` in the
+  message; the mirror case (an `IdOnly`-only directory under `TypePrefix`) throws from the
+  CONSTRUCTOR, because that is where its map pass runs.
+- **G7 — a renamed event type is format dependent.** A stream renamed to `RetiredType-<id>.jsonl`:
+  `IdOnly` still finds it (content), `TypePrefix` answers it only for `RetiredType` (name) and
+  reports nothing as skipped; a later append keeps the retired prefix, and no
+  `SSnapshotAdded-<id>.jsonl` appears beside it.
+- **G8 — a host that never enumerates still gets the diagnosis.** Loads/appends only, against a
+  directory in the other layout: the FIRST missing-stream observation (a LOAD counts, not just an
+  append) throws, the failed pass is LATCHED (the next observation throws again instead of decaying
+  into "empty aggregate"), `DirectoryScans` stops at one, and the refused append forks no second
+  stream.
+- **G9 — an empty batch validates the version and creates nothing.** Under `TypePrefix`: a stale
+  `expectedVersion` throws `ConcurrencyException` with the right `ActorId`/expected/actual; a current
+  one is a no-op answering the observed version; `DirectoryScans` does not move; neither `<id>.jsonl`
+  nor a second name appears.
+
 ## Repo surface
 
 | Change | Why |
@@ -336,7 +496,9 @@ contains only events, so an un-deserializable line is corruption and throws.
 
 - `README.md` + 9 translations (**10 README files**): a "JSONL event store (opt-in)" section —
   package, base-type registration, torn-tail/corruption policy, cursor/tail-only rebuild,
-  `FlushToDisk`; and the InMemory package's DI extension.
+  `FlushToDisk`, a "Stream naming" subsection (`FileNameFormat`, both modes, the PicoAgent
+  zero-rename migration, mixed-directory diagnosis, default unchanged); and the InMemory package's
+  DI extension.
 - `picohex-actor` skill: the new packages in the trigger list + durable-store subsection.
 - `docs/release-notes/v<version>.md`: one **x** release for the family move + the new package
   (downstream migrates once: package refs + usings + the DI store registration), `api/` refreshed
@@ -352,3 +514,8 @@ contains only events, so an un-deserializable line is corruption and throws.
 5. **No `PicoActor.EventStore.Abs`**: contracts stay in `PicoActor.Abs` (Option A). A true store
    contracts package would need `IDomainEvent`/`IEvent` to move into a shared kernel package first
    — rejected for this design.
+6. **`FileNameFormat.IdOnly` stays the default** (rev-5 delta). `TypePrefix` is opt-in: it buys an
+   enumeration with zero opens and costs one `stat` per append, and a default that renamed files
+   would make every v2026.9.0 directory a migration on upgrade. The two layouts share the line
+   format, so the choice is reversible for a directory that was never mixed; a mixed one is
+   diagnosed in both directions rather than merged.

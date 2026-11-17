@@ -334,6 +334,42 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 - Not in this release: multi-process writers, archive/retention/compaction, foreign (non-event)
   lines, encryption/compression, and a second codec for framework events.
 
+#### Stream naming (`FileNameFormat`)
+
+`JsonlEventStoreOptions.FileNameFormat` picks how a stream **file is named**; the line format is
+identical in both modes, so only the names differ and an existing directory stays readable.
+
+| Value | Stream file | What it buys |
+|---|---|---|
+| `IdOnly` (default) | `<id:D>.jsonl` | the historical layout, reproduced byte for byte — no migration, no change for an existing directory |
+| `TypePrefix` | `<type>-<id:D>.jsonl` | the type rides in the name, so `ListAggregateIdsAsync` resolves the ids from file names alone: **zero file opens** per enumeration |
+
+`{type}` is `events[0].GetType().Name` — the concrete type of the stream's **first persisted event**
+(a generic type keeps its backtick arity) — and it is **fixed when the stream is created**: a later
+batch whose first event is of another type still appends to the name the stream was born with.
+
+- **Migrating to `TypePrefix`.** PicoAgent already names its streams `{type}-{id}.jsonl`, so pointing
+  this store at such a directory with `FileNameFormat = TypePrefix` needs **no rename at all** — the
+  directory is readable as it stands, and snapshots carry over unchanged too (they are keyed by
+  aggregate id, `<id:D>.snap`, never by the stream's name). The reverse is not offered: a prefix is
+  part of the name, so an `IdOnly` store cannot derive it and would need every file renamed.
+- **A mixed directory is diagnosed, never merged.** Entries valid only under the *other* layout are
+  counted and reported as **one** Warning per scan (detection is symmetric: `<id>.jsonl` under
+  `TypePrefix` and `<type>-<id>.jsonl` under `IdOnly` both count as "other format"). A directory
+  with **zero** configured-format names and **some** other-format names throws
+  `InvalidOperationException` naming both counts, both formats and the two ways out — from
+  enumeration, construction and the lazy pass alike — instead of reporting an empty system. A stream
+  of *another event type* is not a mixture: that is the normal case, and it costs no counter and no
+  log line. An append for an id that already holds a non-empty stream in the other layout — or two
+  different prefixes — is refused before a byte is written.
+- **Cost.** `TypePrefix` pays one filename pass at construction (to learn the id → type map), one per
+  resolved miss, and one `stat` per append for the duplicate guard. `IdOnly` pays **nothing** at
+  construction and nothing for an append to a stream it already has; its single directory pass runs
+  lazily at the first observation of a stream it does not have, and never again — a failed pass is
+  latched and re-raised, so a misconfigured root cannot quietly decay into "empty aggregate". An
+  empty batch writes nothing and creates nothing in either mode, but still validates
+  `expectedVersion`.
+
 ### Idle Passivation (opt-in)
 
 Actors stay in memory until stopped. For workloads with many long-lived

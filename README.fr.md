@@ -351,6 +351,45 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   étrangères (non-événements), chiffrement/compression, et un second codec pour les événements du
   framework.
 
+#### Stream naming (`FileNameFormat`)
+
+`JsonlEventStoreOptions.FileNameFormat` décide **comment le fichier** d'un flux est nommé ; le format
+de ligne est identique dans les deux modes, seuls les noms changent — un répertoire existant reste
+donc lisible.
+
+| Valeur | Fichier du flux | Ce que cela apporte |
+|---|---|---|
+| `IdOnly` (par défaut) | `<id:D>.jsonl` | la disposition historique, reproduite octet pour octet — aucune migration, aucun changement pour un répertoire existant |
+| `TypePrefix` | `<type>-<id:D>.jsonl` | le type voyage dans le nom : `ListAggregateIdsAsync` résout les id à partir des seuls noms de fichiers — **zéro ouverture de fichier** par énumération |
+
+`{type}` est `events[0].GetType().Name` — le type concret du **premier événement persisté** du flux
+(un type générique conserve son arité avec accent grave) — et il est **figé à la création** : un lot
+ultérieur dont le premier événement est d'un autre type écrit toujours dans le nom avec lequel le flux
+est né.
+
+- **Migrer vers `TypePrefix`.** PicoAgent nomme déjà ses flux `{type}-{id}.jsonl` : pointer ce store
+  sur un tel répertoire avec `FileNameFormat = TypePrefix` ne demande **aucun renommage** — le
+  répertoire se lit tel quel, et les snapshots suivent inchangés (ils sont indexés par l'id de
+  l'agrégat, `<id:D>.snap`, jamais par le nom du flux). Le sens inverse n'est pas proposé : le préfixe
+  fait partie du nom, un store `IdOnly` ne peut pas le déduire et devrait renommer chaque fichier.
+- **Un répertoire mixte est diagnostiqué, jamais fusionné.** Les entrées valides uniquement sous
+  l'*autre* disposition sont comptées et signalées par **un** Warning par
+  scan (la détection est symétrique : `<id>.jsonl` sous `TypePrefix` et `<type>-<id>.jsonl` sous
+  `IdOnly` relèvent tous deux de « l'autre format »). Un répertoire avec **zéro** nom au format
+  configuré et **quelques** noms dans l'autre lève `InvalidOperationException` en nommant les deux
+  comptes, les deux formats et les deux issues — depuis l'énumération, la construction et le lazy pass
+  de la même façon — au lieu de signaler un système vide. Un flux d'*un autre type d'événement* n'est
+  pas un mélange : c'est le cas normal, sans compteur ni ligne de log. Un append pour un id qui a déjà
+  un flux non vide dans l'autre disposition — ou deux préfixes différents — est refusé avant qu'un
+  seul octet ne soit écrit.
+- **Coût.** `TypePrefix` paie un parcours des noms de fichiers à la construction (pour apprendre la
+  table id → type), un par résolution manquée, et un `stat` par append pour la garde anti-doublon.
+  `IdOnly` ne paie **rien** à la construction ni pour un append vers un flux qu'il possède déjà ; son
+  unique parcours de répertoire est paresseux, à la première observation d'un flux absent, et jamais
+  ensuite — un parcours en échec est latché puis relancé, pour qu'une racine mal configurée ne dégénère
+  pas en silence en « agrégat vide ». Un lot vide n'écrit rien et ne crée rien dans les deux modes,
+  mais valide toujours `expectedVersion`.
+
 ### Idle Passivation (opt-in) (Passivation par inactivité, optionnel)
 
 Les acteurs restent en mémoire jusqu'à leur arrêt. Pour les charges comportant de nombreux
