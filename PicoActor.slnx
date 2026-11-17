@@ -13,6 +13,8 @@
   <Folder Name="/tests/">
     <File Path="tests\README.md" />
     <Project Path="tests/PicoActor.Abs.Tests/PicoActor.Abs.Tests.csproj" />
+    <Project Path="tests/PicoActor.EventStore.InMemory.Tests/PicoActor.EventStore.InMemory.Tests.csproj" />
+    <Project Path="tests/PicoActor.TestSupport/PicoActor.TestSupport.csproj" />
     <Project Path="tests/PicoActor.Tests/PicoActor.Tests.csproj" />
   </Folder>
 </Solution>

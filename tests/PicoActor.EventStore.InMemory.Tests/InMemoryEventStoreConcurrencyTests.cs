@@ -1,4 +1,4 @@
-namespace PicoActor.Tests;
+namespace PicoActor.EventStore.InMemory.Tests;
 
 /// <summary>Test event — file-level so the Mediator generator can reference it.</summary>
 public sealed record ProbeCreated(int Seq) : IDomainEvent;

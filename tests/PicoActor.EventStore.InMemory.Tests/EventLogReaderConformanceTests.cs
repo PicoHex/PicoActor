@@ -1,4 +1,4 @@
-namespace PicoActor.Tests;
+namespace PicoActor.EventStore.InMemory.Tests;
 
 /// <summary>The bundled in-memory store satisfies the cursor read port.</summary>
 [InheritsTests]
