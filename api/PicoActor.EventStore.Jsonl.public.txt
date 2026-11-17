@@ -1,3 +1,6 @@
+F:PicoActor.EventStore.Jsonl.FileNameFormat.IdOnly : PicoActor.EventStore.Jsonl.FileNameFormat = 0 const
+F:PicoActor.EventStore.Jsonl.FileNameFormat.TypePrefix : PicoActor.EventStore.Jsonl.FileNameFormat = 1 const
+F:PicoActor.EventStore.Jsonl.FileNameFormat.value__ : int
 I:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions : System.IEquatable`1<PicoActor.EventStore.Jsonl.JsonlEventStoreOptions>
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventLogReader
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventStore
@@ -13,8 +16,10 @@ M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.LoadSnapshotAsync(System.Guid act
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.OpenAsync(System.Guid actorId, ulong fromVersion, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IEventCursor> override
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.PeekFirstAsync(System.Guid actorId) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> override
 M:PicoActor.EventStore.Jsonl.JsonlEventStore`1.SaveSnapshotAsync(System.Guid actorId, PicoActor.Abs.ActorSnapshot snapshot, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask override
+P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.FileNameFormat : PicoActor.EventStore.Jsonl.FileNameFormat { get; init; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.FlushToDisk : bool { get; init; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.Logger : PicoLog.Abs.ILogger { get; init; }
 P:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions.MaxAggregateLocks : int { get; init; }
 T:class PicoActor.EventStore.Jsonl.JsonlEventStoreOptions
 T:class PicoActor.EventStore.Jsonl.JsonlEventStore`1
+T:enum PicoActor.EventStore.Jsonl.FileNameFormat
