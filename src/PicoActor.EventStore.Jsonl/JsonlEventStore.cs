@@ -279,9 +279,12 @@ public sealed class JsonlEventStore<TEventBase>
             // 3. Resolving the path is also the observation of a MISSING stream, which is the one
             //    moment an IdOnly store pays its lazy pass: a host that only appends by id must still
             //    learn that its whole directory is in the other layout before it forks a second stream.
-            //    A TypePrefix miss has already paid for its own pass inside PathFor — and an append does
-            //    NOT take the read path's remembered absence for an answer: it re-scans, because the miss
-            //    may have been recorded before another process created this id's stream.
+            //    A TypePrefix miss has already paid for its own pass inside AppendingPathFor — and an
+            //    append does NOT take the read path's remembered absence for an answer: it re-scans,
+            //    because the miss may have been recorded before another process created this id's stream.
+            //    That pass is the price of a MISS, not of an append: an id the map KNOWS costs no pass
+            //    here at all (B1c pins it), and a REFUSED append pays exactly the one pass it spent
+            //    resolving the id (B9 pins it).
             var existing = AppendingPathFor(actorId);
             if (existing is null || !File.Exists(existing))
             {
@@ -821,12 +824,18 @@ public sealed class JsonlEventStore<TEventBase>
     /// filename pass, which also completes the map for every parseable name it finds — a cold start
     /// costs one pass, not one pass per id.
     /// </para>
+    /// <para>
+    /// PRIVATE on purpose: there are exactly two policies — the read one this method names, and
+    /// <see cref="AppendingPathFor"/> — and each caller states which it wants. A resolver exposed "just
+    /// in case" is a resolver a later caller reaches for from the WRONG path, and on this path that
+    /// mistake is a forked history, not a slow read.
+    /// </para>
     /// </summary>
-    internal string? PathFor(Guid actorId) => PathFor(actorId, trustRememberedMiss: true);
+    private string? ReadingPathFor(Guid actorId) => PathFor(actorId, trustRememberedMiss: true);
 
     /// <summary>
-    /// The APPEND path's answer: identical to <see cref="PathFor"/> except in ONE respect — a remembered
-    /// miss is not trusted (see <see cref="ResolveTypeMiss"/>).
+    /// The APPEND path's answer: identical to <see cref="ReadingPathFor"/> except in ONE respect — a
+    /// remembered miss is not trusted (see <see cref="ResolveTypeMiss"/>).
     /// </summary>
     private string? AppendingPathFor(Guid actorId) => PathFor(actorId, trustRememberedMiss: false);
 
@@ -911,7 +920,8 @@ public sealed class JsonlEventStore<TEventBase>
 
     /// <summary>
     /// Remember ONE absence for the read path, bounded: past the capacity the set is emptied rather than
-    /// grown. Called under the scan gate, which every other reader of the set takes too.
+    /// grown. IT IS THE ONLY ADDER, and it runs under the scan gate; the single REMOVER
+    /// (<see cref="ForgetMissingType"/>) runs outside the gate on purpose.
     /// </summary>
     private void RememberMissingType(Guid actorId)
     {
@@ -956,12 +966,12 @@ public sealed class JsonlEventStore<TEventBase>
     /// Under <see cref="FileNameFormat.IdOnly"/> the name is derived from the id alone, so this is the
     /// first moment the store learns it has no stream: exactly when the single lazy pass runs
     /// (<see cref="ObserveMissingStream"/>). Under <see cref="FileNameFormat.TypePrefix"/> a miss has
-    /// already paid its own pass inside <see cref="PathFor"/>, and the lazy pass is an IdOnly cost.
+    /// already paid its own pass inside <see cref="ReadingPathFor"/>, and the lazy pass is an IdOnly cost.
     /// </para>
     /// </summary>
     private string? ExistingPathFor(Guid actorId)
     {
-        var path = PathFor(actorId);
+        var path = ReadingPathFor(actorId);
         if (path is not null && File.Exists(path))
             return path;
 
@@ -1013,8 +1023,9 @@ public sealed class JsonlEventStore<TEventBase>
     /// </exception>
     private void ObserveMissingStream()
     {
-        // TypePrefix resolves a miss with its own pass (construction, or PathFor), so the lazy pass is an
-        // IdOnly cost: that is the format whose paths are derived without ever looking at the directory.
+        // TypePrefix resolves a miss with its own pass (construction, or the path resolver), so the lazy
+        // pass is an IdOnly cost: that is the format whose paths are derived without ever looking at the
+        // directory.
         if (_options.FileNameFormat != FileNameFormat.IdOnly)
             return;
 

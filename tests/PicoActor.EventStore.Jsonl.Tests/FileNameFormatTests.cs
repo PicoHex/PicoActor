@@ -1367,6 +1367,10 @@ public sealed class FileNameFormatTests
     /// for an append, so the append on a miss re-reads the directory and then learns the prefix — the
     /// TITLE of this case is about the map, not about a pass saved. The two READS after it pay nothing
     /// (the map hit answers both), and the entry that was remembered is now the one that gets dropped.
+    /// <para>
+    /// The SECOND append of that id pays nothing either, and that is the cost rule stated positively: a
+    /// directory pass is what a MISS costs, not what an APPEND costs. An append count of N is not a pass
+    /// count of N.
     /// </para>
     /// </summary>
     [Test, Timeout(30000)]
@@ -1392,6 +1396,12 @@ public sealed class FileNameFormatTests
         await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(2);
         await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss + 1);
         await Assert.That(store.NegativeCacheInvalidations).IsEqualTo(1L);
+
+        // The SECOND append of that same id pays NOTHING: the map hit answers the path, so a directory
+        // pass is the price of a MISS, not of an append. Appending N times is not N passes.
+        var afterFirstAppend = store.DirectoryScans;
+        await Assert.That(await store.AppendAsync(id, 2, [new SSnapshotAdded(3)])).IsEqualTo(3UL);
+        await Assert.That(store.DirectoryScans - afterFirstAppend).IsEqualTo(0L);
 
         // The staleness the per-id clear buys: a miss recorded for ANOTHER id is still remembered after
         // a map growth, so it costs no pass -- and no read ever re-reads the directory to find out.
@@ -1746,7 +1756,9 @@ public sealed class FileNameFormatTests
     /// and leave the stream the map never saw as the other half of a fork.
     /// <para>
     /// So the append re-reads the directory on a miss even when the miss is remembered. It costs nothing
-    /// that was not already the price of a new id: the first append of any id pays one pass anyway.
+    /// that was not already the price of a new id: the first append of any id pays one pass anyway — and
+    /// it pays exactly one, even when that pass ENDS in a refusal. Re-scanning is the price of resolving
+    /// the id, not a tax on being rejected.
     /// </para>
     /// </summary>
     [Test, Timeout(30000)]
@@ -1783,6 +1795,12 @@ public sealed class FileNameFormatTests
         var refused = await CaptureAsync(async () =>
             await store.AppendAsync(id, 0, [new SSnapshotAdded(1)])
         );
+
+        // The refusal is the CHEAPEST outcome of the re-scan, not an extra one: the append paid exactly
+        // the ONE pass a new id's first append always costs, and the map growth that pass bought is what
+        // turned the fork into a version witness.
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss + 1);
+
         // Nothing was forked: ONE name for the id, and it is the one that was already there.
         await Assert.That(File.Exists(forked)).IsFalse();
         await Assert.That(File.ReadAllLines(rival).Length).IsEqualTo(1);
