@@ -1,4 +1,6 @@
+using System.Buffers;
 using PicoJetson;
+using PicoSerDe.Core;
 
 namespace PicoActor.EventStore.Jsonl.Tests;
 
@@ -341,6 +343,115 @@ public sealed class BoundEventWriteTests
         await Assert.That(reloaded[0]).IsEqualTo(new MilestoneReached());
     }
 
+    // ── Bnd18: a bound payload that is not a JSON object is REFUSED, not spliced (D2) ──────────────
+
+    /// <summary>
+    /// The splice DROPS the payload's opening brace and assumes a member list behind it, so a payload that
+    /// is not a JSON object would be framed into a line that is not JSON at all — invisible at write time
+    /// and fatal on read-back, possibly after the line reached an archive. That guard is REACHABLE from a
+    /// consumer: <see cref="JsonSerializer.RegisterCustom{T}"/> replaces the top-level writer for any type
+    /// it is given, so ONE public call is all it takes to make a bound type write <c>[1,2]</c> — and the
+    /// store must refuse the append rather than splice it.
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd18_NonObjectBoundPayload_IsRefusedAndWritesNothing(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+
+        // The consumer's own serializer: the one public hook that can produce a non-object payload, since
+        // a generated writer for a record always writes an object.
+        JsonSerializer.RegisterCustom(new ArrayPayloadSerializer(), new ArrayPayloadDeserializer());
+
+        var options = new JsonlEventStoreOptions();
+        options.EventTypeBindings.Add<ArrayPayloadEvent>("arr");
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
+        var id = Guid.NewGuid();
+
+        var error = await CaptureAsync(async () =>
+        {
+            _ = await store.AppendAsync(id, 0, [new ArrayPayloadEvent()]);
+        });
+
+        // The refusal is this store's own FormatException — raised AFTER the payload arrived and BEFORE a
+        // byte reached the buffer — not the serializer's.
+        await Assert.That(error).IsTypeOf<FormatException>();
+
+        var message = error!.Message;
+
+        // The tag, the bound type and WHAT arrived (the payload's first bytes): the three facts an operator
+        // holding a type that writes the wrong shape needs to identify it.
+        await Assert.That(message.Contains("\"arr\"", StringComparison.Ordinal)).IsTrue();
+        await Assert
+            .That(message.Contains(typeof(ArrayPayloadEvent).FullName!, StringComparison.Ordinal))
+            .IsTrue();
+        await Assert.That(message.Contains("[1,2]", StringComparison.Ordinal)).IsTrue();
+
+        // Nothing was written: no line, no file, no version.
+        await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(0);
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(0UL);
+    }
+
+    // ── Bnd18b: "memberless" is a question about the JSON, not about the payload's LENGTH (D2) ─────
+
+    /// <summary>
+    /// The separator is emitted only when there is a MEMBER to separate, and the payload the splice
+    /// examines is whatever the type's own writer produced: <c>{}</c> for a memberless record, and
+    /// <c>{ }</c> for the same object written by a consumer's
+    /// <see cref="JsonSerializer.RegisterCustom{T}"/> serializer. A <c>Length &gt; 2</c> test calls the
+    /// second one "has members" and writes <c>{"$type":"t", }</c> — a trailing comma, invalid JSON,
+    /// invisible at write time and fatal on read-back. Both cases must produce the tag ALONE.
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd18b_MemberlessPayload_IsAlwaysWrittenWithoutASeparator(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+
+        // The `{ }` half needs a writer that emits whitespace between the braces; a generated one never
+        // does, so this is the consumer hook again.
+        JsonSerializer.RegisterCustom(
+            new WhitespacePayloadSerializer(),
+            new WhitespacePayloadDeserializer()
+        );
+        // The `{}` half is MilestoneReached's own generated writer (Bnd1b pins that exact path).
+        _ = JsonSerializer.SerializeToUtf8Bytes(new MilestoneReached());
+
+        (string Label, IDomainEvent Event, string Expected)[] cases =
+        [
+            (
+                "generated memberless payload ({}):",
+                new MilestoneReached(),
+                "{\"$type\":\"memberless\"}"
+            ),
+            (
+                "whitespace-only memberless payload ({ }):",
+                new WhitespaceOnlyEvent(),
+                "{\"$type\":\"whitespace\"}"
+            ),
+        ];
+
+        foreach (var (label, boundEvent, expected) in cases)
+        {
+            using var temp = new TempRoot();
+            var options = new JsonlEventStoreOptions();
+            // BOTH bindings on every store, so the loop differs only in the event it appends.
+            options.EventTypeBindings.Add<MilestoneReached>("memberless");
+            options.EventTypeBindings.Add<WhitespaceOnlyEvent>("whitespace");
+            var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
+            var id = Guid.NewGuid();
+
+            await store.AppendAsync(id, 0, [boundEvent]);
+
+            var lines = await File.ReadAllLinesAsync(StreamPath(temp.Root, id), cancellationToken);
+            await Assert.That(lines.Length).IsEqualTo(1).Because(label);
+            await Assert.That(lines[0]).IsEqualTo(expected).Because(label);
+        }
+    }
+
     /// <summary>
     /// <c>Deserialize&lt;SagaCompleted&gt;</c>'s shape as a delegate — a custom delegate because a
     /// generic <see cref="Func{T,TResult}"/> cannot carry a <see cref="ReadOnlySpan{T}"/> parameter.
@@ -376,3 +487,43 @@ public sealed class BoundEventWriteTests
 /// it is not a store type, and the test above is the consumer of its serializer.
 /// </summary>
 public sealed record MilestoneReached : IDomainEvent;
+
+/// <summary>
+/// A bound type whose own serializer writes a JSON ARRAY (Bnd18). A consumer reaches this shape with one
+/// public call — <c>JsonSerializer.RegisterCustom</c> — which is why the store's payload guard is a
+/// reachable refusal and not an unreachable invariant.
+/// </summary>
+public sealed record ArrayPayloadEvent : IDomainEvent;
+
+/// <summary>
+/// A bound type whose own serializer writes <c>{ }</c> — the SAME memberless object as
+/// <see cref="MilestoneReached"/>, with whitespace between the braces (Bnd18b). The splice decides
+/// "has members" from the JSON behind the dropped brace, never from the payload's length.
+/// </summary>
+public sealed record WhitespaceOnlyEvent : IDomainEvent;
+
+/// <summary>Writes <c>[1,2]</c> for every <see cref="ArrayPayloadEvent"/>.</summary>
+internal sealed class ArrayPayloadSerializer : ISerializer<ArrayPayloadEvent>
+{
+    public void Serialize(IBufferWriter<byte> writer, ArrayPayloadEvent value) =>
+        writer.Write("[1,2]"u8);
+}
+
+/// <summary>Reads nothing: the write leg is the subject, and a refused append never reaches a read.</summary>
+internal sealed class ArrayPayloadDeserializer : IDeserializer<ArrayPayloadEvent>
+{
+    public ArrayPayloadEvent Deserialize(ReadOnlySpan<byte> data) => new();
+}
+
+/// <summary>Writes <c>{ }</c> for every <see cref="WhitespaceOnlyEvent"/>.</summary>
+internal sealed class WhitespacePayloadSerializer : ISerializer<WhitespaceOnlyEvent>
+{
+    public void Serialize(IBufferWriter<byte> writer, WhitespaceOnlyEvent value) =>
+        writer.Write("{ }"u8);
+}
+
+/// <summary>Reads nothing, for the same reason as <see cref="ArrayPayloadDeserializer"/>.</summary>
+internal sealed class WhitespacePayloadDeserializer : IDeserializer<WhitespaceOnlyEvent>
+{
+    public WhitespaceOnlyEvent Deserialize(ReadOnlySpan<byte> data) => new();
+}

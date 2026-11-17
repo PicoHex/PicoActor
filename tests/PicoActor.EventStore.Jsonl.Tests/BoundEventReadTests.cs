@@ -418,6 +418,101 @@ public sealed class BoundEventReadTests
             .IsTrue();
     }
 
+    // ── Bnd21: the sniffer's whitespace and control-byte rules, asserted by CLASSIFICATION ──────────
+
+    /// <summary>
+    /// The prefix scan tolerates JSON's insignificant whitespace and refuses everything a tag this store
+    /// writes can never contain, and neither half is cosmetic: the tolerant half is what lets a line
+    /// another writer INDENTED still reach its binding, and the refusing half is what keeps a control byte
+    /// or an ESCAPED member name from being half-read as a discriminator.
+    /// <para>
+    /// Every case asserts WHICH ROUTE answered, not merely that the line did not throw. The base's
+    /// polymorphic reader cannot read <c>PicoActorSagaCompleted</c> at all (Bnd3 pins that), so a returned
+    /// <see cref="SagaCompleted"/> can only have come from the binding; and the fallback's wrap carries the
+    /// unbound-tag clause ONLY when the sniffer found a tag (Bnd4 pins that clause), so its absence proves
+    /// the sniffer DECLINED rather than sniffed-and-missed.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd21_WhitespaceAndControlBytes_AreClassifiedExactly(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+
+        // The clause Wrap appends to a FALLBACK failure when — and only when — a tag was sniffed.
+        const string UnboundTagClause = "is not one of this store's event type bindings either";
+
+        // 0x5C, the backslash of a JSON escape (see the escaped-name case below).
+        const char Backslash = (char)0x5C;
+
+        (string Label, string Line)[] sniffed =
+        [
+            // `{` then a space: whitespace between tokens is insignificant JSON.
+            (
+                "space after the opening brace",
+                "{ \"$type\":\"PicoActorSagaCompleted\",\"Result\":null}"
+            ),
+            ("leading space", " {\"$type\":\"PicoActorSagaCompleted\",\"Result\":null}"),
+            ("leading TAB", "\t{\"$type\":\"PicoActorSagaCompleted\",\"Result\":null}"),
+        ];
+
+        foreach (var (label, line) in sniffed)
+        {
+            var id = Guid.NewGuid();
+            await File.WriteAllTextAsync(StreamPath(temp.Root, id), line + "\n", cancellationToken);
+
+            var events = await store.LoadAsync(id);
+
+            // The BINDING answered: the base's reader rejects this tag, so the event below is the sniffer
+            // having skipped the whitespace and found the discriminator.
+            await Assert.That(events.Count).IsEqualTo(1).Because(label);
+            await Assert.That(events[0]).IsEqualTo(new SagaCompleted(null)).Because(label);
+        }
+
+        (string Label, string Line)[] fallenBack =
+        [
+            // A control byte INSIDE the tag value. No tag this store writes carries one (ValidateTag
+            // refuses every control character), so such a value is not one of ours: the line falls back
+            // instead of being dispatched on HALF a tag.
+            (
+                "control byte in the tag value",
+                "{\"$type\":\"PicoActorSagaCompleted\u0001\",\"Result\":null}"
+            ),
+            // An ESCAPED member name. This store never writes an escape, so a name that NEEDS one is not
+            // `$type` for this reader — pinned as a FALLBACK, not as a rejection, because PicoJetson's own
+            // polymorphic reader may well resolve the escaped spelling (it does: it reports the same
+            // unknown discriminator), and the fallback is what keeps that answer the only one on offer.
+            (
+                "escaped discriminator name",
+                // The backslash is spelled as a CODE POINT so no C# escape sequence can swallow it: the
+                // FILE has to carry a real `\u0024` escape, and a source literal would not.
+                "{" + Backslash + "u0024type\":\"PicoActorSagaCompleted\",\"Result\":null}"
+            ),
+            // No member at all: there is nothing to sniff.
+            ("empty object", "{}"),
+        ];
+
+        foreach (var (label, line) in fallenBack)
+        {
+            var id = Guid.NewGuid();
+            await File.WriteAllTextAsync(StreamPath(temp.Root, id), line + "\n", cancellationToken);
+
+            var error = await CaptureAsync(async () => await store.LoadAsync(id));
+
+            // The EXISTING failure — the polymorphic reader's own rejection, never a new one.
+            await Assert.That(error).IsTypeOf<FormatException>().Because(label);
+
+            // …and the sniffer DECLINED, which is what makes this a fallback at all.
+            await Assert
+                .That(error!.Message.Contains(UnboundTagClause, StringComparison.Ordinal))
+                .IsFalse()
+                .Because(label);
+        }
+    }
+
     /// <summary>The <c>&lt;id:D&gt;.jsonl</c> path of an IdOnly store's stream.</summary>
     private static string StreamPath(string root, Guid id) =>
         Path.Combine(root, id.ToString("D") + ".jsonl");

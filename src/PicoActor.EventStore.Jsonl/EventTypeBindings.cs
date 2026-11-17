@@ -94,8 +94,18 @@ public sealed class EventTypeBindings
     /// Bind <typeparamref name="T"/> to the discriminator <paramref name="tag"/> it is written with.
     /// This routes the type through this store; it does NOT make the type serializable (see the type
     /// documentation).
+    /// <para>
+    /// Bind the type each LINE actually carries — the RUNTIME CONCRETE type an appended event has. The
+    /// write path matches <see cref="object.GetType"/> exactly, so binding a base type or an abstract type
+    /// has NO EFFECT: an event whose runtime type is not the bound one is written by the base's
+    /// <c>[PicoDerivedType]</c> route (or refused as unbound), never by this binding. One
+    /// <c>Add&lt;TConcrete&gt;</c> per concrete event, with <c>TConcrete</c> the type the event really is.
+    /// </para>
     /// </summary>
-    /// <typeparam name="T">The bound event type; it must be serializable in some loaded assembly.</typeparam>
+    /// <typeparam name="T">
+    /// The bound event type — the concrete runtime type of the lines it writes; it must be serializable in
+    /// some loaded assembly.
+    /// </typeparam>
     /// <param name="tag">The <c>$type</c> value, spliced verbatim into every line of this type.</param>
     /// <returns>This table, so bindings can be chained.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="tag"/> is null.</exception>
@@ -394,6 +404,11 @@ internal sealed class EventTypeBindingsTable
     private readonly FrozenDictionary<Type, string> _tagByType;
     private readonly FrozenDictionary<string, Type> _typeByTag;
     private readonly FrozenDictionary<Type, Func<IDomainEvent, byte[]>> _writeByType;
+
+    // The OPENING BYTES of a bound line, per type (M2): `{"$type":"<tag>` is permanent wire format for a
+    // given binding, so it is built once here and the append hot path only writes it — no interpolation
+    // and no UTF-8 encoding per event.
+    private readonly FrozenDictionary<Type, byte[]> _prefixByType;
     private readonly FrozenDictionary<string, Func<byte[], IDomainEvent?>> _readByTag;
     private readonly FrozenSet<string> _defaultTags;
 
@@ -412,6 +427,9 @@ internal sealed class EventTypeBindingsTable
         // a bound tag is still that tag (see the registration comment).
         _typeByTag = typeByTag.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
         _writeByType = writeByType.ToFrozenDictionary();
+        _prefixByType = tagByType
+            .ToDictionary(pair => pair.Key, pair => Encoding.UTF8.GetBytes(PrefixFor(pair.Value)))
+            .ToFrozenDictionary();
         _readByTag = readByTag.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
         _defaultTags = defaultTags.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
         FrameworkDefaultCount = frameworkDefaultCount;
@@ -453,7 +471,8 @@ internal sealed class EventTypeBindingsTable
     internal bool TryGetBinding(
         Type eventType,
         out string tag,
-        out Func<IDomainEvent, byte[]> write
+        out Func<IDomainEvent, byte[]> write,
+        out byte[] prefix
     )
     {
         ArgumentNullException.ThrowIfNull(eventType);
@@ -461,17 +480,28 @@ internal sealed class EventTypeBindingsTable
         if (
             _tagByType.TryGetValue(eventType, out var found)
             && _writeByType.TryGetValue(eventType, out var writer)
+            && _prefixByType.TryGetValue(eventType, out var bytes)
         )
         {
             tag = found;
             write = writer;
+            prefix = bytes;
             return true;
         }
 
         tag = string.Empty;
         write = null!;
+        prefix = null!;
         return false;
     }
+
+    /// <summary>
+    /// A bound line's opening bytes, `{"$type":"&lt;tag&gt;`, built ONCE per binding (M2) — the splice is
+    /// finished by the payload's own members or by the closing brace. No escaping is needed here because
+    /// <see cref="EventTypeBindings.ValidateTag"/> refuses every character that would need one, which is
+    /// what makes these bytes a constant of the registration rather than of the event.
+    /// </summary>
+    private static string PrefixFor(string tag) => $"{{\"$type\":\"{tag}\"";
 
     /// <summary>
     /// Everything the READ path needs for a sniffed tag in ONE lookup: the bound type and the closed

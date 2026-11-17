@@ -144,7 +144,9 @@ public sealed class JsonlEventStore<TEventBase>
     /// <c>event type bindings: {RegisteredCount} registered ({FrameworkDefaultCount} framework-default)</c>,
     /// carrying the counts of the table THIS store reads. It is emitted LAST, so a construction that
     /// throws (a refused base, a doubly-registered type, a root the TypePrefix pass rejects) logs
-    /// nothing — it never produced a store to attest to.
+    /// nothing — it never produced a store to attest to. A sink that THROWS does not fail the
+    /// construction either: the line is the last thing the constructor does, the bindings are already
+    /// frozen, and the store is complete without it.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="rootDirectory"/> is null, empty or whitespace.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><see cref="JsonlEventStoreOptions.MaxAggregateLocks"/> is not positive.</exception>
@@ -222,21 +224,30 @@ public sealed class JsonlEventStore<TEventBase>
             {
                 foreach (var bound in table.BoundTypes)
                 {
-                    if (!typeof(TEventBase).IsAssignableFrom(bound))
-                        continue;
+                    if (typeof(TEventBase).IsAssignableFrom(bound))
+                    {
+                        // ONE remedy, and the reachable one. The message used to offer a second —
+                        // "register the event's own base type as the store's generic argument" — which is
+                        // precisely the configuration that just failed, because the generic argument
+                        // ALREADY is that type's base. The registration is the redundant half, so deleting
+                        // it is the whole fix.
+                        throw new InvalidOperationException(
+                            $"{bound.FullName} is bound in "
+                                + $"{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.EventTypeBindings)} "
+                                + $"and is also a {typeof(TEventBase).FullName}: a type is registered ONCE, "
+                                + "because its tag is what a reader dispatches on. Delete the "
+                                + $"Add<{bound.Name}>(...) line - the event's base type already covers it."
+                        );
+                    }
 
-                    // ONE remedy, and the reachable one. The message used to offer a second —
-                    // "register the event's own base type as the store's generic argument" — which is
-                    // precisely the configuration that just failed, because the generic argument
-                    // ALREADY is that type's base. The registration is the redundant half, so deleting
-                    // it is the whole fix.
-                    throw new InvalidOperationException(
-                        $"{bound.FullName} is bound in "
-                            + $"{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.EventTypeBindings)} "
-                            + $"and is also a {typeof(TEventBase).FullName}: a type is registered ONCE, "
-                            + "because its tag is what a reader dispatches on. Delete the "
-                            + $"Add<{bound.Name}>(...) line - the event's base type already covers it."
-                    );
+                    // The other way a binding can lose to the base type, and the SILENT one (I1): the
+                    // bound type cannot derive from TEventBase, but the TAG it was given already belongs
+                    // to a [PicoDerivedType] registration on TEventBase. The write path splices the tag it
+                    // was given, so nothing here fails — the line is simply read back as that OTHER event.
+                    // The probe runs on the CANDIDATE table, i.e. against the tags this store will really
+                    // carry (framework defaults included), and before the freeze is committed.
+                    if (table.TryGetTag(bound, out var boundTag))
+                        ThrowIfBaseReaderNamesTheTag(boundTag, bound);
                 }
             }
         );
@@ -263,7 +274,21 @@ public sealed class JsonlEventStore<TEventBase>
         var report =
             $"event type bindings: {_bindings.Count} registered "
             + $"({_bindings.FrameworkDefaultCount} framework-default)";
-        _logger?.Info(report);
+        // THE SINK IS GUARDED (M8); the TABLE is not — that part is deliberate, see above. The bindings are
+        // FROZEN by now and the copy is committed, so a logger that throws (a full disk, a closed
+        // connection, a broken formatter) would turn a completed, usable store into a failed construction
+        // AND leave the operator with an options instance that accepts no further binding: a store that
+        // never existed, over options that can never be fixed. A sink is foreign code that receives a
+        // finished sentence and returns nothing, so its failure stays its own. The catch is deliberately
+        // broad for the same reason — a sink's cancellation is not this store's either.
+        try
+        {
+            _logger?.Info(report);
+        }
+        catch (Exception)
+        {
+            // silent: a log sink's failure must not become the store's. See above.
+        }
     }
 
     /// <summary>
@@ -1601,7 +1626,12 @@ public sealed class JsonlEventStore<TEventBase>
         // exactly as its own type writes it.
         if (
             domainEvent is not null
-            && _bindings.TryGetBinding(domainEvent.GetType(), out var tag, out var write)
+            && _bindings.TryGetBinding(
+                domainEvent.GetType(),
+                out var tag,
+                out var write,
+                out var prefix
+            )
         )
         {
             // Wrapped by WrapBound, NEVER by Wrap: its remedy ("[PicoDerivedType] on the base") is
@@ -1620,11 +1650,12 @@ public sealed class JsonlEventStore<TEventBase>
             // The splice below DROPS the payload's opening brace and assumes a member list behind it, so
             // the payload HAS to be a JSON object. An array (`[1,2]`), a scalar (`42`), a literal `null`
             // or an empty payload would be framed into a line that is not JSON at all — invisible here
-            // and fatal on read-back, possibly after the line reached an archive. No generated writer can
-            // produce such a payload today (a `List<int>`-derived class serializes as `{}`, and PicoJetson
-            // has no type-level converter hook), so this is an INVARIANT CHECK rather than a path a
-            // consumer can reach today; it costs two comparisons, which is the right price for the only
-            // failure in this method that could corrupt a file instead of throwing.
+            // and fatal on read-back, possibly after the line reached an archive. A consumer's
+            // `RegisterCustom<T>` can supply a non-object payload (it replaces the top-level writer for
+            // the type it is given), so this is a REACHABLE refusal and not an invariant nobody can
+            // violate: it costs two comparisons, which is the right price for the only failure in this
+            // method that could corrupt a file instead of throwing. The bound type is named, and so is
+            // WHAT arrived, because the defect is in that type's own writer.
             if (payload.Length < 2 || payload[0] != (byte)'{')
             {
                 throw new FormatException(
@@ -1643,12 +1674,25 @@ public sealed class JsonlEventStore<TEventBase>
             //   {}               +  tag  ->  {"$type":"<tag>"}
             // Two ways to get this wrong, both invisible at write time and fatal on read-back (possibly
             // after the line reached an archive): keeping the payload's brace AND joining with a comma
-            // gives {"$type":"t",{"Result":null}; joining a zero-member payload with a comma gives
-            // {"$type":"t",}. So the separator is emitted exactly when there is a member to separate —
-            // the payload's own members already carry their leading quote.
-            buffer.Write(Encoding.UTF8.GetBytes($"{{\"$type\":\"{tag}\""));
-            if (payload.Length > 2)
-                buffer.WriteByte((byte)',');
+            // gives {"$type":"t",{"Result":null}; joining a memberless payload with a comma gives
+            // {"$type":"t",} — and a trailing comma is not JSON.
+            // "Has members" is a question about the JSON behind the dropped brace, NOT about the payload's
+            // LENGTH: `{}` and `{ }` are the same memberless object, and a length test called the second
+            // one "has members" and wrote `{"$type":"t", }`. So the first non-whitespace byte is examined
+            // instead, and a memberless payload is closed right behind the discriminator (its own
+            // whitespace is the only thing left to write, and it is dropped with the brace).
+            // The opening bytes are the BINDING's, not this event's (M2): precomputed and frozen with the
+            // table, so a bound append interpolates nothing and encodes nothing.
+            buffer.Write(prefix);
+            var memberStart = 1;
+            SkipJsonWhitespace(payload, ref memberStart);
+            if (memberStart == payload.Length - 1 && payload[memberStart] == (byte)'}')
+            {
+                buffer.WriteByte((byte)'}');
+                return;
+            }
+
+            buffer.WriteByte((byte)',');
             buffer.Write(payload, 1, payload.Length - 1);
             return;
         }
@@ -1663,6 +1707,59 @@ public sealed class JsonlEventStore<TEventBase>
                 + "JsonlEventStoreOptions.EventTypeBindings.Add<T>(\"tag\").",
             // The PUBLIC parameter of AppendAsync, and the name this refusal has always reported.
             "events"
+        );
+    }
+
+    /// <summary>
+    /// Construction-time guard (I1): a bound tag that <typeparamref name="TEventBase"/>'s own polymorphic
+    /// reader ALREADY recognises can never be dispatched to its binding — the base's reader answers for
+    /// that discriminator BEFORE any binding is consulted, so every line this store writes under the tag is
+    /// read back as the derived event that registration names. The write path cannot notice (it splices
+    /// whatever tag it was given), which is what made this a SILENT error instead of a refusal.
+    /// <para>
+    /// The probe is the READ PATH'S OWN CALL — <c>Deserialize&lt;TEventBase&gt;</c> over a
+    /// discriminator-only object — not an attribute scan: the same closed call site keeps AOT and the
+    /// reader's semantics identical to the ones a real read gets, and it costs one deserialization per
+    /// bound tag, once per store. A derived event whose members are missing deserializes happily from an
+    /// otherwise empty object, so "RETURNED instead of throwing" is the signal.
+    /// </para>
+    /// <para>
+    /// A throw means the base's reader does not claim this tag — a <see cref="FormatException"/> for a
+    /// discriminator it does not know, and any other failure (a base with no generated serializer at all
+    /// throws <see cref="InvalidOperationException"/> for EVERY payload) is equally NOT evidence of a
+    /// clash. Refusing on those would make the store unconstructible over a base type that is merely
+    /// unwritable, which is a different failure with its own diagnosis, on the first write.
+    /// </para>
+    /// <para>
+    /// The attempt leaves NOTHING behind: a deserialization reads its bytes and returns, so the store's
+    /// counters, its bindings and the options instance's table are untouched either way — a refusal here
+    /// rolls back through the freeze's own transaction, exactly like the assignability refusal.
+    /// </para>
+    /// </summary>
+    private static void ThrowIfBaseReaderNamesTheTag(string tag, Type boundType)
+    {
+        try
+        {
+            _ = JsonSerializer.Deserialize<TEventBase>(
+                Encoding.UTF8.GetBytes($"{{\"$type\":\"{tag}\"}}")
+            );
+        }
+        catch (Exception)
+        {
+            // Not claimed — see the summary. The catch is deliberately BROAD, including cancellation: this
+            // is a synchronous probe with no token, and the only question it answers is "did the reader
+            // return?".
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"the tag \"{tag}\" is bound to {boundType.FullName} in "
+                + $"{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.EventTypeBindings)}, "
+                + $"but it already names a derived type of {typeof(TEventBase).FullName}: a "
+                + $"[PicoDerivedType] registration on {typeof(TEventBase).FullName} declares that same "
+                + "$type, and the base's polymorphic reader answers for it before any binding is "
+                + "consulted - so every line written under this tag would be read back as that other "
+                + "event, silently. Give the binding a tag of its own, or delete the Add line."
         );
     }
 
@@ -1704,7 +1801,14 @@ public sealed class JsonlEventStore<TEventBase>
         var nameStart = index;
         while (index < line.Length && line[index] != (byte)'"')
         {
-            // No escape can spell `$type`, so a name that needs one is another member.
+            // THIS STORE never writes an escape (EventTypeBindings.ValidateTag refuses a quote, a
+            // backslash and every control character), so a member name that needs one is NOT the
+            // discriminator as far as this reader is concerned, and the line falls back to the
+            // polymorphic reader. That reader (PicoJetson's) may well resolve an escaped spelling — it
+            // parses JSON, this is a prefix scan — and the fallback is exactly where it gets to answer.
+            // The earlier wording here claimed "no escape can spell `$type`", which is false: PicoJetson
+            // unescapes the name and recognises the discriminator. What this store owes the line is a
+            // decision it can make without parsing JSON, and "not plain `$type` → fall back" is it.
             if (line[index] == (byte)'\\')
                 return false;
             index++;

@@ -342,6 +342,106 @@ public sealed class EventTypeBindingTests
             .IsEqualTo("event type bindings: 2 registered (2 framework-default)");
     }
 
+    // ── Bnd19: a bound tag the BASE's own registration already declares: refused at construction (D5) ─
+
+    /// <summary>
+    /// The collision that produced a SILENT misread. <see cref="ConformanceEvent"/> declares
+    /// <c>[PicoDerivedType(typeof(SSnapshotAdded), "ss-added")]</c>, so a consumer who bound some OTHER
+    /// type to the tag <c>"ss-added"</c> got a store that wrote its lines happily and read them back as an
+    /// <see cref="SSnapshotAdded"/> — the base's polymorphic reader answers for that discriminator before
+    /// the binding is ever asked, and nothing about the write side can notice.
+    /// <para>
+    /// Binding <see cref="SSnapshotAdded"/> itself is refused EARLIER, by the assignability check (Bnd7), so
+    /// the collision has to be spelled with a type that cannot derive from the base:
+    /// <see cref="ForeignEvent"/>. The refusal lands in the construction-time validation — BEFORE the freeze
+    /// is committed — so the options instance stays usable, exactly like Bnd7's.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd19_BoundTagClashesWithADerivedTag_ThrowsAtConstruction(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var options = new JsonlEventStoreOptions();
+
+        options.EventTypeBindings.Add<ForeignEvent>("ss-added");
+
+        var error = Catch(() => _ = new JsonlEventStore<ConformanceEvent>(temp.Root, options));
+
+        await Assert.That(error is InvalidOperationException).IsTrue();
+
+        var message = error!.Message;
+
+        // The tag, and the fact that it ALREADY names something on the base — the operator's next action
+        // is to rename one of the two, so both facts have to be in the refusal.
+        await Assert.That(message.Contains("\"ss-added\"", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(message.Contains("already names", StringComparison.Ordinal)).IsTrue();
+
+        // …and WHICH base declares it, because the tag lives in an assembly the consumer may not own.
+        await Assert
+            .That(message.Contains(typeof(ConformanceEvent).FullName!, StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(message.Contains(typeof(ForeignEvent).FullName!, StringComparison.Ordinal))
+            .IsTrue();
+
+        // Refused before the stream and before the freeze: no file, and the same options instance still
+        // takes a binding with the framework seeds rolled back (D7, the Bnd7 contract).
+        await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(0);
+
+        options.EventTypeBindings.Add<SagaFailed>("y");
+        await Assert.That(options.EventTypeBindings.RegisteredCount).IsEqualTo(2);
+        await Assert.That(options.EventTypeBindings.FrameworkDefaultCount).IsEqualTo(0);
+    }
+
+    // ── Bnd20: a log SINK that throws cannot poison the table the construction just froze (M8) ─────
+
+    /// <summary>
+    /// The start-up attestation is the LAST thing the constructor does, and by then the bindings are
+    /// FROZEN and copied: a sink that throws (a full disk, a closed connection, a broken formatter) would
+    /// otherwise turn a completed, usable store into a failed construction AND leave the operator with an
+    /// options instance that accepts no further binding — a store that never existed, over options that can
+    /// never be fixed. A logger is foreign code, so its failure stays its own.
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task Bnd20_ThrowingLogger_DoesNotPoisonTheConstruction(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var options = new JsonlEventStoreOptions { Logger = new ThrowingLogger() };
+
+        // The whole point: construction SUCCEEDS although every log call it makes throws.
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
+
+        // The frozen table was committed WHOLE (not rolled back by the sink's failure), in both directions.
+        await Assert.That(store.Bindings.Count).IsEqualTo(2);
+        await Assert.That(store.Bindings.FrameworkDefaultCount).IsEqualTo(2);
+        await Assert.That(options.EventTypeBindings.RegisteredCount).IsEqualTo(2);
+        await Assert.That(options.EventTypeBindings.FrameworkDefaultCount).IsEqualTo(2);
+
+        // …and the store is USABLE: a mixed batch round-trips through both routes.
+        var id = Guid.NewGuid();
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(3), new SagaCompleted(null)]);
+
+        var loaded = await store.LoadAsync(id);
+        await Assert.That(loaded.Count).IsEqualTo(2);
+        await Assert.That(loaded[0]).IsEqualTo(new SSnapshotAdded(3));
+        await Assert.That(loaded[1]).IsEqualTo(new SagaCompleted(null));
+
+        // The table is frozen, as it always is once a store exists (Bnd17): the sink's failure changed
+        // nothing about that, and the refusal names the construction as usual.
+        await Assert
+            .That(
+                Catch(() => options.EventTypeBindings.Add<SagaCompleted>("acme"))
+                    is InvalidOperationException
+            )
+            .IsTrue();
+    }
+
     /// <summary>Run <paramref name="action"/> and hand back what it threw, or <c>null</c>.</summary>
     private static Exception? Catch(Action action)
     {
@@ -433,4 +533,78 @@ public class FrameworkSerializerTripswireTests
         await Assert.That(failedJson).IsEqualTo("{\"Reason\":\"boom\"}");
         await Assert.That(failedBack).IsEqualTo(failed);
     }
+}
+
+/// <summary>
+/// A logger that FAILS on every call (Bnd20). A sink is foreign code: the store hands it a finished
+/// sentence and reads nothing back, so an exception from it must never reach the store's own state.
+/// </summary>
+internal sealed class ThrowingLogger : ILogger
+{
+    public IDisposable BeginScope<TState>(TState state)
+        where TState : notnull => throw new InvalidOperationException("the sink is down");
+
+    public void Log(
+        LogLevel logLevel,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public void Log(
+        LogLevel logLevel,
+        EventId eventId,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        EventId eventId,
+        string message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public void Log(
+        LogLevel logLevel,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public void Log(
+        LogLevel logLevel,
+        EventId eventId,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception
+    ) => throw new InvalidOperationException("the sink is down");
+
+    public Task LogAsync(
+        LogLevel logLevel,
+        EventId eventId,
+        FormattableString message,
+        IReadOnlyList<KeyValuePair<string, object?>>? properties,
+        Exception? exception,
+        CancellationToken cancellationToken
+    ) => throw new InvalidOperationException("the sink is down");
 }
