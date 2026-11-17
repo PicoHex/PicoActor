@@ -371,14 +371,15 @@ batch whose first event is of another type still appends to the name the stream 
   nothing and creates nothing in either mode, but it resolves its path exactly like a writing append
   and still validates `expectedVersion`.
 - **The miss cache serves READS only.** A `TypePrefix` miss is remembered — a bounded set of 4,096 ids,
-  emptied rather than grown past it — and shared single-flight, so a probe loop over ids nobody has
-  pays **one** directory pass for the whole burst and none for the repeats. An **append never trusts
-  that memory**: resolving "no stream" there would fork a second name beside a stream an external
-  writer created after the map was built, so an append re-scans on a miss and, on success, drops only
-  **its own** entry — never wholesale, and without taking the scan gate. The price is stated: a *read*
-  may answer "empty" for a stream that appeared beside it until the next pass, and
-  `NegativeCacheInvalidations` counts the entries an append actually falsified (identically `0` under
-  `IdOnly`, which never remembers a miss).
+  emptied rather than grown past it — and shared single-flight, so a burst of **concurrent probes of ONE
+  absent id** shares a single pass, and **repeats of that id** are free; a **different** absent id pays
+  a pass of its own. An **append never trusts that memory**: resolving "no stream" there would fork a
+  second name beside a stream an external writer created after the map was built, so an append re-scans
+  on a miss and, on success, drops only **its own** entry — never wholesale, and without taking the scan
+  gate. The price is stated: a *read* may answer "empty" for a stream that appeared beside it until the
+  next pass — and a host that never passes again sees the stale answer until a **new instance** re-reads
+  the directory. `NegativeCacheInvalidations` counts the entries an append actually falsified
+  (identically `0` under `IdOnly`, which never remembers a miss).
 - **A stale map is corrected by the next SCAN.** A rival prefix that arrives after the map was built is
   not found by a read (a map hit costs no pass), and *not* by an append either: the store adds no
   directory pass to the append path to close that window, because it would give back exactly what the

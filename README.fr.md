@@ -393,12 +393,14 @@ est né.
   **exactement comme un append qui écrit** et valide toujours `expectedVersion`.
 - **Le cache des échecs ne sert qu'au CHEMIN DE LECTURE.** Un échec de `TypePrefix` est mémorisé — un
   ensemble borné de 4 096 id, vidé plutôt qu'agrandi au-delà — et partagé en **single-flight** : une
-  boucle de sondage sur des id que personne n'a paie **un** parcours de répertoire pour toute la rafale,
-  et aucun pour les répétitions. Un **append ne fait jamais confiance à cette mémoire** : y résoudre
-  « aucun flux » créerait un second nom à côté d'un flux qu'un écrivain externe a créé après la
-  construction de la table, donc un append **re-scanne** en cas d'échec puis, en cas de succès, ne
-  supprime que **sa propre** entrée — jamais en bloc, et sans prendre la porte du scan. Le prix est
-  énoncé : une *lecture* peut répondre « vide » pour un flux apparu à côté jusqu'au parcours suivant, et
+  rafale de **sondages concurrents d'UN MÊME id** absent partage un seul parcours, et les
+  **répétitions de cet id** sont gratuites ; un id absent **différent** paie son propre parcours. Un
+  **append ne fait jamais confiance à cette mémoire** : y résoudre « aucun flux » créerait un second nom
+  à côté d'un flux qu'un écrivain externe a créé après la construction de la table, donc un append
+  **re-scanne** en cas d'échec puis, en cas de succès, ne supprime que **sa propre** entrée — jamais en
+  bloc, et sans prendre la porte du scan. Le prix est énoncé : une *lecture* peut répondre « vide » pour
+  un flux apparu à côté jusqu'au parcours suivant — et un hôte qui ne refait jamais de parcours voit la
+  réponse périmée jusqu'à ce qu'une **nouvelle instance** relise le répertoire.
   `NegativeCacheInvalidations` compte les entrées qu'un append a réellement invalidées (identiquement
   `0` sous `IdOnly`, qui ne mémorise jamais un échec).
 - **Une table périmée est corrigée par le SCAN suivant.** Un préfixe rival qui arrive après la
