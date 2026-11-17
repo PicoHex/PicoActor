@@ -679,8 +679,12 @@ event. Nothing here asserts a wall-clock number; element and flush counts are th
 - **Bnd14 — a consumer override wins** (`Bnd14_ConsumerOverrideWins`): binding `SagaCompleted` to a
   consumer tag before constructing the store keeps that tag (`TryAdd` seeds nothing), the lines carry it,
   and `FrameworkDefaultCount` reports the reduction.
-- **Bnd15 — `SagaCompleted.Result` round-trip**: `null` and `string` come back equal; any other object
-  comes back as its `ToString()` — the documented, lossy promise, asserted as such rather than hidden.
+- **Bnd15 — `SagaCompleted.Result` is `null` or nothing**: `null` round-trips exactly (every `MarkComplete`
+  call site is parameterless). A non-null value cannot be written OR read by the serializer today — the
+  generated writer emits the member name with no value (`if (value.Result != null) { }` → `FormatException`)
+  and the reader assigns `default!` — so the test pins the only promise the store can keep: a **loud failure
+  with nothing written** (no file, no version). It turns red on purpose the day the serializer learns untyped
+  members, at which point it is extended into the full round trip.
 - **Bnd16 — the tag grammar** (`Bnd16_TagGrammar_RejectsQuotesBackslashAndBlanks`): blank, quote,
   backslash and control characters are refused with `ArgumentOutOfRangeException`; a legal tag with
   spaces or non-ASCII characters is accepted.
