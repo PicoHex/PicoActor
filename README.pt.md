@@ -343,7 +343,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `Logger` é independente do `ILoggerFactory` do DI: passe o mesmo logger explicitamente para ver
   os avisos do armazenamento no seu log.
 - Fora desta versão: escritores multiprocesso, arquivamento/retenção/compactação, linhas estranhas
-  (não eventos), criptografia/compressão e um segundo codec para eventos do framework.
+  (não eventos), criptografia/compressão. Eventos do framework **não pedem um segundo codec**: os vínculos
+  os encaminham para serializadores gerados no pacote do store (veja «Framework events (event type
+  bindings)» abaixo).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -431,9 +433,10 @@ e `RegisteredCount` é o total).
   com `TypePrefix`, um nome fora de todo prefixo de **tipo** registrado
   (`unknown-<id>.jsonl`, categorização própria de um host) é **alcançável por id**, invisível à enumeração por tipo, nunca contado em `ForeignFormatFiles` e nunca
   dispara o throw do diretório inteiro. Um prefixo não contém `-`; nomes curtos iguais compartilham prefixo.
-- **`SagaCompleted.Result` é `object?`:** só `null` (a única forma que o framework produz) e `string` fazem
-  ida e volta fiel; qualquer outro objeto é convertido em string por `ToString()` — com perda, irreversível.
-  A persistência de um stream de saga promete `null`/`string`, nada mais.
+- **`SagaCompleted.Result` é `object?` — e seu serializador não sabe gravar nenhum valor não nulo** (o
+  writer gerado escreve só o nome do membro, sem valor). `null` — a única forma que o framework produz hoje
+  — faz ida e volta; qualquer outra coisa falha na hora e não grava um único byte. Num store persistente,
+  mantenha `Result` em `null`.
 - **Regras de registro.** Os vínculos ficam na instância de opções —
   `options.EventTypeBindings.Add<T>(tag)` **antes** de construir o store: o construtor **congela e copia** a
   tabela, então um `Add` posterior lança em vez de ser ignorado em silêncio. Um tipo tem exatamente um tag e

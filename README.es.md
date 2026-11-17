@@ -345,7 +345,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   corrección. `Logger` es independiente del `ILoggerFactory` de DI: pase el mismo logger de forma
   explícita para ver los avisos del almacén en su log.
 - Fuera de esta versión: escritores multiproceso, archivado/retención/compactación, líneas ajenas
-  (no eventos), cifrado/compresión, y un segundo códec para eventos del framework.
+  (no eventos), cifrado/compresión. Los eventos del framework **no necesitan un segundo códec**: las
+  ataduras los enrutan a serializadores generados en el paquete del store (ver «Framework events (event
+  type bindings)» más abajo).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -436,9 +438,10 @@ enruta los eventos del framework al mismo store: el framework pre-registra
   (`unknown-<id>.jsonl`, categorización propia de un host) es **alcanzable por id**, invisible a la enumeración por tipo, nunca cuenta en `ForeignFormatFiles` y nunca
   dispara el throw de todo el directorio. Un prefijo no contiene `-`; nombres cortos iguales comparten
   prefijo.
-- **`SagaCompleted.Result` es `object?`:** solo `null` (la única forma que produce el framework) y `string`
-  hacen ida y vuelta fiel; cualquier otro objeto se convierte a cadena con `ToString()` — con pérdida,
-  irreversible. La persistencia de un stream de saga promete `null`/`string`, nada más.
+- **`SagaCompleted.Result` es `object?` — y su serializador no sabe escribir ningún valor distinto de
+  null** (el writer generado escribe solo el nombre del miembro, sin valor). `null` — la única forma que el
+  framework produce hoy — hace ida y vuelta; cualquier otra cosa falla en el acto y no escribe un solo byte.
+  En un store persistente, mantén `Result` en `null`.
 - **Reglas de registro.** Las ataduras viven en la instancia de opciones —
   `options.EventTypeBindings.Add<T>(tag)` **antes** de construir el store: el constructor **congela y copia**
   la tabla, así que un `Add` posterior lanza en vez de ignorarse en silencio. Un tipo tiene exactamente un tag

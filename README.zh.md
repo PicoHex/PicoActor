@@ -321,8 +321,8 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 - `MaxAggregateLocks`(默认 `1024`)为每聚合门闩表设上界;被淘汰的条目只会让该聚合的下一次
   追加多扫一遍,不影响正确性。`Logger` 独立于 DI 的 `ILoggerFactory`:要看到存储的告警,
   就把同一个 logger 显式传进来。
-- 本次发布不含:多进程写入、归档/保留/压缩、外来(非事件)行、加密/压缩,以及框架事件的
-  第二套编解码器。
+- 本次发布不含:多进程写入、归档/保留/压缩、外来(非事件)行、加密/压缩。框架事件**不需要第二套编解码器**：
+  绑定只是把它们路由到 store 包内生成的序列化器（见下文「Framework events」）。
 
 #### Stream naming（流文件命名，`FileNameFormat`）
 
@@ -388,8 +388,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 - **命名。** 两个框架 tag 就是生产语料已有的 tag，是永久线格式（无 alias）。流仍按首事件的 CLR 短名命名；
   在 `TypePrefix` 下，落在所有已注册**类型**前缀之外的名字（`unknown-<id>.jsonl`，宿主自己的分类）**按 id 可达**、按类型枚举不可见、
   不计入 `ForeignFormatFiles`、也不会触发整目录抛。前缀不含 `-`；同短名共用一个前缀。
-- **`SagaCompleted.Result` 是 `object?`：** 只有 `null`（框架唯一产生的形状）与 `string` 能保真往返；其它
-  对象会被 `ToString()` 字符串化——有损、不可逆。saga 流的持久化承诺只有 `null`/`string`。
+- **`SagaCompleted.Result` 是 `object?`，而序列化器根本写不出非 null 的值**（生成的 writer 只写出成员名、
+  不写值）。`null`——框架今天唯一产生的形状——能正常往返；其它任何值都会当场失败，且一个字节也不会写入。
+  持久化存储里请让 `Result` 保持 `null`。
 - **注册规则。** 绑定挂在 options 实例上——在构造 store **之前**调用
   `options.EventTypeBindings.Add<T>(tag)`：构造函数会**冻结并拷贝**这张表，之后的 `Add` 会抛异常，而不是被
   静默忽略。一个类型只有一个 tag，一个 tag 只命名一个类型（同一对重复调用是 no-op；tag 非空且不含引号、

@@ -348,8 +348,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `Logger` est indépendant de l'`ILoggerFactory` de la DI : passez explicitement le même logger
   pour voir les avertissements du stockage dans votre log.
 - Hors de cette version : écritures multi-processus, archivage/rétention/compaction, lignes
-  étrangères (non-événements), chiffrement/compression, et un second codec pour les événements du
-  framework.
+  étrangères (non-événements), chiffrement/compression. Les événements du framework **ne demandent pas de
+  second codec** : les liaisons les acheminent vers des sérialiseurs générés dans le package du store
+  (voir « Framework events (event type bindings) » ci-dessous).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -443,9 +444,10 @@ le total).
   (`unknown-<id>.jsonl`, catégorisation propre à un hôte) est **joignable par id**, invisible pour l'énumération par type, jamais compté dans `ForeignFormatFiles` et
   ne déclenche jamais le throw sur tout le répertoire. Un préfixe ne contient pas de `-` ; des noms courts
   identiques partagent un préfixe.
-- **`SagaCompleted.Result` est `object?` :** seul `null` (la seule forme que le framework produit) et
-  `string` font un aller-retour fidèle ; tout autre objet est stringifié via `ToString()` — avec perte,
-  irréversible. Pour un flux de saga, la persistance promet `null`/`string`, rien de plus.
+- **`SagaCompleted.Result` est `object?` — et son sérialiseur ne sait pas écrire de valeur non nulle** (le
+  writer généré n'écrit que le nom du membre, pas de valeur). `null` — la seule forme que le framework
+  produit aujourd'hui — fait l'aller-retour ; toute autre valeur échoue sur place et n'écrit pas un octet.
+  Gardez `Result` à `null` dans un store persistant.
 - **Règles d'enregistrement.** Les liaisons vivent sur l'instance d'options —
   `options.EventTypeBindings.Add<T>(tag)` **avant** de construire le store : le constructeur **gèle et copie**
   la table, donc un `Add` ultérieur lève au lieu d'être ignoré en silence. Un type a exactement un tag et un

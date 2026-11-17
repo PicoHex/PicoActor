@@ -347,8 +347,9 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   `Logger` ist unabhängig von der DI-`ILoggerFactory`: übergeben Sie denselben Logger explizit,
   um die Warnungen des Speichers in Ihrem Log zu sehen.
 - Nicht in dieser Version: Mehrprozess-Schreiber, Archivierung/Aufbewahrung/Kompaktierung, fremde
-  (Nicht-Ereignis-)Zeilen, Verschlüsselung/Kompression und ein zweiter Codec für
-  Framework-Ereignisse.
+  (Nicht-Ereignis-)Zeilen, Verschlüsselung/Kompression. Framework-Ereignisse brauchen **keinen zweiten
+  Codec**: Bindungen routen sie an Serializer, die im Store-Paket generiert werden (siehe unten
+  «Framework events (event type bindings)»).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -443,9 +444,10 @@ Defaults, `0…2`, `RegisteredCount` die Gesamtzahl).
   (`unknown-<id>.jsonl`, die eigene Kategorisierung eines Hosts) **per id** erreichbar, in der Typ-Enumeration unsichtbar, zählt nie in
   `ForeignFormatFiles` und löst nie den Verzeichnis-weiten Throw aus. Ein Präfix enthält kein `-`; gleiche
   Kurznamen teilen sich ein Präfix.
-- **`SagaCompleted.Result` ist `object?`:** Nur `null` (die einzige Form, die das Framework erzeugt) und
-  `string` gehen verlustfrei hin und zurück; jedes andere Objekt wird per `ToString()` stringifiziert —
-  verlustbehaftet, unumkehrbar. Für einen Saga-Stream verspricht die Persistenz `null`/`string`, mehr nicht.
+- **`SagaCompleted.Result` ist `object?` — und der Serializer kann einen Nicht-null-Wert gar nicht
+  schreiben** (der generierte Writer schreibt nur den Membernamen, keinen Wert). `null` — die einzige Form,
+  die das Framework heute erzeugt — geht hin und zurück; alles andere scheitert sofort und schreibt kein
+  Byte. In einem persistenten Store `Result` auf `null` halten.
 - **Regeln der Registrierung.** Bindungen liegen auf der options-Instanz —
   `options.EventTypeBindings.Add<T>(tag)` **vor** dem Konstruieren des Stores: Der Konstruktor **friert die
   Tabelle ein und kopiert sie**, ein späteres `Add` wirft also, statt still ignoriert zu werden. Ein Typ hat

@@ -332,7 +332,8 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   one re-scan on that aggregate's next append, never correctness. `Logger` is independent of the DI
   `ILoggerFactory`: pass the same logger explicitly to see the store's warnings in your log.
 - Not in this release: multi-process writers, archive/retention/compaction, foreign (non-event)
-  lines, encryption/compression, and a second codec for framework events.
+  lines, encryption/compression. Framework events need **no second codec**: bindings route them to
+  serializers generated in the store package (see «Framework events (event type bindings)» below).
 
 #### Stream naming (`FileNameFormat`)
 
@@ -415,9 +416,9 @@ is how many defaults were actually applied, `0…2`, and `RegisteredCount` is th
   a name outside every registered *type* prefix (`unknown-<id>.jsonl`, a host's own categorisation) is
   reachable **by id**, invisible to type enumeration, never counted `ForeignFormatFiles` and never
   triggers the whole-directory throw. A prefix contains no `-`; equal short names share one prefix.
-- **`SagaCompleted.Result` is `object?`:** `null` (the only shape the framework produces) and `string`
-  round-trip; any other object is `ToString()`-stringified — lossy, irreversible. Persisting a saga stream
-  promises `null`/`string`, nothing more.
+- **`SagaCompleted.Result` is `object?`, and the serializer cannot write a non-null value at all** (the
+  generated writer emits the member with no value). `null` — the only shape the framework produces today
+  — round-trips; anything else fails loudly and writes nothing. Keep `Result` null in a persistent store.
 - **Registration rules.** Bindings live on the options instance — `options.EventTypeBindings.Add<T>(tag)`
   before the store is constructed: the constructor **freezes and copies** the table, so a later `Add`
   throws instead of being silently ignored. One type has exactly one tag and one tag names exactly one
