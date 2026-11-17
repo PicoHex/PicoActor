@@ -254,15 +254,16 @@ public sealed class JsonlEventStore<TEventBase>
         // pass diagnoses) attests to NOTHING, because no store came into being — a line about a table
         // nothing holds would be worse than a silent start-up.
         // The counts are the table's own frozen values, not a re-read of the mutable options table.
-        if (_bindings.Count > 0)
-        {
-            // Typed as string deliberately: the message is a FINISHED sentence, not a format template a
-            // sink may re-render, and its text is the contract a boot check matches on.
-            var report =
-                $"event type bindings: {_bindings.Count} registered "
-                + $"({_bindings.FrameworkDefaultCount} framework-default)";
-            _logger?.Info(report);
-        }
+        // NO GUARD, deliberately: the seeds are TryAddDefault'ed inside the freeze itself, so the frozen
+        // table can never be empty — a `Count > 0` check here is a branch no store can reach, and one
+        // that would silently swallow the line the day a third entry point makes it reachable. The
+        // attestation is unconditional: one store, one line.
+        // Typed as string deliberately: the message is a FINISHED sentence, not a format template a
+        // sink may re-render, and its text is the contract a boot check matches on.
+        var report =
+            $"event type bindings: {_bindings.Count} registered "
+            + $"({_bindings.FrameworkDefaultCount} framework-default)";
+        _logger?.Info(report);
     }
 
     /// <summary>
@@ -1858,6 +1859,11 @@ public sealed class JsonlEventStore<TEventBase>
     /// bound type is serialized by its OWN generated serializer, in its OWN assembly. So this message
     /// names the tag, the bound type, the file and WHICH registration the tag came from, because
     /// "look at the binding" is useless advice when the operator never wrote one.
+    /// <para>
+    /// The remedy is chosen by the LEG as well as by the failure: a write that cannot produce a payload
+    /// and a line whose payload cannot be read are different problems with different owners, and one
+    /// wording pointed the WRITING caller at a file that did not exist (I2).
+    /// </para>
     /// </summary>
     private Exception WrapBound(
         Exception inner,
@@ -1880,10 +1886,25 @@ public sealed class JsonlEventStore<TEventBase>
                     + "serializable. Generate one where the type is declared: "
                     + $"[GenerateSerializer(typeof({boundType.Name}))] on one of that assembly's types, "
                     + $"or a literal JsonSerializer.Serialize/Deserialize<{boundType.Name}> call there."
-                // A FormatException family failure: the payload is not this type's JSON.
-                : $"the payload does not fit the tag: a line tagged \"{tag}\" must carry "
-                    + $"{boundType.FullName}'s own JSON behind the discriminator. Check that the tag is "
-                    + "bound to this type, and that the file holds lines this store wrote.";
+            // A FormatException family failure, and WHICH leg decides the advice (I2). The action is
+            // the literal the two call sites pass: "serialize" is the write leg, "deserialize" the
+            // read one.
+            : action == "serialize"
+                // The WRITE leg: the caller is MID-APPEND, and the one thing it must be told is that
+                // this failure wrote NOTHING. The read leg's sentence - "check that the file holds
+                // lines this store wrote" — describes a file that does not exist yet, so it sends
+                // the operator hunting for a corpus instead of fixing the type that could not
+                // produce a payload. What failed here is the type's own OUTPUT, before a byte moved.
+                ? "the event could not be written, and nothing was written — no line, no file: "
+                    + $"{boundType.FullName}'s own generated serializer failed while producing the "
+                    + "payload. A known cause is an untyped 'object?' member, which PicoJetson does "
+                    + "not implement on write: its generated writer emits the member's NAME with no "
+                    + "value, and a name without a value is not JSON. The remedy is on the TYPE, not "
+                    + "on the file — give the member a concrete type, or leave it null."
+            // The READ leg: the line EXISTS, and its payload is not this type's JSON.
+            : $"the payload does not fit the tag: a line tagged \"{tag}\" must carry "
+                + $"{boundType.FullName}'s own JSON behind the discriminator. Check that the tag is "
+                + "bound to this type, and that the file holds lines this store wrote.";
 
         var message =
             $"Cannot {action} '{path}' as {boundType.FullName} through the event type binding "

@@ -319,7 +319,7 @@ public sealed class BoundEventReadTests
         // configured stream of another type — the ordinary case of a directory holding many types.
         await Assert.That(store.ForeignFormatFiles).IsEqualTo(0L);
         await Assert.That(store.SkippedFileNames).IsEqualTo(0L);
-        await Assert.That(logger.AnyAtOrAbove(LogLevel.Warning)).IsFalse();
+        await Assert.That(logger.AnyAtOrWorseThan(LogLevel.Warning)).IsFalse();
     }
 
     // ── Bnd12: an interface base cannot carry the registration, so it is refused at construction ───

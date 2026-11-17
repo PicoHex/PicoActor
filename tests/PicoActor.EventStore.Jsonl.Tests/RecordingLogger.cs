@@ -30,10 +30,12 @@ internal sealed class RecordingLogger : ILogger
     /// The comparison is <c>&lt;=</c>, and NOT because of a typo: <see cref="LogLevel"/> is ordered like
     /// syslog — <see cref="LogLevel.Emergency"/> is 0 and <see cref="LogLevel.Trace"/> is 8 — so a
     /// SMALLER number is the MORE severe one. A <c>&gt;=</c> here would call every Info line a warning
-    /// (which it did, silently, until the store's start-up attestation line made it visible).
+    /// (which it did, silently, until the store's start-up attestation line made it visible). The NAME
+    /// says WORSE for the same reason: <c>AnyAtOrAbove</c> would describe <c>&gt;=</c>, which is the
+    /// opposite of what this method does.
     /// </para>
     /// </summary>
-    internal bool AnyAtOrAbove(LogLevel level) => Entries.Any(entry => entry.Level <= level);
+    internal bool AnyAtOrWorseThan(LogLevel level) => Entries.Any(entry => entry.Level <= level);
 
     public IDisposable BeginScope<TState>(TState state)
         where TState : notnull => NullScope.Instance;

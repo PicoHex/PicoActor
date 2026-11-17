@@ -70,6 +70,18 @@ public sealed class BoundEventWriteTests
         // Nothing was torn or repaired: the batch reached the disk as one terminated payload.
         await Assert.That(store.TornTailLines).IsEqualTo(0L);
         await Assert.That(logger.Contains("torn")).IsFalse();
+
+        // … and the file is READ BACK, because every assertion above only ever looked at bytes this
+        // test already knew how to spell: a write the reader could not follow would have passed all of
+        // them. A mixed batch is the ONE shape that exercises both routes of one file, and it must come
+        // back in append order — the business event through the base's polymorphic reader, the
+        // completion through the framework tag's binding.
+        var loaded = await store.LoadAsync(id);
+        await Assert.That(loaded.Count).IsEqualTo(2);
+        await Assert.That(loaded[0].GetType()).IsEqualTo(typeof(SSnapshotAdded));
+        await Assert.That(loaded[0]).IsEqualTo(new SSnapshotAdded(7));
+        await Assert.That(loaded[1].GetType()).IsEqualTo(typeof(SagaCompleted));
+        await Assert.That(loaded[1]).IsEqualTo(new SagaCompleted(null));
     }
 
     // ── Bnd2: a stream's prefix is still its FIRST event's CLR type name (D6) ──────────────────────
@@ -264,6 +276,24 @@ public sealed class BoundEventWriteTests
         await Assert.That(error is FormatException or InvalidOperationException).IsTrue();
         await Assert
             .That(error!.Message.Contains(nameof(SagaCompleted), StringComparison.Ordinal))
+            .IsTrue();
+
+        // WHOSE failure is it (I2): the WRITE leg's, and the remedy has to say so. Both legs share one
+        // wrapper, and the READ leg's advice — "check that the file holds lines this store wrote" — was
+        // being handed to a caller who is MID-APPEND: there is no line and there is no file, so that
+        // sentence sends the operator looking for something this failure never created. The two legs
+        // fail for different reasons (this one is the type's own output, blocked before a byte moves),
+        // so one wording cannot serve both.
+        await Assert
+            .That(
+                error.Message.Contains(
+                    "the file holds lines this store wrote",
+                    StringComparison.Ordinal
+                )
+            )
+            .IsFalse();
+        await Assert
+            .That(error.Message.Contains("could not be written", StringComparison.Ordinal))
             .IsTrue();
         await Assert.That(File.Exists(StreamPath(temp.Root, otherId))).IsFalse();
         await Assert.That(await store.GetVersionAsync(otherId)).IsEqualTo(0UL);
