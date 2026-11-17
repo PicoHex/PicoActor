@@ -347,6 +347,44 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 - Fuera de esta versión: escritores multiproceso, archivado/retención/compactación, líneas ajenas
   (no eventos), cifrado/compresión, y un segundo códec para eventos del framework.
 
+#### Stream naming (`FileNameFormat`)
+
+`JsonlEventStoreOptions.FileNameFormat` elige cómo se **nombra el archivo** de un stream; el formato
+de línea es idéntico en ambos modos, así que solo cambian los nombres y un directorio existente sigue
+siendo legible.
+
+| Valor | Archivo del stream | Qué aporta |
+|---|---|---|
+| `IdOnly` (predeterminado) | `<id:D>.jsonl` | el diseño histórico, reproducido byte a byte — sin migración y sin cambios para un directorio existente |
+| `TypePrefix` | `<type>-<id:D>.jsonl` | el tipo viaja en el nombre, así que `ListAggregateIdsAsync` resuelve los id solo con los nombres de archivo: **cero aperturas de archivo** por enumeración |
+
+`{type}` es `events[0].GetType().Name` — el tipo concreto del **primer evento persistido** del stream
+(un tipo genérico conserva su aridad con acento grave) — y queda **fijado al crear el stream**: un
+lote posterior cuyo primer evento sea de otro tipo sigue añadiendo al nombre con el que nació.
+
+- **Migrar a `TypePrefix`.** PicoAgent ya nombra sus streams `{type}-{id}.jsonl`, así que apuntar este
+  store a ese directorio con `FileNameFormat = TypePrefix` **no necesita ningún renombrado**: el
+  directorio se lee tal cual y los snapshots se conservan igual (están indexados por el id del
+  agregado, `<id:D>.snap`, nunca por el nombre del stream). La dirección inversa no se ofrece: el
+  prefijo forma parte del nombre, un store `IdOnly` no puede deducirlo y tendría que renombrar cada
+  archivo.
+- **Un directorio mixto se diagnostica, nunca se fusiona.** Las entradas válidas solo bajo el *otro*
+  diseño se cuentan y se reportan como **un** Warning por escaneo (la
+  detección es simétrica: `<id>.jsonl` bajo `TypePrefix` y `<type>-<id>.jsonl` bajo `IdOnly` cuentan
+  ambos como «otro formato»). Un directorio con **cero** nombres del formato configurado y **algunos**
+  del otro lanza `InvalidOperationException` nombrando ambos recuentos, ambos formatos y las dos
+  salidas — desde la enumeración, la construcción y el lazy pass por igual — en lugar de reportar un
+  sistema vacío. Un stream de *otro tipo de evento* no es una mezcla: es el caso normal y no cuesta ni
+  contador ni línea de log. Un append para un id que ya tiene un stream no vacío en el otro diseño —
+  o dos prefijos distintos — se rechaza antes de escribir un solo byte.
+- **Coste.** `TypePrefix` paga un recorrido de nombres de archivo al construir (para aprender el mapa
+  id → tipo), uno por cada fallo de resolución, y un `stat` por append para la guarda de duplicados.
+  `IdOnly` no paga **nada** al construir ni al añadir a un stream que ya tiene; su único recorrido de
+  directorio es perezoso, en la primera observación de un stream que no tiene, y nunca más — un
+  recorrido fallido queda latcheado y se relanza, para que una raíz mal configurada no degenere en
+  silencio a «agregado vacío». Un lote vacío no escribe ni crea nada en ningún modo, pero sí valida
+  `expectedVersion`.
+
 ### Idle Passivation (opt-in) (Pasivación por inactividad, opcional)
 
 Los actores permanecen en memoria hasta que se detienen. Para cargas de trabajo con muchos

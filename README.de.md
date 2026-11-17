@@ -350,6 +350,46 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
   (Nicht-Ereignis-)Zeilen, Verschlüsselung/Kompression und ein zweiter Codec für
   Framework-Ereignisse.
 
+#### Stream naming (`FileNameFormat`)
+
+`JsonlEventStoreOptions.FileNameFormat` legt fest, wie eine Stream-**Datei benannt** wird; das
+Zeilenformat ist in beiden Modi identisch, es unterscheiden sich nur die Namen — ein vorhandenes
+Verzeichnis bleibt also lesbar.
+
+| Wert | Stream-Datei | Was es bringt |
+|---|---|---|
+| `IdOnly` (Standard) | `<id:D>.jsonl` | das historische Layout, byte-genau reproduziert — keine Migration, keine Änderung für ein bestehendes Verzeichnis |
+| `TypePrefix` | `<type>-<id:D>.jsonl` | der Typ steht im Namen, daher löst `ListAggregateIdsAsync` die Ids allein aus Dateinamen auf: **null Dateiöffnungen** pro Enumeration |
+
+`{type}` ist `events[0].GetType().Name` — der konkrete Typ des **ersten persistierten Events** eines
+Streams (ein generischer Typ behält seine Backtick-Arität) — und er ist **bei der Erstellung
+festgelegt**: ein späterer Batch, dessen erstes Event einen anderen Typ hat, hängt weiter an den
+Namen, mit dem der Stream geboren wurde.
+
+- **Migration auf `TypePrefix`.** PicoAgent benennt seine Streams bereits `{type}-{id}.jsonl`; zeigt
+  dieser Store mit `FileNameFormat = TypePrefix` auf ein solches Verzeichnis, ist **keine einzige
+  Umbenennung** nötig — das Verzeichnis ist so lesbar, wie es ist, und Snapshots ziehen unverändert
+  mit (sie sind auf die Aggregat-Id geschlüsselt, `<id:D>.snap`, nie auf den Stream-Namen). Die
+  Gegenrichtung gibt es nicht: ein Präfix ist Teil des Namens, ein `IdOnly`-Store kann ihn nicht aus
+  der Id ableiten und müsste jede Datei umbenennen.
+- **Ein gemischtes Verzeichnis wird diagnostiziert, nie verschmolzen.** Einträge, die nur im
+  *anderen* Layout gültig sind, werden gezählt und als **eine** Warnung pro
+  Scan gemeldet (die Erkennung ist symmetrisch: `<id>.jsonl` unter `TypePrefix` und
+  `<type>-<id>.jsonl` unter `IdOnly` gelten beide als „anderes Format“). Ein Verzeichnis mit **null**
+  Namen im konfigurierten Format und **einigen** im anderen wirft eine
+  `InvalidOperationException`, die beide Zähler, beide Formate und die zwei Auswege nennt — aus
+  Enumeration, Konstruktion und Lazy-Pass gleichermaßen — statt ein leeres System zu melden. Ein
+  Stream eines *anderen Event-Typs* ist keine Mischung: das ist der Normalfall, er kostet weder
+  Zähler noch Logzeile. Ein Append für eine Id, die bereits einen nicht-leeren Stream im anderen
+  Layout hat — oder zwei verschiedene Präfixe — wird abgelehnt, bevor ein Byte geschrieben ist.
+- **Kosten.** `TypePrefix` zahlt einen Dateinamen-Durchlauf bei der Konstruktion (für die Id → Typ
+  Abbildung), einen pro aufgelöstem Fehlgriff und ein `stat` pro Append für den Duplikat-Schutz.
+  `IdOnly` zahlt bei der Konstruktion **nichts** und nichts für ein Append an einen bereits
+  vorhandenen Stream; sein einziger Verzeichnis-Durchlauf läuft lazy bei der ersten Beobachtung eines
+  Streams, den es nicht hat, und danach nie wieder — ein fehlgeschlagener Durchlauf wird gelatcht und
+  erneut geworfen, damit ein fehlkonfiguriertes Root nicht still zu „leeres Aggregat“ verfällt. Ein
+  leerer Batch schreibt und erzeugt in beiden Modi nichts, prüft aber weiterhin `expectedVersion`.
+
 ### Idle Passivation (opt-in) (Idle-Passivierung, optional)
 
 Actors bleiben im Speicher, bis sie gestoppt werden. Für Workloads mit vielen langlebigen
