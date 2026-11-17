@@ -187,7 +187,8 @@ public sealed class JsonlEventStore<TEventBase>
     /// whole-directory misconfiguration are diagnosed. A <see cref="FileNameFormat.TypePrefix"/> store
     /// pays one more at construction (to learn the <c>id → type</c> map) and one per resolved miss — and
     /// the TWO paths pay it differently, which is the whole point of the negative cache: a READ remembers
-    /// the miss, so a probe loop over ids nobody has pays one pass (single-flight inside the gate), while
+    /// the miss, so probes of ONE absent id cost a pass once (single-flight inside the gate; a DIFFERENT
+    /// absent id pays a pass of its own), while
     /// an APPEND never trusts that memory and re-scans, because a remembered absence is not evidence that
     /// the stream is still absent.
     /// <para>
@@ -875,9 +876,10 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <summary>
-    /// Resolve a <see cref="FileNameFormat.TypePrefix"/> MISS — one directory pass per unknown id, and one
-    /// pass for a whole BURST of them, because a probe loop over ids the store does not have is not a
-    /// reason to re-read the directory per probe.
+    /// Resolve a <see cref="FileNameFormat.TypePrefix"/> MISS — one directory pass per DISTINCT unknown id
+    /// (single-flight only merges concurrent probes of the SAME id; repeats of that id are free, a
+    /// different id pays its own pass), because re-reading the directory per probe of an id the store has
+    /// already learned it does not hold is not worth a pass.
     /// <para>
     /// SINGLE-FLIGHT, on the gate a directory pass already holds: the winner scans, a reader that arrived
     /// while it was scanning answers from the double-check inside the gate, and the ids the map is known
