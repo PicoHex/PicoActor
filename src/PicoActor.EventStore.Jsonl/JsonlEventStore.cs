@@ -34,6 +34,10 @@ public sealed class JsonlEventStore<TEventBase>
     private readonly ILogger? _logger;
     private readonly JsonlLockTable _locks;
 
+    // The id → type map TypePrefix resolution needs, because IEventStore carries only the aggregate id.
+    // Never consulted under IdOnly, where the name IS the id.
+    private readonly ConcurrentDictionary<Guid, string> _typeById = new();
+
     private long _deserializedEvents;
     private long _tornTailLines;
     private long _skippedFileNames;
@@ -66,6 +70,11 @@ public sealed class JsonlEventStore<TEventBase>
         _locks = new JsonlLockTable(options.MaxAggregateLocks);
         _options = options;
         _logger = options.Logger;
+
+        // A TypePrefix store learns its map from ONE filename pass. IdOnly pays nothing here: the id
+        // alone is the name, so there is nothing to learn.
+        if (_options.FileNameFormat == FileNameFormat.TypePrefix)
+            ScanTypeMap();
     }
 
     /// <summary>Events this store has DESERIALIZED (a load or a cursor move), not lines it has read.</summary>
@@ -119,7 +128,7 @@ public sealed class JsonlEventStore<TEventBase>
     {
         ArgumentNullException.ThrowIfNull(events);
 
-        var path = PathFor(actorId);
+        var (path, newType) = AppendPathFor(actorId, events);
         var entry = _locks.Acquire(actorId);
         await entry.Gate.WaitAsync().ConfigureAwait(false);
         try
@@ -131,12 +140,18 @@ public sealed class JsonlEventStore<TEventBase>
 
             // 2. Every element must be the declared base type, and the batch is encoded as ONE buffer
             //    before anything reaches the disk — a serialization failure creates no file at all.
-            var payload = Encode(events, path);
+            //
+            //    A non-empty batch always resolves a path: an existing stream, or a NEW name formed
+            //    from events[0]'s type, which is known before the path ever is. Re-stating it as
+            //    non-null here keeps every later use (the encode message, the handle, the scans, the
+            //    reports) honest without scattering null-forgiving operators.
+            var streamPath = path!;
+            var payload = Encode(events, streamPath);
 
             Directory.CreateDirectory(_root);
 
             await using var stream = new FileStream(
-                path,
+                streamPath,
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.Read
@@ -148,13 +163,13 @@ public sealed class JsonlEventStore<TEventBase>
             var scanReportedTornTail = false;
             if (!entry.Seeded)
             {
-                var seed = ScanStream(stream, fromVersion: 1, path);
+                var seed = ScanStream(stream, fromVersion: 1, streamPath);
                 entry.Seed(seed.Count, length);
                 scanReportedTornTail = seed.TornTail;
             }
             else if (entry.Length != length)
             {
-                var observed = ScanStream(stream, fromVersion: 1, path);
+                var observed = ScanStream(stream, fromVersion: 1, streamPath);
                 entry.Seed(observed.Count, length);
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
             }
@@ -173,7 +188,7 @@ public sealed class JsonlEventStore<TEventBase>
             if (length > 0 && !EndsWithNewline(stream, length))
             {
                 if (!scanReportedTornTail)
-                    ReportTornTail(path);
+                    ReportTornTail(streamPath);
 
                 stream.SetLength(FindLastNewline(stream, length));
             }
@@ -188,6 +203,12 @@ public sealed class JsonlEventStore<TEventBase>
             // 8. The cache describes the file as it now is.
             var version = entry.Count + (ulong)events.Count;
             entry.Seed(version, stream.Length);
+
+            // The prefix is fixed at CREATION: the map learns it once the bytes are on disk, so an id
+            // that is later recreated keeps pointing at the file its first event named.
+            if (newType is not null)
+                _typeById.TryAdd(actorId, newType);
+
             return version;
         }
         catch (ConcurrencyException)
@@ -216,7 +237,7 @@ public sealed class JsonlEventStore<TEventBase>
     private ulong EmptyAppend(
         Guid actorId,
         ulong expectedVersion,
-        string path,
+        string? path,
         JsonlLockEntry entry
     )
     {
@@ -237,9 +258,11 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <summary>Observe a stream WITHOUT creating or repairing anything: (count, length), 0/0 when absent.</summary>
-    private (ulong Count, long Length) Inspect(string path)
+    private (ulong Count, long Length) Inspect(string? path)
     {
-        if (!File.Exists(path))
+        // A null path is "this format has no stream for the id" — the same observation as a missing
+        // file, and it must not create one.
+        if (path is null || !File.Exists(path))
             return (0UL, 0L);
 
         using var stream = OpenRead(path);
@@ -256,7 +279,7 @@ public sealed class JsonlEventStore<TEventBase>
     public async ValueTask<IReadOnlyList<IDomainEvent>> LoadAsync(Guid actorId)
     {
         var path = PathFor(actorId);
-        if (!File.Exists(path))
+        if (path is null || !File.Exists(path))
             return Array.Empty<IDomainEvent>();
 
         var events = new List<IDomainEvent>();
@@ -285,7 +308,7 @@ public sealed class JsonlEventStore<TEventBase>
     public async ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId)
     {
         var path = PathFor(actorId);
-        if (!File.Exists(path))
+        if (path is null || !File.Exists(path))
             return null;
 
         await using var stream = OpenRead(path);
@@ -332,7 +355,7 @@ public sealed class JsonlEventStore<TEventBase>
         ct.ThrowIfCancellationRequested();
 
         var path = PathFor(actorId);
-        if (!File.Exists(path))
+        if (path is null || !File.Exists(path))
             return new ValueTask<ulong>(0UL);
 
         using var stream = OpenRead(path);
@@ -356,8 +379,10 @@ public sealed class JsonlEventStore<TEventBase>
 
         ct.ThrowIfCancellationRequested();
 
+        // The path is resolved AFTER the version check: fromVersion == 0 is an argument error in both
+        // formats, whether or not the aggregate exists.
         var path = PathFor(actorId);
-        if (!File.Exists(path))
+        if (path is null || !File.Exists(path))
             return new ValueTask<IEventCursor>(JsonlCursor.Empty(fromVersion));
 
         var stream = OpenRead(path);
@@ -447,6 +472,17 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Under <see cref="FileNameFormat.IdOnly"/> the type is not in the name, so every stream is OPENED
+    /// once to read its first event. Under <see cref="FileNameFormat.TypePrefix"/> the type IS the name:
+    /// the ids come from <see cref="JsonlNames.Classify"/> alone, so the enumeration opens NOTHING.
+    /// <para>
+    /// One deviation follows from that, and it is deliberate: a stream whose first LINE is corrupt is
+    /// enumerated under TypePrefix (its name is a valid stream name) and not under IdOnly (which has no
+    /// other way to learn the type). The runtime peeks every id it is given, so recovery still filters
+    /// it out.
+    /// </para>
+    /// </remarks>
     public async ValueTask<IReadOnlyList<Guid>> ListAggregateIdsAsync(string firstEventType)
     {
         ArgumentNullException.ThrowIfNull(firstEventType);
@@ -454,6 +490,9 @@ public sealed class JsonlEventStore<TEventBase>
         var result = new List<Guid>();
         if (!Directory.Exists(_root))
             return result;
+
+        if (_options.FileNameFormat == FileNameFormat.TypePrefix)
+            return ListTypePrefixedIds(firstEventType);
 
         foreach (var file in Directory.EnumerateFiles(_root))
         {
@@ -478,6 +517,56 @@ public sealed class JsonlEventStore<TEventBase>
         return result;
     }
 
+    /// <summary>
+    /// The <see cref="FileNameFormat.TypePrefix"/> enumeration: classify every DIRECTORY ENTRY and keep
+    /// the ones whose name is <c>&lt;firstEventType&gt;-&lt;id:D&gt;</c>. No file is opened — the length
+    /// that separates a stream from a zero-length leftover comes from the directory metadata.
+    /// </summary>
+    private List<Guid> ListTypePrefixedIds(string firstEventType)
+    {
+        var result = new List<Guid>();
+
+        // A classification pass is a scan, and the increment comes FIRST: a pass that throws further
+        // down still counts as a pass.
+        Interlocked.Increment(ref _directoryScans);
+
+        foreach (var file in new DirectoryInfo(_root).EnumerateFiles())
+        {
+            var kind = JsonlNames.Classify(
+                file.Name,
+                FileNameFormat.TypePrefix,
+                out var type,
+                out var id
+            );
+
+            if (kind != StreamNameKind.ConfiguredMatch)
+            {
+                // 1c splits this into the five buckets (other format / foreign / unparseable id). For
+                // now every non-match is a skipped file name, exactly like the IdOnly scan.
+                SkipFileName(file.FullName);
+                continue;
+            }
+
+            // A zero-length file is not a stream — rev 5 lets a failed append leave one, and IdOnly
+            // skips it too.
+            if (file.Length == 0)
+                continue;
+
+            // A stream of ANOTHER type is the configured format, but not this query's answer: no
+            // count, no log, no id.
+            if (!string.Equals(type, firstEventType, StringComparison.Ordinal))
+                continue;
+
+            result.Add(id);
+
+            // The names are in hand, so the resolution map is completed for free: one pass amortizes
+            // across every id it finds.
+            _typeById.TryAdd(id, type);
+        }
+
+        return result;
+    }
+
     // ── Internals ───────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -490,7 +579,110 @@ public sealed class JsonlEventStore<TEventBase>
         return new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
     }
 
-    private string PathFor(Guid actorId) => IdOnlyPathFor(actorId);
+    /// <summary>
+    /// The path of <paramref name="actorId"/>'s stream, or <see langword="null"/> when THIS format has
+    /// no stream for it — the answer every member turns into its "unknown aggregate" branch (an empty
+    /// list, version 0, an empty cursor, null).
+    /// <para>
+    /// <see cref="FileNameFormat.IdOnly"/> derives the name from the id and never looks at the
+    /// directory. <see cref="FileNameFormat.TypePrefix"/> resolves through the map; a MISS costs one
+    /// filename pass, which also completes the map for every parseable name it finds — a cold start
+    /// costs one pass, not one pass per id.
+    /// </para>
+    /// </summary>
+    internal string? PathFor(Guid actorId)
+    {
+        if (_options.FileNameFormat != FileNameFormat.TypePrefix)
+            return IdOnlyPathFor(actorId);
+
+        if (_typeById.TryGetValue(actorId, out var type))
+            return PrefixedPathFor(actorId, type);
+
+        ScanTypeMap();
+        return _typeById.TryGetValue(actorId, out type) ? PrefixedPathFor(actorId, type) : null;
+    }
+
+    /// <summary>
+    /// The path a NEW stream takes under <see cref="FileNameFormat.TypePrefix"/>:
+    /// <c>&lt;typeName&gt;-&lt;id:D&gt;.jsonl</c>. The caller supplies the type because only the BATCH
+    /// knows it, so a store can never form the meaningless <c>-&lt;guid&gt;.jsonl</c> an empty prefix
+    /// would produce.
+    /// </summary>
+    internal string PathForNew(Guid actorId, string typeName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(typeName);
+        return PrefixedPathFor(actorId, typeName);
+    }
+
+    private string PrefixedPathFor(Guid actorId, string typeName) =>
+        Path.Combine(_root, typeName + "-" + actorId.ToString("D") + StreamSuffix);
+
+    /// <summary>
+    /// ONE filename pass over the root: fills the <c>id → type</c> map from every PARSEABLE, NON-EMPTY
+    /// name. It reads directory metadata only (no file is opened, so it costs one
+    /// <see cref="DirectoryScans"/> and no <see cref="FilesOpened"/>), and a root that does not exist
+    /// yields an empty map — a store that only reads must not create the directory, and a missing
+    /// directory is an empty store, not a failure.
+    /// </summary>
+    private void ScanTypeMap()
+    {
+        // Before classifying: a pass that throws still counts as a pass.
+        Interlocked.Increment(ref _directoryScans);
+
+        var root = new DirectoryInfo(_root);
+        if (!root.Exists)
+            return;
+
+        foreach (var file in root.EnumerateFiles())
+        {
+            var kind = JsonlNames.Classify(
+                file.Name,
+                FileNameFormat.TypePrefix,
+                out var type,
+                out var id
+            );
+
+            // Only a stream of the CONFIGURED format names a prefix; a name in the other format has no
+            // prefix this store may use.
+            if (kind != StreamNameKind.ConfiguredMatch)
+            {
+                // Recorded, not acted on: this pass is where the store LEARNS that the directory is
+                // mixed. 1c owns the per-scan Warning and the whole-directory throw that read it.
+                if (kind == StreamNameKind.OtherFormat)
+                    Interlocked.Increment(ref _foreignFormatFiles);
+
+                continue;
+            }
+
+            // A zero-length file is not a stream: a failed append leaves one, and it carries no type.
+            if (file.Length == 0)
+                continue;
+
+            // First name wins. The prefix is fixed when the stream is created; two coexisting prefixes
+            // for one id are the append guard's business (1c), never a merge here.
+            _typeById.TryAdd(id, type);
+        }
+    }
+
+    /// <summary>
+    /// The path an append writes to, plus the type prefix to REGISTER once the write succeeded (null
+    /// when nothing has to be registered, and for every IdOnly store). An empty batch resolves its path
+    /// the same way — map, then root pass — but writes nothing.
+    /// </summary>
+    private (string? Path, string? NewType) AppendPathFor(
+        Guid actorId,
+        IReadOnlyList<IDomainEvent> events
+    )
+    {
+        var existing = PathFor(actorId);
+        if (existing is not null || events.Count == 0)
+            return (existing, null);
+
+        // A NEW aggregate under TypePrefix: the prefix is the batch's first event type — with its
+        // backtick arity, exactly as Type.Name reports it, and never FullName.
+        var typeName = events[0].GetType().Name;
+        return (PathForNew(actorId, typeName), typeName);
+    }
 
     /// <summary>
     /// The path under <see cref="FileNameFormat.IdOnly"/>: the id alone, no directory knowledge. Also

@@ -241,4 +241,236 @@ public sealed class FileNameFormatTests
         // TypePrefix removes in 1b), so the counter is alive rather than frozen at zero.
         await Assert.That(store.FilesOpened).IsGreaterThanOrEqualTo(1L);
     }
+
+    // ── G2: TypePrefix enumerates the NAMES, with zero opens ────────────────────────────────────
+
+    /// <summary>
+    /// The whole point of the format: the type is carried by the FILE NAME, so an enumeration resolves
+    /// the ids without opening a single stream. The IdOnly half of the test is the positive control —
+    /// the counter is alive, it just stops moving when there is nothing to open.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G2_TypePrefix_EnumeratesByFileName_WithZeroOpens(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var idOnlyRoot = new TempRoot();
+        using var typePrefixRoot = new TempRoot();
+
+        // Two INDEPENDENT directories: the same id must never exist in both layouts (that is the
+        // mixed-directory condition diagnosed in 1c), so each format owns its own root.
+        var ids = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        var events = new IDomainEvent[]
+        {
+            new SSnapshotAdded(1),
+            new SSnapshotAdded(2),
+            new SSnapshotAdded(3),
+        };
+
+        var idOnly = new JsonlEventStore<ConformanceEvent>(idOnlyRoot.Root);
+        var typePrefix = new JsonlEventStore<ConformanceEvent>(typePrefixRoot.Root, TypePrefix());
+        for (var i = 0; i < ids.Length; i++)
+        {
+            await idOnly.AppendAsync(ids[i], 0, [events[i]]);
+            await typePrefix.AppendAsync(ids[i], 0, [events[i]]);
+        }
+
+        // IdOnly: the type is not in the name, so the FIRST event must be read — one open per stream.
+        var openedBeforeIdOnly = idOnly.FilesOpened;
+        var idOnlyIds = await idOnly.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+        await Assert.That(idOnly.FilesOpened - openedBeforeIdOnly).IsEqualTo(3L);
+        await Assert.That(SameIds(idOnlyIds, ids)).IsTrue();
+
+        // TypePrefix: a COLD instance whose construction pass learns the map from the names — and the
+        // enumeration that follows opens NOTHING.
+        var reader = new JsonlEventStore<ConformanceEvent>(typePrefixRoot.Root, TypePrefix());
+        await Assert.That(reader.FilesOpened).IsEqualTo(0L);
+
+        var openedBeforePrefix = reader.FilesOpened;
+        var prefixIds = await reader.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+        await Assert.That(reader.FilesOpened - openedBeforePrefix).IsEqualTo(0L);
+
+        // The ids come back exactly: an empty set would satisfy "zero opens" too, so the set is
+        // asserted on its own — and against the IdOnly answer, which must be the same set.
+        await Assert.That(prefixIds.Count).IsEqualTo(3);
+        await Assert.That(SameIds(prefixIds, ids)).IsTrue();
+        await Assert.That(SameIds(prefixIds, idOnlyIds)).IsTrue();
+
+        // ... and the names on disk are the TypePrefix rule, not the bare "<guid>.jsonl" of IdOnly.
+        var names = Directory.GetFiles(typePrefixRoot.Root).Select(Path.GetFileName).ToArray();
+        await Assert.That(names.Length).IsEqualTo(3);
+        foreach (var id in ids)
+            await Assert.That(names).Contains($"{nameof(SSnapshotAdded)}-{id:D}.jsonl");
+    }
+
+    // ── G3: the read path is format-independent ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The format changes ONLY which path a member resolves. Version, cursor position and peek answer
+    /// the same for the same events in either layout — plus the one documented deviation: an id whose
+    /// first line is corrupt is still enumerated under <see cref="FileNameFormat.TypePrefix"/> (its
+    /// NAME is valid, and no file is opened) and not under <see cref="FileNameFormat.IdOnly"/>.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G3_BothFormats_SameReadSemantics(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var idOnlyRoot = new TempRoot();
+        using var typePrefixRoot = new TempRoot();
+        var id = Guid.NewGuid();
+        IReadOnlyList<IDomainEvent> appended =
+        [
+            new SSnapshotAdded(1),
+            new SSnapshotAdded(2),
+            new SSnapshotAdded(3),
+            new SSnapshotAdded(4),
+            new SSnapshotAdded(5),
+            new SSnapshotAdded(6),
+        ];
+
+        var idOnly = new JsonlEventStore<ConformanceEvent>(idOnlyRoot.Root);
+        var typePrefix = new JsonlEventStore<ConformanceEvent>(typePrefixRoot.Root, TypePrefix());
+        await idOnly.AppendAsync(id, 0, appended);
+        await typePrefix.AppendAsync(id, 0, appended);
+
+        // The version: a line count in both layouts.
+        var idOnlyVersion = await idOnly.GetVersionAsync(id);
+        var prefixVersion = await typePrefix.GetVersionAsync(id);
+        await Assert.That(idOnlyVersion).IsEqualTo(6UL);
+        await Assert.That(prefixVersion).IsEqualTo(idOnlyVersion);
+
+        // The tail rebuild: OpenAsync(End - 3) yields the same three events with the same End. The
+        // cursor positions off a byte OFFSET the scan recorded, never a per-line re-read.
+        var (idOnlyEnd, idOnlyTail) = await DrainAsync(idOnly, id, idOnlyVersion - 2);
+        var (prefixEnd, prefixTail) = await DrainAsync(typePrefix, id, prefixVersion - 2);
+        await Assert.That(prefixEnd).IsEqualTo(idOnlyEnd);
+        await Assert.That(idOnlyTail.Count).IsEqualTo(3);
+        await Assert.That(prefixTail.Count).IsEqualTo(idOnlyTail.Count);
+        await Assert.That(prefixTail.SequenceEqual(idOnlyTail)).IsTrue();
+
+        // The peek: the first event, identical in both.
+        await Assert
+            .That(await typePrefix.PeekFirstAsync(id))
+            .IsEqualTo(await idOnly.PeekFirstAsync(id));
+
+        // An unknown id is an empty answer in both — and version 0 stays an ARGUMENT error in both,
+        // because the 1-based version check happens BEFORE any path is resolved.
+        var unknown = Guid.NewGuid();
+        await Assert
+            .That(async () => await idOnly.OpenAsync(unknown, 0))
+            .Throws<ArgumentOutOfRangeException>();
+        await Assert
+            .That(async () => await typePrefix.OpenAsync(unknown, 0))
+            .Throws<ArgumentOutOfRangeException>();
+        await Assert.That(await idOnly.GetVersionAsync(unknown)).IsEqualTo(0UL);
+        await Assert.That(await typePrefix.GetVersionAsync(unknown)).IsEqualTo(0UL);
+        await Assert.That(await typePrefix.PeekFirstAsync(unknown)).IsNull();
+        await Assert.That(await typePrefix.LoadAsync(unknown)).IsEmpty();
+
+        // The documented deviation: a corrupt FIRST line. TypePrefix knows the id from the NAME (zero
+        // opens); IdOnly cannot classify the aggregate and must not guess.
+        using var corruptIdOnlyRoot = new TempRoot();
+        using var corruptPrefixRoot = new TempRoot();
+        var corruptId = Guid.NewGuid();
+        const string corrupt = "~~~~ not an event ~~~\n";
+        await File.WriteAllTextAsync(
+            Path.Combine(corruptIdOnlyRoot.Root, corruptId.ToString("D") + ".jsonl"),
+            corrupt,
+            cancellationToken
+        );
+        await File.WriteAllTextAsync(
+            Path.Combine(corruptPrefixRoot.Root, $"{nameof(SSnapshotAdded)}-{corruptId:D}.jsonl"),
+            corrupt,
+            cancellationToken
+        );
+
+        var corruptPrefix = new JsonlEventStore<ConformanceEvent>(
+            corruptPrefixRoot.Root,
+            TypePrefix()
+        );
+        var corruptIdOnly = new JsonlEventStore<ConformanceEvent>(corruptIdOnlyRoot.Root);
+
+        var openedBeforeCorrupt = corruptPrefix.FilesOpened;
+        await Assert
+            .That(await corruptPrefix.ListAggregateIdsAsync(nameof(SSnapshotAdded)))
+            .Contains(corruptId);
+        await Assert.That(corruptPrefix.FilesOpened - openedBeforeCorrupt).IsEqualTo(0L);
+        await Assert
+            .That(await corruptIdOnly.ListAggregateIdsAsync(nameof(SSnapshotAdded)))
+            .IsEmpty();
+    }
+
+    // ── G4: snapshots are keyed by id, never by the stream's name ───────────────────────────────
+
+    /// <summary>
+    /// A snapshot's key is the AGGREGATE ID: <c>&lt;id&gt;.snap</c> in both formats. That is what lets a
+    /// snapshot survive its stream (archived, deleted, or never written at all) and what keeps the
+    /// <c>PASJ</c> container format-independent.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G4_Snapshot_Works_WithoutStream_And_AcrossInstances(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var payload = new byte[] { 1, 2, 3, 4, 5 };
+        var snapshot = new ActorSnapshot(7, payload);
+
+        var writer = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        await Assert.That(await writer.LoadSnapshotAsync(id)).IsNull();
+
+        // No stream for this id — the snapshot is written anyway, and no stream file appears.
+        await writer.SaveSnapshotAsync(id, snapshot);
+        await Assert.That(Directory.GetFiles(temp.Root).Length).IsEqualTo(0);
+
+        var snapshotPath = Path.Combine(temp.Root + "-snapshots", id.ToString("D") + ".snap");
+        await Assert.That(File.Exists(snapshotPath)).IsTrue();
+        var bytes = await File.ReadAllBytesAsync(snapshotPath, cancellationToken);
+
+        // The container is unchanged: PASJ magic, little-endian header, raw payload — byte for byte.
+        await Assert.That(Encoding.ASCII.GetString(bytes, 0, 4)).IsEqualTo("PASJ");
+        await Assert
+            .That(bytes.SequenceEqual(JsonlSnapshotFile.Encode(snapshot.Version, payload)))
+            .IsTrue();
+
+        // A NEW instance (not the writer) reads it back — and needs no stream map to do it.
+        var reader = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        await Assert.That(reader.FilesOpened).IsEqualTo(0L);
+        var loaded = await reader.LoadSnapshotAsync(id);
+        await Assert.That(loaded).IsNotNull();
+        await Assert.That(loaded!.Version).IsEqualTo(7UL);
+        await Assert.That(loaded.Payload.SequenceEqual(payload)).IsTrue();
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────────────────────
+
+    private static JsonlEventStoreOptions TypePrefix() =>
+        new() { FileNameFormat = FileNameFormat.TypePrefix };
+
+    /// <summary>Set equality, order-independent: an enumeration may yield ids in directory order.</summary>
+    private static bool SameIds(IReadOnlyList<Guid> actual, IReadOnlyList<Guid> expected) =>
+        actual.Count == expected.Count
+        && actual.OrderBy(id => id).SequenceEqual(expected.OrderBy(id => id));
+
+    /// <summary>Open a cursor at <paramref name="fromVersion"/> and drain it, keeping <c>End</c>.</summary>
+    private static async Task<(ulong End, List<IDomainEvent> Events)> DrainAsync(
+        JsonlEventStore<ConformanceEvent> store,
+        Guid id,
+        ulong fromVersion
+    )
+    {
+        var cursor = await store.OpenAsync(id, fromVersion);
+        var events = new List<IDomainEvent>();
+        while (await cursor.MoveNextAsync())
+            events.Add(cursor.Current);
+
+        var end = cursor.End;
+        await cursor.DisposeAsync();
+        return (end, events);
+    }
 }
