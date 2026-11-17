@@ -1744,6 +1744,14 @@ public sealed class FileNameFormatTests
             }
         );
 
+        // The PRIMARY is the Ordinal-LEAST name, never "whichever the file system listed first" — the two
+        // platforms enumerate in different orders, and a platform-dependent primary means the same directory
+        // resolves to a different history on Windows and on Linux (this test used to be flaky on Linux).
+        // Observable form of "A is the primary": the stream it reads is A's (Delta 7), not B's (Delta 8).
+        var read = await store.LoadAsync(id);
+        await Assert.That(read.Count).IsEqualTo(1);
+        await Assert.That(read[0]).IsEqualTo(new SSnapshotAdded(7));
+
         // The read ANSWERS: one history is still readable, and the count is that file's.
         await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
         await Assert.That(logger.Contains($"B-{id:D}.jsonl")).IsTrue();

@@ -1289,7 +1289,14 @@ public sealed class JsonlEventStore<TEventBase>
         long other = 0;
         long otherNonEmpty = 0;
 
-        foreach (var file in root.EnumerateFiles())
+        // ENUMERATE IN Ordinal ORDER, not in file-system order: the map's "first name wins" rule must not
+        // mean "first name the OS happened to return". Windows lists lexically and Linux does not, so an
+        // unordered pass resolves a two-name directory to a DIFFERENT history per platform (B8 was flaky on
+        // Linux for exactly this). Sorting here keeps the rule "first name wins" and makes that first name
+        // the same everywhere; a rival that appears later still cannot steal the primary (B2).
+        foreach (
+            var file in root.EnumerateFiles().OrderBy(static f => f.Name, StringComparer.Ordinal)
+        )
         {
             var kind = JsonlNames.Classify(
                 file.Name,
