@@ -37,13 +37,16 @@ namespace PicoActor.EventStore.Jsonl;
 internal static class FrameworkEventSerializers
 {
     /// <summary>
-    /// The canonical wire tag of <see cref="SagaCompleted"/> — the ONE owner of this literal (the
-    /// bindings of the store reference this constant; nothing else spells the string).
+    /// The canonical wire tag of <see cref="SagaCompleted"/>, as <see cref="FrameworkEventTags"/> spells
+    /// it. An ALIAS, not a copy: <see cref="FrameworkEventTags"/> is the one owner of both literals, so
+    /// this name and the store's seed are the same string by construction and cannot drift.
     /// </summary>
-    public const string SagaCompletedTag = "PicoActorSagaCompleted";
+    public const string SagaCompletedTag = FrameworkEventTags.SagaCompleted;
 
-    /// <summary>The canonical wire tag of <see cref="SagaFailed"/> — the ONE owner of this literal.</summary>
-    public const string SagaFailedTag = "PicoActorSagaFailed";
+    /// <summary>
+    /// The canonical wire tag of <see cref="SagaFailed"/>, as <see cref="FrameworkEventTags"/> spells it.
+    /// </summary>
+    public const string SagaFailedTag = FrameworkEventTags.SagaFailed;
 
     /// <summary>
     /// The generation point itself. Exists to be READ BY THE COMPILER, never to run: the four closed

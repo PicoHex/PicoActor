@@ -137,6 +137,15 @@ public sealed class JsonlEventStore<TEventBase>
     /// Create a store rooted at <paramref name="rootDirectory"/>. The directory is created on the first
     /// WRITE, never here — a store that only reads must not litter the file system.
     /// </summary>
+    /// <remarks>
+    /// Construction is also the one place the event-type bindings are FROZEN, so it is the one place
+    /// that can attest to them: when the frozen table is non-empty it logs exactly one
+    /// <see cref="LogLevel.Info"/> line,
+    /// <c>event type bindings: {RegisteredCount} registered ({FrameworkDefaultCount} framework-default)</c>,
+    /// carrying the counts of the table THIS store reads. It is emitted LAST, so a construction that
+    /// throws (a refused base, a doubly-registered type, a root the TypePrefix pass rejects) logs
+    /// nothing — it never produced a store to attest to.
+    /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="rootDirectory"/> is null, empty or whitespace.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><see cref="JsonlEventStoreOptions.MaxAggregateLocks"/> is not positive.</exception>
     public JsonlEventStore(string rootDirectory, JsonlEventStoreOptions? options = null)
@@ -222,6 +231,24 @@ public sealed class JsonlEventStore<TEventBase>
         // alone is the name, so there is nothing to learn.
         if (_options.FileNameFormat == FileNameFormat.TypePrefix)
             ScanTypeMap();
+
+        // ── The start-up self-attestation (D7) ──────────────────────────────────────────────────────
+        // ONE Info line per store, carrying what was FROZEN — so an operator reading a boot log can tell
+        // what this process routes without probing the store, and a boot check can compare the two
+        // numbers against what the deployment declared. It is the LAST thing the constructor does: a
+        // construction that throws (a refused base, a doubly-registered type, or a root the TypePrefix
+        // pass diagnoses) attests to NOTHING, because no store came into being — a line about a table
+        // nothing holds would be worse than a silent start-up.
+        // The counts are the table's own frozen values, not a re-read of the mutable options table.
+        if (_bindings.Count > 0)
+        {
+            // Typed as string deliberately: the message is a FINISHED sentence, not a format template a
+            // sink may re-render, and its text is the contract a boot check matches on.
+            var report =
+                $"event type bindings: {_bindings.Count} registered "
+                + $"({_bindings.FrameworkDefaultCount} framework-default)";
+            _logger?.Info(report);
+        }
     }
 
     /// <summary>

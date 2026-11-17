@@ -1,5 +1,6 @@
 using System.Buffers;
 using PicoJetson;
+using PicoLog.Abs;
 using PicoSerDe.Core;
 
 namespace PicoActor.EventStore.Jsonl.Tests;
@@ -186,18 +187,22 @@ public sealed class EventTypeBindingTests
         await Assert.That(secondStore.Bindings.Count).IsEqualTo(2);
     }
 
-    // ── The counts (D7's boot check reads them; the Info line belongs to B4/B5) ────────────────────
+    // ── The counts AND the start-up line (D7): one self-attesting Info line per store ──────────────
 
     [Test, Timeout(15000)]
     public async Task Bnd8_Counts(CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
         using var temp = new TempRoot();
-        var options = new JsonlEventStoreOptions();
+        var logger = new RecordingLogger();
+        var options = new JsonlEventStoreOptions { Logger = logger };
 
         // An options instance is EMPTY: exactly one seeding mechanism exists, and it is the constructor.
         await Assert.That(options.EventTypeBindings.RegisteredCount).IsEqualTo(0);
         await Assert.That(options.EventTypeBindings.FrameworkDefaultCount).IsEqualTo(0);
+
+        // The line belongs to the CONSTRUCTOR, so an unfrozen table has nothing to attest yet.
+        await Assert.That(logger.Entries.Count).IsEqualTo(0);
 
         var store = new JsonlEventStore<ConformanceEvent>(temp.Root, options);
 
@@ -229,6 +234,18 @@ public sealed class EventTypeBindingTests
         // An unbound tag and an unbound type are simply NOT FOUND — a miss is never a throw.
         await Assert.That(store.Bindings.TryGetEventType("who-knows", out _)).IsFalse();
         await Assert.That(store.Bindings.TryGetTag(typeof(ConformanceEvent), out _)).IsFalse();
+
+        // ── D7: the start-up self-attestation ──────────────────────────────────────────────────────
+        // One store, ONE line: an operator reading a boot log must be able to tell what this process
+        // routes from the log alone, without a probe. The text is pinned by literal because it is the
+        // contract the boot check reads, and the numbers in it must be the FROZEN counts.
+        await Assert.That(logger.Entries.Count).IsEqualTo(1);
+
+        var info = logger.Entries.Where(entry => entry.Level == LogLevel.Info).ToList();
+        await Assert.That(info.Count).IsEqualTo(1);
+        await Assert
+            .That(info[0].Message)
+            .IsEqualTo("event type bindings: 2 registered (2 framework-default)");
     }
 
     /// <summary>Run <paramref name="action"/> and hand back what it threw, or <c>null</c>.</summary>
