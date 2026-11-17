@@ -1,8 +1,11 @@
 namespace PicoActor.EventStore.Jsonl;
 
 /// <summary>
-/// Durable, append-only event store: one file per aggregate (<c>&lt;root&gt;/&lt;id:D&gt;.jsonl</c>),
-/// one JSON object per line, snapshots as sidecars in <c>&lt;root&gt;-snapshots</c>.
+/// Durable, append-only event store: one file per aggregate, one JSON object per line, snapshots as
+/// sidecars in <c>&lt;root&gt;-snapshots</c>. <c>&lt;root&gt;/&lt;id:D&gt;.jsonl</c> is the DEFAULT
+/// layout; <see cref="FileNameFormat.TypePrefix"/> names the same content
+/// <c>&lt;root&gt;/&lt;type&gt;-&lt;id:D&gt;.jsonl</c>, which is what lets an enumeration read the ids off
+/// the names instead of opening every stream.
 /// <para>
 /// Serialization is PicoJetson source generation over the CONSUMER's base type: every concrete event
 /// must be registered with <c>[PicoDerivedType]</c> on <typeparamref name="TEventBase"/> in the
@@ -37,6 +40,11 @@ public sealed class JsonlEventStore<TEventBase>
     // The id → type map TypePrefix resolution needs, because IEventStore carries only the aggregate id.
     // Never consulted under IdOnly, where the name IS the id.
     private readonly ConcurrentDictionary<Guid, string> _typeById = new();
+
+    // Ids a classification pass saw under TWO different prefixes. The prefix is fixed at creation, so two
+    // names for one id are two histories — an append must refuse rather than merge them into whichever
+    // name the map happened to learn first.
+    private readonly ConcurrentDictionary<Guid, string> _conflictingPrefixes = new();
 
     private long _deserializedEvents;
     private long _tornTailLines;
@@ -83,7 +91,11 @@ public sealed class JsonlEventStore<TEventBase>
     /// <summary>Unterminated final lines seen and ignored — one per crash-torn append.</summary>
     internal long TornTailLines => Interlocked.Read(ref _tornTailLines);
 
-    /// <summary>Directory entries skipped by <see cref="ListAggregateIdsAsync"/> because they are not streams.</summary>
+    /// <summary>
+    /// Directory entries a classification pass skipped because they are not streams of the configured
+    /// format: a foreign entry (a README, a lease, a backup) or the configured shape with an unparseable
+    /// id. One per FILE, each with its own warning.
+    /// </summary>
     internal long SkippedFileNames => Interlocked.Read(ref _skippedFileNames);
 
     /// <summary>
@@ -95,18 +107,19 @@ public sealed class JsonlEventStore<TEventBase>
     internal long FilesOpened => Interlocked.Read(ref _filesOpened);
 
     /// <summary>
-    /// Directory CLASSIFICATION passes this store has performed. A single-format directory on the
-    /// historical layout pays none: <see cref="FileNameFormat.IdOnly"/> derives every path from the id
-    /// and defers the one pass to the first observation of a MISSING stream. A
-    /// <see cref="FileNameFormat.TypePrefix"/> store pays one at construction (to learn the
-    /// <c>id → type</c> map) and one per resolved miss.
+    /// Directory CLASSIFICATION passes this store has performed. EVERY enumeration pays one in both
+    /// formats, because the pass is where a foreign name, an unparseable id, the other layout and a
+    /// whole-directory misconfiguration are diagnosed. A <see cref="FileNameFormat.TypePrefix"/> store
+    /// pays one more at construction (to learn the <c>id → type</c> map) and one per resolved miss.
     /// </summary>
     internal long DirectoryScans => Interlocked.Read(ref _directoryScans);
 
     /// <summary>
-    /// Directory entries this store has classified as a stream in the OTHER naming format. Non-zero in a
-    /// mixed directory; non-zero with ZERO configured-format streams means the store is pointed at a
-    /// directory of the other layout, which is a misconfiguration and not an empty store.
+    /// Directory entries this store has classified as a stream in the OTHER naming format, summed over
+    /// every pass — MONOTONIC, because it is the gate the <see cref="FileNameFormat.IdOnly"/> duplicate
+    /// guard reads: once any scan has seen another layout in this directory, appends pay for one check
+    /// per id; a pure single-format directory never does. Non-zero with ZERO configured-format names means
+    /// the store is pointed at a directory of the other layout — a misconfiguration, not an empty store.
     /// </summary>
     internal long ForeignFormatFiles => Interlocked.Read(ref _foreignFormatFiles);
 
@@ -138,14 +151,20 @@ public sealed class JsonlEventStore<TEventBase>
             if (events.Count == 0)
                 return EmptyAppend(actorId, expectedVersion, path, entry);
 
-            // 2. Every element must be the declared base type, and the batch is encoded as ONE buffer
-            //    before anything reaches the disk — a serialization failure creates no file at all.
-            //
-            //    A non-empty batch always resolves a path: an existing stream, or a NEW name formed
-            //    from events[0]'s type, which is known before the path ever is. Re-stating it as
-            //    non-null here keeps every later use (the encode message, the handle, the scans, the
-            //    reports) honest without scattering null-forgiving operators.
+            // 2. A non-empty batch ALWAYS resolved a path — an existing stream, or a NEW name formed
+            //    from events[0]'s type, which is known before the path ever is. Naming it once, up front,
+            //    keeps every later use (the guard, the encode message, the handle, the reports) honest
+            //    without scattering null-forgiving operators.
             var streamPath = path!;
+
+            // 3. Two histories for ONE id are never merged. Under TypePrefix the other layout's name is
+            //    derived from the id (one stat); under IdOnly the check costs a directory pass and is
+            //    gated on a scan having seen another layout here. Either way it runs BEFORE the encode,
+            //    so a refused append has touched no file.
+            GuardAmbiguousStream(actorId, streamPath);
+
+            // 4. Every element must be the declared base type, and the batch is encoded as ONE buffer
+            //    before anything reaches the disk — a serialization failure creates no file at all.
             var payload = Encode(events, streamPath);
 
             Directory.CreateDirectory(_root);
@@ -157,7 +176,7 @@ public sealed class JsonlEventStore<TEventBase>
                 FileShare.Read
             );
 
-            // 4. Length witness: a length the cache did not count at means somebody else wrote here.
+            // 5. Length witness: a length the cache did not count at means somebody else wrote here.
             //    Refuse unconditionally and re-seed — never merge two histories.
             var length = stream.Length;
             var scanReportedTornTail = false;
@@ -174,11 +193,11 @@ public sealed class JsonlEventStore<TEventBase>
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
             }
 
-            // 5. Optimistic concurrency against the counted version.
+            // 6. Optimistic concurrency against the counted version.
             if (entry.Count != expectedVersion)
                 throw new ConcurrencyException(actorId, expectedVersion, entry.Count);
 
-            // 6. Torn-tail repair: truncate the unterminated fragment, never terminate it. Terminating
+            // 7. Torn-tail repair: truncate the unterminated fragment, never terminate it. Terminating
             //    would publish half an event as if it had been committed. The report is part of the
             //    repair, not of the SCAN: this branch is reached with an already-SEEDED cache (a
             //    refused append seeded the length of the torn file), so no scan here saw the fragment
@@ -193,14 +212,14 @@ public sealed class JsonlEventStore<TEventBase>
                 stream.SetLength(FindLastNewline(stream, length));
             }
 
-            // 7. ONE write over the encoded bytes, then a flush the append contract can wait for.
+            // 8. ONE write over the encoded bytes, then a flush the append contract can wait for.
             stream.Seek(0, SeekOrigin.End);
             await stream.WriteAsync(payload, CancellationToken.None).ConfigureAwait(false);
             await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             if (_options.FlushToDisk)
                 stream.Flush(flushToDisk: true);
 
-            // 8. The cache describes the file as it now is.
+            // 9. The cache describes the file as it now is.
             var version = entry.Count + (ulong)events.Count;
             entry.Seed(version, stream.Length);
 
@@ -494,24 +513,23 @@ public sealed class JsonlEventStore<TEventBase>
         if (_options.FileNameFormat == FileNameFormat.TypePrefix)
             return ListTypePrefixedIds(firstEventType);
 
-        foreach (var file in Directory.EnumerateFiles(_root))
+        // The IdOnly pass CLASSIFIES every entry before it reads any: the ids still come from the first
+        // EVENT (this name carries no type), but the pass itself is what reports a name in the other
+        // layout, a foreign entry and — when there is nothing else — a whole-directory
+        // misconfiguration.
+        // No query type is handed to the pass: under IdOnly the NAME carries no type, so there is no
+        // "configured, another type" bucket to compute — the first EVENT decides, below.
+        foreach (var entry in ScanRoot())
         {
-            var fileName = Path.GetFileName(file);
-            var name = fileName.EndsWith(StreamSuffix, StringComparison.Ordinal)
-                ? fileName[..^StreamSuffix.Length]
-                : null;
-
-            if (name is null || !Guid.TryParseExact(name, "D", out var id))
-            {
-                SkipFileName(file);
+            // A zero-length file is not a stream: rev 5 lets a failed append leave one.
+            if (entry.File.Length == 0)
                 continue;
-            }
 
-            // An empty stream has no first event and a corrupt first line yields no id — enumeration
-            // never aborts boot, and it never guesses.
-            var first = await PeekFirstAsync(id).ConfigureAwait(false);
+            // Here the type lives in the CONTENT, so reading is the only way to classify the aggregate
+            // — and a corrupt first line yields no id. Enumeration never aborts boot, never guesses.
+            var first = await PeekFirstAsync(entry.Id).ConfigureAwait(false);
             if (first is not null && first.GetType().Name == firstEventType)
-                result.Add(id);
+                result.Add(entry.Id);
         }
 
         return result;
@@ -526,42 +544,23 @@ public sealed class JsonlEventStore<TEventBase>
     {
         var result = new List<Guid>();
 
-        // A classification pass is a scan, and the increment comes FIRST: a pass that throws further
-        // down still counts as a pass.
-        Interlocked.Increment(ref _directoryScans);
-
-        foreach (var file in new DirectoryInfo(_root).EnumerateFiles())
+        foreach (var entry in ScanRoot(firstEventType))
         {
-            var kind = JsonlNames.Classify(
-                file.Name,
-                FileNameFormat.TypePrefix,
-                out var type,
-                out var id
-            );
-
-            if (kind != StreamNameKind.ConfiguredMatch)
-            {
-                // 1c splits this into the five buckets (other format / foreign / unparseable id). For
-                // now every non-match is a skipped file name, exactly like the IdOnly scan.
-                SkipFileName(file.FullName);
-                continue;
-            }
-
             // A zero-length file is not a stream — rev 5 lets a failed append leave one, and IdOnly
             // skips it too.
-            if (file.Length == 0)
+            if (entry.File.Length == 0)
                 continue;
+
+            // The names are in hand, so the resolution map is completed for free — for EVERY id the
+            // pass sees, other types included: one pass amortizes across all of them.
+            LearnPrefix(entry.Id, entry.Type);
 
             // A stream of ANOTHER type is the configured format, but not this query's answer: no
             // count, no log, no id.
-            if (!string.Equals(type, firstEventType, StringComparison.Ordinal))
+            if (entry.Kind != StreamNameKind.ConfiguredMatch)
                 continue;
 
-            result.Add(id);
-
-            // The names are in hand, so the resolution map is completed for free: one pass amortizes
-            // across every id it finds.
-            _typeById.TryAdd(id, type);
+            result.Add(entry.Id);
         }
 
         return result;
@@ -617,6 +616,247 @@ public sealed class JsonlEventStore<TEventBase>
     private string PrefixedPathFor(Guid actorId, string typeName) =>
         Path.Combine(_root, typeName + "-" + actorId.ToString("D") + StreamSuffix);
 
+    // ── Classification: the ONE pass every scan is built on ──────────────────────────────────
+
+    /// <summary>
+    /// A stream file a classification pass recognised under the CONFIGURED format, with its name already
+    /// parsed. The length is directory METADATA — no file is opened to learn whether an entry is a stream
+    /// or a zero-length leftover.
+    /// </summary>
+    private readonly record struct StreamEntry(
+        FileInfo File,
+        StreamNameKind Kind,
+        string Type,
+        Guid Id
+    );
+
+    /// <summary>
+    /// ONE pass over the root's entries, and the only place a directory is classified. Every entry lands
+    /// in exactly one of the <see cref="StreamNameKind"/> buckets, and the buckets are what turn a mixed
+    /// directory into a diagnosis instead of an empty enumeration:
+    /// <list type="bullet">
+    /// <item><see cref="StreamNameKind.ConfiguredMatch"/> — returned to the caller.</item>
+    /// <item><see cref="StreamNameKind.ConfiguredOtherType"/> — also returned, marked, when
+    /// <c>firstEventType</c> names the query: the configured format, another type. NO counter moves and
+    /// NOTHING is logged — one store directory normally holds many stream types.</item>
+    /// <item><see cref="StreamNameKind.OtherFormat"/> — added to <see cref="ForeignFormatFiles"/>
+    /// (monotonic) and reported as ONE warning for the whole pass, not one per file: a half-migrated
+    /// directory would otherwise emit thousands of lines.</item>
+    /// <item><see cref="StreamNameKind.UnparseableId"/> and <see cref="StreamNameKind.Foreign"/> — one
+    /// skipped name each, counted and reported individually: an unreadable name is a problem with that
+    /// NAME, not with the directory.</item>
+    /// </list>
+    /// <para>
+    /// A pass that finds ZERO configured names and SOME other-format names THROWS: the store is pointed at
+    /// a directory of the other layout, and the honest answer is an error naming both formats and both
+    /// counts — not "this store is empty", which is how a whole history disappears from view.
+    /// </para>
+    /// </summary>
+    /// <param name="firstEventType">
+    /// The type the caller queries, or <see langword="null"/> when the pass has no query (learning the
+    /// <c>id → type</c> map): with a query, a configured name of another type is marked
+    /// <see cref="StreamNameKind.ConfiguredOtherType"/> instead of
+    /// <see cref="StreamNameKind.ConfiguredMatch"/>.
+    /// </param>
+    private List<StreamEntry> ScanRoot(string? firstEventType = null)
+    {
+        // The pass counts as a pass BEFORE anything can throw at it, so a scan that diagnoses a
+        // misconfiguration still shows up in DirectoryScans.
+        Interlocked.Increment(ref _directoryScans);
+
+        var root = new DirectoryInfo(_root);
+        if (!root.Exists)
+            return [];
+
+        var streams = new List<StreamEntry>();
+        long configured = 0;
+        long other = 0;
+
+        foreach (var file in root.EnumerateFiles())
+        {
+            var kind = JsonlNames.Classify(
+                file.Name,
+                _options.FileNameFormat,
+                out var type,
+                out var id
+            );
+
+            switch (kind)
+            {
+                case StreamNameKind.ConfiguredMatch:
+                    // Counted by NAME, length aside: the layout of the names is what the whole-directory
+                    // rule diagnoses, and a zero-length file still speaks for that layout.
+                    configured++;
+                    streams.Add(
+                        new StreamEntry(
+                            file,
+                            firstEventType is not null
+                            && type.Length > 0
+                            && !string.Equals(type, firstEventType, StringComparison.Ordinal)
+                                ? StreamNameKind.ConfiguredOtherType
+                                : StreamNameKind.ConfiguredMatch,
+                            type,
+                            id
+                        )
+                    );
+                    break;
+
+                case StreamNameKind.OtherFormat:
+                    other++;
+                    break;
+
+                default:
+                    // UnparseableId and Foreign: one name, one count, one warning each.
+                    SkipFileName(file.FullName);
+                    break;
+            }
+        }
+
+        if (other > 0)
+        {
+            Interlocked.Add(ref _foreignFormatFiles, other);
+            _logger?.Warning(
+                $"{other} file(s) in '{_root}' use the other naming format "
+                    + $"({JsonlNames.Describe(JsonlNames.Opposite(_options.FileNameFormat))}); this store "
+                    + $"reads {JsonlNames.Describe(_options.FileNameFormat)} names only and ignores the "
+                    + "rest of the directory."
+            );
+        }
+
+        if (configured == 0 && other > 0)
+            throw MisconfiguredDirectory(configured, other);
+
+        return streams;
+    }
+
+    /// <summary>
+    /// The loud outcome for a store pointed at a directory of the OTHER layout. Both formats are named,
+    /// both counts are stated and the remedy is spelled out: without it the store starts, enumerates
+    /// nothing, and the operator sees an empty system instead of a broken one.
+    /// </summary>
+    private InvalidOperationException MisconfiguredDirectory(long configured, long other) =>
+        new(
+            $"Misconfigured store root '{_root}': configured: {configured}, other-format: {other}. This "
+                + $"store reads {JsonlNames.Describe(_options.FileNameFormat)} names and found none, while "
+                + $"{other} file(s) are named for "
+                + $"{JsonlNames.Describe(JsonlNames.Opposite(_options.FileNameFormat))}. Enumerating it "
+                + "would report an empty system instead of a misconfigured one. Migrate the directory or "
+                + $"set '{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.FileNameFormat)}'."
+        );
+
+    /// <summary>
+    /// Record one configured-format name in the <c>id → type</c> map. The FIRST name wins — the prefix is
+    /// fixed when the stream is created — and a SECOND, different one is remembered as a CONFLICT: two
+    /// coexisting prefixes for one id are two histories, so an append for that id must refuse instead of
+    /// extending whichever name the map happened to learn first.
+    /// </summary>
+    private void LearnPrefix(Guid id, string type)
+    {
+        if (_typeById.TryAdd(id, type))
+            return;
+
+        if (!_typeById.TryGetValue(id, out var known))
+            return;
+
+        if (!string.Equals(known, type, StringComparison.Ordinal))
+            _conflictingPrefixes.TryAdd(id, PrefixedPathFor(id, type));
+    }
+
+    /// <summary>
+    /// The duplicate guard: one aggregate, ONE layout and ONE prefix. It runs in
+    /// <c>AppendAsync</c> before the encode, so a refused append has touched no file at all.
+    /// </summary>
+    private void GuardAmbiguousStream(Guid actorId, string streamPath)
+    {
+        // 1. Two PREFIXES for one id, seen by a classification pass. Nothing was written, so both
+        //    histories are intact and an operator can still decide which one survives.
+        if (_conflictingPrefixes.TryGetValue(actorId, out var conflicting))
+        {
+            throw new InvalidOperationException(
+                $"Aggregate '{actorId:D}' has TWO stream names in '{_root}': '{streamPath}' and "
+                    + $"'{conflicting}'. A stream's prefix is fixed when it is created, so the store "
+                    + "cannot tell which history an append belongs to. Archive one of the files, then "
+                    + "retry the append."
+            );
+        }
+
+        if (_options.FileNameFormat == FileNameFormat.TypePrefix)
+        {
+            // 2. The OTHER layout's name IS derivable from the id, so this check is one stat and it is
+            //    never gated: a mixed directory cannot grow a second history through this store.
+            var otherPath = IdOnlyPathFor(actorId);
+            if (new FileInfo(otherPath) is { Exists: true, Length: > 0 })
+                throw MixedLayout(actorId, streamPath, otherPath);
+
+            return;
+        }
+
+        // 3. Under IdOnly the other layout's prefix lives in the NAME and is not derivable from the id,
+        //    so the check costs one directory pass — and a single-format directory must never pay it.
+        //    The gate is ForeignFormatFiles, MONOTONIC: once a pass has seen another layout here,
+        //    appends check.
+        if (Interlocked.Read(ref _foreignFormatFiles) == 0)
+            return;
+
+        var candidates = OtherLayoutPathsFor(actorId);
+
+        if (candidates.Count > 1)
+        {
+            throw new InvalidOperationException(
+                $"Aggregate '{actorId:D}' has {candidates.Count} stream names in the other naming format: "
+                    + string.Join(", ", candidates.Select(path => "'" + path + "'"))
+                    + ". The prefix is fixed when a stream is created, so the store cannot tell which "
+                    + "history an append belongs to. Archive all but one of the files, then retry the "
+                    + "append."
+            );
+        }
+
+        // A zero-length file is NOT a stream (rev 5 lets a failed append leave one behind), so it never
+        // blocks an append; a non-empty one is a second history for this id.
+        if (candidates.Count == 1 && new FileInfo(candidates[0]) is { Exists: true, Length: > 0 })
+            throw MixedLayout(actorId, streamPath, candidates[0]);
+    }
+
+    /// <summary>
+    /// Every name in the OTHER layout that <paramref name="actorId"/> may already have here — empty for a
+    /// single-format directory. The caller owns the gate on this directory pass.
+    /// </summary>
+    private List<string> OtherLayoutPathsFor(Guid actorId)
+    {
+        var matches = new List<string>();
+
+        var root = new DirectoryInfo(_root);
+        if (!root.Exists)
+            return matches;
+
+        foreach (var file in root.EnumerateFiles())
+        {
+            if (
+                JsonlNames.TryParseOtherFormat(file.Name, _options.FileNameFormat, out var id)
+                && id == actorId
+            )
+                matches.Add(file.FullName);
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// A stream of one id living in BOTH layouts. The two files hold two histories and this store never
+    /// merges them: the append is refused before a byte is written, and both paths are named.
+    /// </summary>
+    private static InvalidOperationException MixedLayout(
+        Guid actorId,
+        string streamPath,
+        string otherPath
+    ) =>
+        new(
+            $"Aggregate '{actorId:D}' already has a non-empty stream in the OTHER naming format: "
+                + $"'{otherPath}'. This append targets '{streamPath}'. The two layouts are never merged, "
+                + "so one of the two histories would be lost. Migrate the directory or set "
+                + $"'{nameof(JsonlEventStoreOptions)}.{nameof(JsonlEventStoreOptions.FileNameFormat)}'."
+        );
+
     /// <summary>
     /// ONE filename pass over the root: fills the <c>id → type</c> map from every PARSEABLE, NON-EMPTY
     /// name. It reads directory metadata only (no file is opened, so it costs one
@@ -626,41 +866,13 @@ public sealed class JsonlEventStore<TEventBase>
     /// </summary>
     private void ScanTypeMap()
     {
-        // Before classifying: a pass that throws still counts as a pass.
-        Interlocked.Increment(ref _directoryScans);
-
-        var root = new DirectoryInfo(_root);
-        if (!root.Exists)
-            return;
-
-        foreach (var file in root.EnumerateFiles())
+        foreach (var entry in ScanRoot())
         {
-            var kind = JsonlNames.Classify(
-                file.Name,
-                FileNameFormat.TypePrefix,
-                out var type,
-                out var id
-            );
-
-            // Only a stream of the CONFIGURED format names a prefix; a name in the other format has no
-            // prefix this store may use.
-            if (kind != StreamNameKind.ConfiguredMatch)
-            {
-                // Recorded, not acted on: this pass is where the store LEARNS that the directory is
-                // mixed. 1c owns the per-scan Warning and the whole-directory throw that read it.
-                if (kind == StreamNameKind.OtherFormat)
-                    Interlocked.Increment(ref _foreignFormatFiles);
-
-                continue;
-            }
-
             // A zero-length file is not a stream: a failed append leaves one, and it carries no type.
-            if (file.Length == 0)
+            if (entry.File.Length == 0)
                 continue;
 
-            // First name wins. The prefix is fixed when the stream is created; two coexisting prefixes
-            // for one id are the append guard's business (1c), never a merge here.
-            _typeById.TryAdd(id, type);
+            LearnPrefix(entry.Id, entry.Type);
         }
     }
 
@@ -868,6 +1080,13 @@ public sealed class JsonlEventStore<TEventBase>
     private void SkipFileName(string file)
     {
         Interlocked.Increment(ref _skippedFileNames);
-        _logger?.Warning($"Skipping '{file}' during enumeration: a stream is named <guid>.jsonl.");
+
+        // The message names the configuration instead of one fixed layout: this store may be reading
+        // "<id>.jsonl" OR "<type>-<id>.jsonl", so claiming a stream is "always <guid>.jsonl" would
+        // misdirect the operator who just added the file this warning is about.
+        _logger?.Warning(
+            $"Skipping '{file}' during enumeration: it is not a stream name in the configured format "
+                + $"({JsonlNames.Describe(_options.FileNameFormat)})."
+        );
     }
 }

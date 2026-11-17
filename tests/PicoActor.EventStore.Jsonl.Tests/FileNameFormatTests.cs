@@ -233,8 +233,10 @@ public sealed class FileNameFormatTests
         await Assert.That(loaded.Count).IsEqualTo(2);
         await Assert.That(loaded[1]).IsEqualTo(new SSnapshotAdded(2));
 
-        // Still no scan — the enumeration above is a PEEK pass, not a classification pass.
-        await Assert.That(store.DirectoryScans).IsEqualTo(0L);
+        // The enumeration IS a classification pass in BOTH formats — that pass is where a foreign name,
+        // an unparseable id, the other layout and a whole-directory misconfiguration are diagnosed — so
+        // exactly ONE pass was paid, and it had nothing to diagnose here.
+        await Assert.That(store.DirectoryScans).IsEqualTo(1L);
         await Assert.That(store.ForeignFormatFiles).IsEqualTo(0L);
 
         // Positive control for the counter: an IdOnly enumeration opens the stream (exactly the cost
@@ -447,10 +449,488 @@ public sealed class FileNameFormatTests
         await Assert.That(loaded.Payload.SequenceEqual(payload)).IsTrue();
     }
 
+    // ── G2b: a stream of another type is silent, an unparseable id is reported ────────────────
+
+    /// <summary>
+    /// The two buckets a <see cref="FileNameFormat.TypePrefix"/> pass must NOT confuse. A stream of
+    /// ANOTHER type is the normal case for a store directory — many aggregate types live side by side —
+    /// so it is neither counted nor logged. A name in the configured SHAPE whose id does not parse is a
+    /// skipped file: counted once, warned about once, and unrelated to the other layout.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G2b_Buckets_OtherType_And_UnparseableId(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var id = Guid.NewGuid();
+        var otherTypeId = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions
+            {
+                FileNameFormat = FileNameFormat.TypePrefix,
+                Logger = logger,
+            }
+        );
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        // 1. A configured-format stream of ANOTHER type: a valid name, a type this query did not ask for.
+        var otherTypeName = $"OtherType-{otherTypeId:D}.jsonl";
+        await File.WriteAllTextAsync(
+            Path.Combine(temp.Root, otherTypeName),
+            "{\"$type\":\"ss-added\",\"Delta\":9}\n",
+            cancellationToken
+        );
+
+        // 2. The configured SHAPE with an id that is not a D GUID: a skipped file name.
+        const string unparseableName = "SSnapshotAdded-notaguid.jsonl";
+        await File.WriteAllTextAsync(
+            Path.Combine(temp.Root, unparseableName),
+            "{\"$type\":\"ss-added\",\"Delta\":8}\n",
+            cancellationToken
+        );
+
+        var skippedBefore = store.SkippedFileNames;
+        var foreignBefore = store.ForeignFormatFiles;
+
+        var ids = await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+
+        // The configured stream is the only id: the other type belongs to its own query, and the
+        // unparseable name names nothing at all.
+        await Assert.That(ids.Count).IsEqualTo(1);
+        await Assert.That(ids).Contains(id);
+
+        // ONE skipped name — the unparseable one. A stream of another type is NOT a skipped file, and
+        // it is not the other LAYOUT either: it is the configured format, correctly ignored.
+        await Assert.That(store.SkippedFileNames - skippedBefore).IsEqualTo(1L);
+        await Assert.That(store.ForeignFormatFiles - foreignBefore).IsEqualTo(0L);
+
+        // The other-type name appears NOWHERE in the log (a directory of one format is not a problem),
+        // and the unparseable one appears exactly once — one warning per skipped NAME, not per pass.
+        await Assert
+            .That(
+                logger.Messages.Any(message =>
+                    message.Contains(otherTypeName, StringComparison.Ordinal)
+                )
+            )
+            .IsFalse();
+        await Assert
+            .That(
+                logger.Messages.Count(message =>
+                    message.Contains(unparseableName, StringComparison.Ordinal)
+                )
+            )
+            .IsEqualTo(1);
+    }
+
+    // ── G5: a mixed directory is diagnosed, never merged ──────────────────────────────────────
+
+    /// <summary>
+    /// The same aggregate present in BOTH layouts, non-empty in the other one: an append must refuse and
+    /// name both paths. Continuing would write a second history for one id, and whichever file a later
+    /// reader opened would define the truth.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5a_OtherFormatNonEmpty_AppendThrows(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        // The other layout's file for the same aggregate. Its content is never parsed here — the NAME is
+        // the whole fact this guard acts on.
+        var streamPath = Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl");
+        var otherPath = Path.Combine(temp.Root, id.ToString("D") + ".jsonl");
+        await File.WriteAllTextAsync(
+            otherPath,
+            "{\"$type\":\"ss-added\",\"Delta\":9}\n",
+            cancellationToken
+        );
+
+        // ONE enumeration is what makes the store treat this directory as mixed.
+        var foreignBefore = store.ForeignFormatFiles;
+        await Assert.That(await store.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+        await Assert.That(store.ForeignFormatFiles - foreignBefore).IsEqualTo(1L);
+
+        var error = await CaptureAppendErrorAsync(store, id, 1, new SSnapshotAdded(2));
+
+        await Assert.That(error).IsNotNull();
+        await Assert.That(error is InvalidOperationException).IsTrue();
+
+        // Both paths and the id are named: an operator acts on the message without guessing which file is
+        // which, and a support ticket carries the aggregate.
+        await Assert
+            .That(error!.Message.Contains(id.ToString("D"), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(error.Message.Contains(Path.GetFileName(streamPath), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(error.Message.Contains(Path.GetFileName(otherPath), StringComparison.Ordinal))
+            .IsTrue();
+
+        // Refused BEFORE a byte was written: the configured stream is untouched.
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
+    }
+
+    /// <summary>
+    /// The same shape with a ZERO-LENGTH other-format file. rev 5 lets a failed append leave an empty file
+    /// behind, so an empty file is not a stream and must never block a good append — and it must not be
+    /// "repaired" either: its bytes stay exactly as they were.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5b_OtherFormatZeroLength_AppendSucceeds(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        var otherPath = Path.Combine(temp.Root, id.ToString("D") + ".jsonl");
+        await File.WriteAllBytesAsync(otherPath, [], cancellationToken);
+
+        var foreignBefore = store.ForeignFormatFiles;
+        await Assert.That(await store.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+        await Assert.That(store.ForeignFormatFiles - foreignBefore).IsEqualTo(1L);
+
+        // The guard is `FileInfo { Exists: true, Length: > 0 }`, never `File.Exists`: the empty file is
+        // ignored and the append goes through.
+        await Assert.That(await store.AppendAsync(id, 1, [new SSnapshotAdded(2)])).IsEqualTo(2UL);
+
+        // ... and the empty file is still there, still empty — the append never touches the other layout.
+        await Assert
+            .That((await File.ReadAllBytesAsync(otherPath, cancellationToken)).Length)
+            .IsEqualTo(0);
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(2UL);
+    }
+
+    /// <summary>
+    /// A short foreign name is not a crash and not a stream: <c>x.txt</c> is SHORTER than the
+    /// <c>.jsonl</c> suffix, so a scan that sliced first would throw ArgumentOutOfRangeException while
+    /// booting. It is counted as skipped, warned about, and the enumeration still answers.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5c_ShortForeignName_CountedSkipped_NoThrow(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions
+            {
+                FileNameFormat = FileNameFormat.TypePrefix,
+                Logger = logger,
+            }
+        );
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+        await File.WriteAllTextAsync(
+            Path.Combine(temp.Root, "x.txt"),
+            "not a stream",
+            cancellationToken
+        );
+
+        var skippedBefore = store.SkippedFileNames;
+        var ids = await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+
+        await Assert.That(ids).Contains(id);
+        await Assert.That(store.SkippedFileNames - skippedBefore).IsEqualTo(1L);
+        await Assert
+            .That(
+                logger.Messages.Any(message => message.Contains("x.txt", StringComparison.Ordinal))
+            )
+            .IsTrue();
+    }
+
+    /// <summary>
+    /// ONE warning per SCAN for the other layout, not one per file: a half-migrated directory holds
+    /// thousands of them, and a warning storm is how an operator learns to ignore warnings. The message
+    /// has to say what the operator's choice is, too.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5d_ScanReportsOneWarning(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+        var id = Guid.NewGuid();
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        // Two other-format files: two counted entries, but ONE report for the pass.
+        await File.WriteAllTextAsync(
+            Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{Guid.NewGuid():D}.jsonl"),
+            "{}\n",
+            cancellationToken
+        );
+        await File.WriteAllTextAsync(
+            Path.Combine(temp.Root, $"Other-{Guid.NewGuid():D}.jsonl"),
+            "{}\n",
+            cancellationToken
+        );
+
+        // IdOnly performs no scan at construction and no scan per append, so this is the ONLY pass.
+        await Assert.That(store.DirectoryScans).IsEqualTo(0L);
+        var scansBefore = store.DirectoryScans;
+        var foreignBefore = store.ForeignFormatFiles;
+        var ids = await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+
+        await Assert.That(ids).Contains(id);
+        await Assert.That(store.DirectoryScans - scansBefore).IsEqualTo(1L);
+        await Assert.That(store.ForeignFormatFiles - foreignBefore).IsEqualTo(2L);
+        await Assert
+            .That(
+                logger.Messages.Count(message =>
+                    message.Contains("use the other naming format", StringComparison.Ordinal)
+                )
+            )
+            .IsEqualTo(1);
+    }
+
+    /// <summary>
+    /// ONE id, several prefixes: <c>A-&lt;id&gt;.jsonl</c> and <c>B-&lt;id&gt;.jsonl</c> are two histories
+    /// of the same aggregate, and a stream's prefix is fixed when it is created. An append cannot pick
+    /// one, so it refuses and lists the candidates — in BOTH directions, because the prefix that is
+    /// "foreign" depends only on which layout the store was configured with.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G5e_DuplicatePrefixes_Throws(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        var id = Guid.NewGuid();
+
+        // ── IdOnly: the prefixed names are the OTHER layout, so the guard runs once a scan has seen one
+        //    (the monotonic ForeignFormatFiles gate) and gathers the candidates from one pass.
+        using var idOnlyRoot = new TempRoot();
+        var idOnly = new JsonlEventStore<ConformanceEvent>(idOnlyRoot.Root);
+        await idOnly.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        var candidateA = Path.Combine(idOnlyRoot.Root, $"A-{id:D}.jsonl");
+        var candidateB = Path.Combine(idOnlyRoot.Root, $"B-{id:D}.jsonl");
+        await File.WriteAllTextAsync(
+            candidateA,
+            "{\"$type\":\"ss-added\",\"Delta\":7}\n",
+            cancellationToken
+        );
+        await File.WriteAllTextAsync(
+            candidateB,
+            "{\"$type\":\"ss-added\",\"Delta\":8}\n",
+            cancellationToken
+        );
+
+        await Assert.That(await idOnly.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+        await Assert.That(idOnly.ForeignFormatFiles).IsEqualTo(2L);
+
+        var idOnlyError = await CaptureAppendErrorAsync(idOnly, id, 1, new SSnapshotAdded(2));
+        await Assert.That(idOnlyError is InvalidOperationException).IsTrue();
+        await Assert
+            .That(
+                idOnlyError!.Message.Contains(
+                    Path.GetFileName(candidateA),
+                    StringComparison.Ordinal
+                )
+            )
+            .IsTrue();
+        await Assert
+            .That(
+                idOnlyError.Message.Contains(Path.GetFileName(candidateB), StringComparison.Ordinal)
+            )
+            .IsTrue();
+
+        // Nothing was written: the append was refused before the stream was opened.
+        await Assert.That(await idOnly.GetVersionAsync(id)).IsEqualTo(1UL);
+
+        // ── TypePrefix: both names are configured-format streams, and the classification pass is what
+        //    notices that ONE id has TWO of them.
+        using var prefixRoot = new TempRoot();
+        var prefixId = Guid.NewGuid();
+        var prefixA = Path.Combine(prefixRoot.Root, $"A-{prefixId:D}.jsonl");
+        var prefixB = Path.Combine(prefixRoot.Root, $"B-{prefixId:D}.jsonl");
+        await File.WriteAllTextAsync(
+            prefixA,
+            "{\"$type\":\"ss-added\",\"Delta\":7}\n",
+            cancellationToken
+        );
+        await File.WriteAllTextAsync(
+            prefixB,
+            "{\"$type\":\"ss-added\",\"Delta\":8}\n",
+            cancellationToken
+        );
+
+        var prefix = new JsonlEventStore<ConformanceEvent>(prefixRoot.Root, TypePrefix());
+        var prefixError = await CaptureAppendErrorAsync(prefix, prefixId, 0, new SSnapshotAdded(2));
+
+        await Assert.That(prefixError is InvalidOperationException).IsTrue();
+        await Assert
+            .That(
+                prefixError!.Message.Contains(Path.GetFileName(prefixA), StringComparison.Ordinal)
+            )
+            .IsTrue();
+        await Assert
+            .That(prefixError.Message.Contains(Path.GetFileName(prefixB), StringComparison.Ordinal))
+            .IsTrue();
+
+        // No third name appeared: the store never invents a prefix for a stream it refused to extend.
+        await Assert.That(Directory.GetFiles(prefixRoot.Root).Length).IsEqualTo(2);
+    }
+
+    /// <summary>
+    /// A whole directory in the OTHER layout is a misconfiguration, and the loud answer is the only one
+    /// that reaches an operator: an empty enumeration would look like "no aggregates yet" and every
+    /// stream would be invisible. The message names both formats, both counts and the two ways out.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G6_TypePrefixOnlyDirectory_WithIdOnlyOptions_Throws(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var typePrefixOnly = new TempRoot();
+        var id = Guid.NewGuid();
+        await File.WriteAllTextAsync(
+            Path.Combine(typePrefixOnly.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl"),
+            "{\"$type\":\"ss-added\",\"Delta\":1}\n",
+            cancellationToken
+        );
+
+        var store = new JsonlEventStore<ConformanceEvent>(typePrefixOnly.Root);
+        await Assert.That(store.DirectoryScans).IsEqualTo(0L);
+
+        var error = await CaptureAsync(async () =>
+        {
+            await store.ListAggregateIdsAsync(nameof(SSnapshotAdded));
+        });
+
+        await Assert.That(error is InvalidOperationException).IsTrue();
+        var message = error!.Message;
+
+        // Both counts...
+        await Assert.That(message.Contains("configured: 0", StringComparison.Ordinal)).IsTrue();
+        await Assert.That(message.Contains("other-format: 1", StringComparison.Ordinal)).IsTrue();
+
+        // ... and both formats, spelled so the operator knows which one to migrate to.
+        await Assert
+            .That(message.Contains("IdOnly (<id>.jsonl)", StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(message.Contains("TypePrefix (<type>-<id>.jsonl)", StringComparison.Ordinal))
+            .IsTrue();
+
+        // ... plus the remedy.
+        await Assert
+            .That(message.Contains("Migrate the directory or set", StringComparison.Ordinal))
+            .IsTrue();
+
+        // The rule holds for ANY scan, including the one a TypePrefix store performs at CONSTRUCTION to
+        // learn its map: the mirror case must not start up quietly either.
+        using var idOnlyOnly = new TempRoot();
+        await File.WriteAllTextAsync(
+            Path.Combine(idOnlyOnly.Root, id.ToString("D") + ".jsonl"),
+            "{\"$type\":\"ss-added\",\"Delta\":1}\n",
+            cancellationToken
+        );
+        await Assert
+            .That(() => new JsonlEventStore<ConformanceEvent>(idOnlyOnly.Root, TypePrefix()))
+            .Throws<InvalidOperationException>();
+    }
+
+    /// <summary>
+    /// The format decides what a renamed EVENT TYPE costs. IdOnly classifies an aggregate by its first
+    /// event's CONTENT, so a stream whose type was renamed is still found; TypePrefix classifies by the
+    /// NAME, so the same stream answers a different query. That is why the spec allows a TypePrefix
+    /// adopter to skip the rename migration — and why an IdOnly adopter still owes one.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task G7_TypeRename_IsFormatDependent(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        using var prefixRoot = new TempRoot();
+        using var idOnlyRoot = new TempRoot();
+        var id = Guid.NewGuid();
+
+        // The SAME content in both layouts: one SSnapshotAdded, appended by the store itself so the line
+        // is exactly what the serializer writes. The TypePrefix file is then RENAMED to the retired name.
+        var prefixWriter = new JsonlEventStore<ConformanceEvent>(prefixRoot.Root, TypePrefix());
+        await prefixWriter.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+        File.Move(
+            Path.Combine(prefixRoot.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl"),
+            Path.Combine(prefixRoot.Root, $"RetiredType-{id:D}.jsonl")
+        );
+
+        var idOnlyWriter = new JsonlEventStore<ConformanceEvent>(idOnlyRoot.Root);
+        await idOnlyWriter.AppendAsync(id, 0, [new SSnapshotAdded(1)]);
+
+        // IdOnly goes by CONTENT: the first event is an SSnapshotAdded whatever the file is called.
+        var idOnly = new JsonlEventStore<ConformanceEvent>(idOnlyRoot.Root);
+        await Assert.That(await idOnly.ListAggregateIdsAsync(nameof(SSnapshotAdded))).Contains(id);
+
+        // TypePrefix goes by NAME: the retired prefix is a valid stream of ANOTHER type — enumerated by
+        // the query that asks for it, invisible to the one that does not, and never a diagnostic.
+        var prefix = new JsonlEventStore<ConformanceEvent>(prefixRoot.Root, TypePrefix());
+        await Assert.That(await prefix.ListAggregateIdsAsync(nameof(SSnapshotAdded))).IsEmpty();
+        await Assert.That(await prefix.ListAggregateIdsAsync("RetiredType")).Contains(id);
+        await Assert.That(prefix.SkippedFileNames).IsEqualTo(0L);
+
+        // The prefix is fixed at CREATION: an append still targets the retired name and never invents
+        // "SSnapshotAdded-<id>.jsonl" beside it.
+        await Assert.That(await prefix.AppendAsync(id, 1, [new SSnapshotAdded(2)])).IsEqualTo(2UL);
+
+        var names = Directory.GetFiles(prefixRoot.Root).Select(Path.GetFileName).ToArray();
+        await Assert.That(names.Length).IsEqualTo(1);
+        await Assert.That(names[0]).IsEqualTo($"RetiredType-{id:D}.jsonl");
+        await Assert.That(await prefix.GetVersionAsync(id)).IsEqualTo(2UL);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────────────────────
 
     private static JsonlEventStoreOptions TypePrefix() =>
         new() { FileNameFormat = FileNameFormat.TypePrefix };
+
+    /// <summary>
+    /// Run <paramref name="action"/> and hand back what it threw — null when it did not throw. The guards
+    /// under test are asserted on their TYPE and their MESSAGE, so the exception is the value under test;
+    /// a bare <c>Throws</c> would discard the text an operator has to read.
+    /// </summary>
+    private static async Task<Exception?> CaptureAsync(Func<Task> action)
+    {
+        try
+        {
+            await action();
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex;
+        }
+    }
+
+    /// <summary>An append that must be REFUSED with an <see cref="InvalidOperationException"/>.</summary>
+    private static Task<Exception?> CaptureAppendErrorAsync(
+        JsonlEventStore<ConformanceEvent> store,
+        Guid id,
+        ulong expectedVersion,
+        IDomainEvent domainEvent
+    ) =>
+        CaptureAsync(async () =>
+        {
+            await store.AppendAsync(id, expectedVersion, [domainEvent]);
+        });
 
     /// <summary>Set equality, order-independent: an enumeration may yield ids in directory order.</summary>
     private static bool SameIds(IReadOnlyList<Guid> actual, IReadOnlyList<Guid> expected) =>

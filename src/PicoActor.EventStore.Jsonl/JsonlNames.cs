@@ -15,6 +15,17 @@ internal enum StreamNameKind
     ConfiguredMatch,
 
     /// <summary>
+    /// A stream of the CONFIGURED format belonging to ANOTHER type: the name parsed, but its prefix is
+    /// not the type the caller asked for. Not a diagnostic — it is counted nowhere and logged nowhere,
+    /// because a directory of one format with many stream types is the NORMAL case, not a mixture.
+    /// <para>
+    /// Produced by the ENUMERATION side (a <see cref="ConfiguredMatch"/> whose type differs from the
+    /// query), never by <see cref="JsonlNames.Classify"/>, which knows nothing about the query.
+    /// </para>
+    /// </summary>
+    ConfiguredOtherType,
+
+    /// <summary>
     /// A stream that is valid under the OTHER format's rule — counted in <c>ForeignFormatFiles</c> and
     /// reported once per scan. Detection is SYMMETRIC: <c>&lt;guid&gt;.jsonl</c> under
     /// <see cref="FileNameFormat.TypePrefix"/> and <c>&lt;type&gt;-&lt;guid&gt;.jsonl</c> under
@@ -143,4 +154,47 @@ internal static class JsonlNames
 
         return Guid.TryParseExact(stem, GuidFormat, out id);
     }
+
+    /// <summary>
+    /// Parse a file name under the OTHER format's rule — the layout this store does NOT read — and hand
+    /// back the id it carries. This is what the duplicate guard needs: under
+    /// <see cref="FileNameFormat.IdOnly"/> the other layout's prefix is not derivable from an id, so a
+    /// directory pass is the only way to find the same aggregate there.
+    /// </summary>
+    internal static bool TryParseOtherFormat(
+        string fileName,
+        FileNameFormat configured,
+        out Guid id
+    )
+    {
+        ArgumentNullException.ThrowIfNull(fileName);
+
+        id = Guid.Empty;
+
+        // Same guard ORDER as Classify: the suffix is stripped only after it is known to be there, so a
+        // short foreign name never reaches the slice.
+        if (!fileName.EndsWith(StreamSuffix, StringComparison.Ordinal))
+            return false;
+
+        var stem = fileName[..^StreamSuffix.Length];
+        if (stem.Length == 0)
+            return false;
+
+        return configured == FileNameFormat.TypePrefix
+            ? TryParseIdOnly(stem, out id)
+            : TrySplitTypePrefix(stem, out _, out id);
+    }
+
+    /// <summary>The layout this store does NOT read — the one a mixed directory is reported against.</summary>
+    internal static FileNameFormat Opposite(FileNameFormat format) =>
+        format == FileNameFormat.TypePrefix ? FileNameFormat.IdOnly : FileNameFormat.TypePrefix;
+
+    /// <summary>
+    /// A layout's name, spelled for a human. A diagnostic that only says "the other format" leaves the
+    /// operator unable to decide between migrating the directory and flipping the option.
+    /// </summary>
+    internal static string Describe(FileNameFormat format) =>
+        format == FileNameFormat.TypePrefix
+            ? "TypePrefix (<type>-<id>.jsonl)"
+            : "IdOnly (<id>.jsonl)";
 }
