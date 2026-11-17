@@ -354,21 +354,44 @@ batch whose first event is of another type still appends to the name the stream 
   aggregate id, `<id:D>.snap`, never by the stream's name). The reverse is not offered: a prefix is
   part of the name, so an `IdOnly` store cannot derive it and would need every file renamed.
 - **A mixed directory is diagnosed, never merged.** Entries valid only under the *other* layout are
-  counted and reported as **one** Warning per scan (detection is symmetric: `<id>.jsonl` under
-  `TypePrefix` and `<type>-<id>.jsonl` under `IdOnly` both count as "other format"). A directory
-  with **zero** configured-format names and **some** other-format names throws
-  `InvalidOperationException` naming both counts, both formats and the two ways out — from
-  enumeration, construction and the lazy pass alike — instead of reporting an empty system. A stream
-  of *another event type* is not a mixture: that is the normal case, and it costs no counter and no
-  log line. An append for an id that already holds a non-empty stream in the other layout — or two
-  different prefixes — is refused before a byte is written.
+  counted (`ForeignFormatFiles`, by NAME and monotonic: it gates the `IdOnly` duplicate guard) and
+  reported as **one** Warning per scan (detection is symmetric: `<id>.jsonl` under `TypePrefix` and
+  `<type>-<id>.jsonl` under `IdOnly` both count as "other format"). The whole-directory diagnosis
+  counts **histories**, not names: a directory with **zero** configured-format histories and **some
+  non-empty** other-format ones throws `InvalidOperationException` naming both counts, both formats
+  and the ways out — from enumeration, construction and the lazy pass alike — instead of reporting an
+  empty system, while a directory of zero-length leftovers (a failed append leaves one) is an *empty*
+  store and stays silent. A stream of *another event type* is not a mixture: that is the normal case,
+  and it costs no counter and no log line. An append for an id that already holds a non-empty stream
+  in the other layout — or two different prefixes — is refused before a byte is written.
 - **Cost.** `TypePrefix` pays one filename pass at construction (to learn the id → type map), one per
   resolved miss, and one `stat` per append for the duplicate guard. `IdOnly` pays **nothing** at
   construction and nothing for an append to a stream it already has; its single directory pass runs
-  lazily at the first observation of a stream it does not have, and never again — a failed pass is
-  latched and re-raised, so a misconfigured root cannot quietly decay into "empty aggregate". An
-  empty batch writes nothing and creates nothing in either mode, but still validates
-  `expectedVersion`.
+  lazily at the first observation of a stream it does not have, and never again. An empty batch writes
+  nothing and creates nothing in either mode, but it resolves its path exactly like a writing append
+  and still validates `expectedVersion`.
+- **The miss cache serves READS only.** A `TypePrefix` miss is remembered — a bounded set of 4,096 ids,
+  emptied rather than grown past it — and shared single-flight, so a probe loop over ids nobody has
+  pays **one** directory pass for the whole burst and none for the repeats. An **append never trusts
+  that memory**: resolving "no stream" there would fork a second name beside a stream an external
+  writer created after the map was built, so an append re-scans on a miss and, on success, drops only
+  **its own** entry — never wholesale, and without taking the scan gate. The price is stated: a *read*
+  may answer "empty" for a stream that appeared beside it until the next pass, and
+  `NegativeCacheInvalidations` counts the entries an append actually falsified (identically `0` under
+  `IdOnly`, which never remembers a miss).
+- **A stale map is corrected by the next SCAN.** A rival prefix that arrives after the map was built is
+  not found by a read (a map hit costs no pass), and *not* by an append either: the store adds no
+  directory pass to the append path to close that window, because it would give back exactly what the
+  map buys on the one path that pays per append. The next classification pass — an enumeration, or the
+  miss of an unknown id — records the conflict, and from then on every append for that id is refused
+  and names both files.
+- **A broken root or an occupied name is named, not absorbed.** A root that exists as a **file** raises
+  `IOException` (nothing can be enumerated, opened or created there); a stream NAME occupied by a
+  **directory** raises `InvalidOperationException` naming the obstacle — on the read path and the
+  append path alike, in both formats — instead of "empty aggregate" or a bare sharing violation. A
+  failed lazy pass (misconfiguration, unreadable root, root that is a file) is **latched**: the same
+  exception is raised by every later observation and the directory is never re-scanned, so the only
+  recovery is a new store instance once the directory is fixed.
 
 ### Idle Passivation (opt-in)
 

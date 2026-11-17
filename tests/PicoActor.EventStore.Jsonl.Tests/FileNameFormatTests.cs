@@ -1347,9 +1347,27 @@ public sealed class FileNameFormatTests
     }
 
     /// <summary>
-    /// A remembered miss is CLEARED by a successful append: the append learns the id's prefix, so an id
-    /// that was absent a moment ago resolves again — and the version read back is the one just written.
-    /// An entry that outlived the append would answer "no stream" for a stream that exists.
+    /// A remembered miss is CLEARED by a successful append of THAT id — and only of that id. The append
+    /// learns the prefix, so an id that was absent a moment ago resolves again and the version read back
+    /// is the one just written.
+    /// <para>
+    /// The clear is PER ID because the cost of the alternative is the append hot path itself: a wholesale
+    /// clear has to be taken under the same gate a directory pass holds, so every new id's first append
+    /// would serialize the whole store — on an <see cref="FileNameFormat.IdOnly"/> store most of all,
+    /// where no miss is ever REMEMBERED and the cache the clear maintained is never even read.
+    /// </para>
+    /// <para>
+    /// The price is stated here instead of being hidden: an absence remembered for one id survives a map
+    /// growth elsewhere. It is a fact about the map this instance saw, not a promise about the directory
+    /// now — a READ may answer "empty" for a stream that appeared beside it (B9 shows the append is the
+    /// one path that is never stale, and a new instance re-reads everything).
+    /// </para>
+    /// <para>
+    /// Which is also why the append below costs the one pass it costs: a remembered miss is not an answer
+    /// for an append, so the append on a miss re-reads the directory and then learns the prefix — the
+    /// TITLE of this case is about the map, not about a pass saved. The two READS after it pay nothing
+    /// (the map hit answers both), and the entry that was remembered is now the one that gets dropped.
+    /// </para>
     /// </summary>
     [Test, Timeout(30000)]
     public async Task B1c_TypePrefix_AppendClearsTheRememberedMiss(
@@ -1368,51 +1386,111 @@ public sealed class FileNameFormatTests
             .That(await store.AppendAsync(id, 0, [new SSnapshotAdded(1), new SSnapshotAdded(2)]))
             .IsEqualTo(2UL);
 
-        // The map hit answered both: the append learned the prefix, so no pass was needed to read back
-        // what was just written.
+        // ONE pass: the append's re-scan. It never trusts the remembered absence (B9 is that claim
+        // spelled out), so resolving this id costs a directory read even though the miss was remembered.
         await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(2UL);
         await Assert.That((await store.LoadAsync(id)).Count).IsEqualTo(2);
-        await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss);
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss + 1);
+        await Assert.That(store.NegativeCacheInvalidations).IsEqualTo(1L);
 
-        // ... and the clear is WHOLESALE, which is what keeps a remembered absence from outliving the map
-        // it was recorded against. The next probe of an id this store still does not have must RE-READ the
-        // directory: a stream written by another process while the id was remembered would otherwise stay
-        // invisible for as long as the entry lived.
+        // The staleness the per-id clear buys: a miss recorded for ANOTHER id is still remembered after
+        // a map growth, so it costs no pass -- and no read ever re-reads the directory to find out.
         var absent = Guid.NewGuid();
         await Assert.That(await store.LoadAsync(absent)).IsEmpty();
         var afterAbsence = store.DirectoryScans;
-
-        // Remembered: the second probe answers without touching the directory...
         await Assert.That(await store.LoadAsync(absent)).IsEmpty();
         await Assert.That(store.DirectoryScans).IsEqualTo(afterAbsence);
 
-        // ... until an append GROWS the map, which invalidates every entry at once. (That append is a
-        // miss of its own, so the pass it pays is excluded: the count below is the NEXT probe's.)
         await Assert
             .That(await store.AppendAsync(Guid.NewGuid(), 0, [new SSnapshotAdded(4)]))
             .IsEqualTo(1UL);
         var afterAppend = store.DirectoryScans;
 
         await Assert.That(await store.LoadAsync(absent)).IsEmpty();
-        await Assert.That(store.DirectoryScans).IsEqualTo(afterAppend + 1);
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterAppend);
         await Assert
             .That(File.Exists(Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl")))
             .IsTrue();
     }
 
     /// <summary>
-    /// The append LEARNS through the same primitive a scan uses, so a rival prefix that appears between
-    /// the path resolution and the write is REGISTERED as a conflict — and the next append for that id
-    /// is refused instead of silently extending one of two coexisting histories.
+    /// A rival prefix that arrives AFTER the map was built is found by the next SCAN — not by a read and
+    /// not by an append. A map hit costs no directory pass in either path (that is exactly what the map
+    /// is for), so the window is real, and it is documented rather than closed: the append that lands
+    /// inside it extends the name the map knows, the next classification pass records the conflict, and
+    /// from then on every append for that id is refused and names BOTH files.
     /// <para>
-    /// The window is reached DETERMINISTICALLY, without threads: the batch is the seam. Reading its
-    /// SECOND element happens inside <c>Encode</c> — after the path was resolved, before the prefix is
-    /// learned — so the hook there stands in for an external writer that claims a prefix for the same id
-    /// in exactly that window.
+    /// No directory pass is added to the append path to close the window. It would give back the cost
+    /// the map exists to save, on the one path that pays it per append — and an external writer that
+    /// names a second prefix is a directory-level problem the operator has to resolve anyway.
+    /// </para>
+    /// <para>
+    /// This test used to call <c>LearnPrefix</c> itself, which proved only that the method works when a
+    /// test calls it. Here nothing but an external file changes the directory.
     /// </para>
     /// </summary>
     [Test, Timeout(30000)]
-    public async Task B2_Append_LearnsThroughLearnPrefix_RegistersRivalPrefix(
+    public async Task B2_TypePrefix_RivalPrefixAfterTheMap_IsFoundByTheNextScan(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var id = Guid.NewGuid();
+
+        await Assert
+            .That(await store.AppendAsync(id, 0, [new SSnapshotAdded(1), new SSnapshotAdded(2)]))
+            .IsEqualTo(2UL);
+        var created = Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl");
+        var rival = Path.Combine(temp.Root, $"Rival-{id:D}.jsonl");
+
+        // An external writer claims a SECOND prefix for the same id. Nothing has scanned since.
+        await File.WriteAllTextAsync(
+            rival,
+            "{\"$type\":\"ss-added\",\"Delta\":7}\n",
+            cancellationToken
+        );
+        var beforeRead = store.DirectoryScans;
+
+        // The read goes through the MAP: it answers from the name it knows and never looks at the
+        // directory — no pass per read, and no guarantee about a rival that arrived behind its back.
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(2UL);
+        await Assert.That(store.DirectoryScans).IsEqualTo(beforeRead);
+
+        // ... and the APPEND does the same, which is the documented window: it extends one of two names
+        // without a directory pass of its own.
+        await Assert.That(await store.AppendAsync(id, 2, [new SSnapshotAdded(3)])).IsEqualTo(3UL);
+        await Assert.That(store.DirectoryScans).IsEqualTo(beforeRead);
+
+        // The NEXT pass is where the rival is discovered — here, the miss of an id nobody has.
+        await Assert.That(await store.LoadAsync(Guid.NewGuid())).IsEmpty();
+        await Assert.That(store.DirectoryScans).IsEqualTo(beforeRead + 1);
+
+        // ... and from then on this id has TWO histories: the append names both and writes nothing.
+        var error = await CaptureAppendErrorAsync(store, id, 3, new SSnapshotAdded(4));
+        await Assert.That(error is InvalidOperationException).IsTrue();
+        await Assert
+            .That(error!.Message.Contains(Path.GetFileName(rival), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert
+            .That(error.Message.Contains(Path.GetFileName(created), StringComparison.Ordinal))
+            .IsTrue();
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(3UL);
+    }
+
+    /// <summary>
+    /// The append LEARNS through the same primitive a scan uses, so a rival prefix registered while the
+    /// append was ENCODING is recorded as a conflict instead of being dropped by a silent <c>TryAdd</c>
+    /// — the next append for that id is then refused instead of extending one of two histories.
+    /// <para>
+    /// This is the SEAM, not the window: the hook stands in for a pass that found the rival, and it is
+    /// the reason <c>LearnPrefix</c> is shared with the classification pass. The real window — a file
+    /// only an external writer put there, which no pass has seen — is B2, and it is a different claim.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B2b_AppendEncodingWindow_RivalPrefixIsRegisteredThroughLearnPrefix(
         CancellationToken cancellationToken = default
     )
     {
@@ -1659,6 +1737,164 @@ public sealed class FileNameFormatTests
         // The read ANSWERS: one history is still readable, and the count is that file's.
         await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(1UL);
         await Assert.That(logger.Contains($"B-{id:D}.jsonl")).IsTrue();
+    }
+
+    /// <summary>
+    /// An APPEND never trusts a remembered absence — that is the whole difference between the two paths
+    /// the negative cache serves. A read may answer from memory (B1c is where that staleness is stated),
+    /// but an append that did the same would resolve the id to "no stream", create a SECOND name for it
+    /// and leave the stream the map never saw as the other half of a fork.
+    /// <para>
+    /// So the append re-reads the directory on a miss even when the miss is remembered. It costs nothing
+    /// that was not already the price of a new id: the first append of any id pays one pass anyway.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B9_TypePrefix_AppendAfterRememberedMiss_RescansAndRefuses(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var id = Guid.NewGuid();
+
+        // The READ remembers the miss: one pass, and this id is remembered as absent.
+        await Assert.That(await store.LoadAsync(id)).IsEmpty();
+        var afterMiss = store.DirectoryScans;
+
+        // An external writer creates the id's stream. No pass of this instance has seen it.
+        var rival = Path.Combine(temp.Root, $"Other-{id:D}.jsonl");
+        await File.WriteAllTextAsync(
+            rival,
+            "{\"$type\":\"ss-added\",\"Delta\":7}\n",
+            cancellationToken
+        );
+
+        // Nothing may be forked: ONE name for the id, and it is the one that was already there.
+        var forked = Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl");
+
+        // A read is allowed to stay STALE ...
+        await Assert.That(await store.LoadAsync(id)).IsEmpty();
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss);
+
+        // ... an append is not: it re-reads the directory, resolves the EXISTING stream on its own
+        // prefix, and refuses on the version witness instead of forking a second history.
+        var refused = await CaptureAsync(async () =>
+            await store.AppendAsync(id, 0, [new SSnapshotAdded(1)])
+        );
+        // Nothing was forked: ONE name for the id, and it is the one that was already there.
+        await Assert.That(File.Exists(forked)).IsFalse();
+        await Assert.That(File.ReadAllLines(rival).Length).IsEqualTo(1);
+
+        await Assert.That(refused is ConcurrencyException).IsTrue();
+        var conflict = (ConcurrencyException)refused!;
+        await Assert.That(conflict.ActorId).IsEqualTo(id);
+        await Assert.That(conflict.ExpectedVersion).IsEqualTo(0UL);
+        await Assert.That(conflict.ActualVersion).IsEqualTo(1UL);
+    }
+
+    /// <summary>
+    /// The same rule for the EMPTY batch, which is a read-only append but not an exception to path
+    /// resolution: it resolves exactly like a writing one, so it must not report version 0 for a stream
+    /// that is there. Version 0 comes back as a <see cref="ConcurrencyException"/> against the real
+    /// count, and the resolution costs the one pass a new id's first append always costs.
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B10_TypePrefix_EmptyBatchAfterRememberedMiss_Rescans(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var id = Guid.NewGuid();
+
+        await Assert.That(await store.GetVersionAsync(id)).IsEqualTo(0UL);
+        var afterMiss = store.DirectoryScans;
+
+        var rival = Path.Combine(temp.Root, $"Other-{id:D}.jsonl");
+        await File.WriteAllTextAsync(
+            rival,
+            "{\"$type\":\"ss-added\",\"Delta\":7}\n",
+            cancellationToken
+        );
+
+        var refused = await CaptureAsync(async () => await store.AppendAsync(id, 0, []));
+        await Assert.That(refused is ConcurrencyException).IsTrue();
+        var conflict = (ConcurrencyException)refused!;
+        await Assert.That(conflict.ExpectedVersion).IsEqualTo(0UL);
+        await Assert.That(conflict.ActualVersion).IsEqualTo(1UL);
+
+        // ONE re-scan, and nothing created: an empty batch is never a write.
+        await Assert.That(store.DirectoryScans).IsEqualTo(afterMiss + 1);
+        await Assert
+            .That(File.Exists(Path.Combine(temp.Root, $"{nameof(SSnapshotAdded)}-{id:D}.jsonl")))
+            .IsFalse();
+    }
+
+    /// <summary>
+    /// The clear is PER ID, and that is what keeps the append hot path off the negative cache: an append
+    /// that learns a NEW prefix drops only that id's entry, and an append of an id nobody probed drops
+    /// nothing at all. The old clear was WHOLESALE and had to be taken under <c>_lazyScanGate</c> — the
+    /// same gate a directory pass holds — so a burst of first appends serialized against each other AND
+    /// threw away every remembered miss the other threads were about to use.
+    /// <para>
+    /// <see cref="JsonlEventStore{TEventBase}.NegativeCacheInvalidations"/> counts entries actually
+    /// dropped, so it states both halves: zero for a growth that falsifies no entry, one for the append
+    /// that falsifies its own.
+    /// </para>
+    /// <para>
+    /// Under <see cref="FileNameFormat.IdOnly"/> it is always zero for a structural reason worth pinning:
+    /// the id IS the name, so an append never resolves through the map and never learns a prefix at all —
+    /// there is nothing there for a negative cache to forget.
+    /// </para>
+    /// </summary>
+    [Test, Timeout(30000)]
+    public async Task B11_NewIdAppend_DropsOnlyItsOwnRememberedMiss(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root, TypePrefix());
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+
+        // Two ids this store does not have, each remembered after its one pass.
+        await Assert.That(await store.LoadAsync(first)).IsEmpty();
+        await Assert.That(await store.LoadAsync(second)).IsEmpty();
+        await Assert.That(await store.LoadAsync(first)).IsEmpty();
+
+        // A first append of a THIRD id grows the map. It falsifies neither entry above, so neither may
+        // be dropped — nor may the append pay the scan gate to sort that out.
+        var third = Guid.NewGuid();
+        await Assert
+            .That(await store.AppendAsync(third, 0, [new SSnapshotAdded(1)]))
+            .IsEqualTo(1UL);
+        await Assert.That(store.NegativeCacheInvalidations).IsEqualTo(0L);
+
+        var remembered = store.DirectoryScans;
+        await Assert.That(await store.LoadAsync(first)).IsEmpty();
+        await Assert.That(store.DirectoryScans).IsEqualTo(remembered);
+
+        // The append of an id that WAS remembered is the one that drops it — and only it.
+        await Assert
+            .That(await store.AppendAsync(first, 0, [new SSnapshotAdded(1)]))
+            .IsEqualTo(1UL);
+        await Assert.That(store.NegativeCacheInvalidations).IsEqualTo(1L);
+        await Assert.That(await store.GetVersionAsync(first)).IsEqualTo(1UL);
+        await Assert.That(await store.LoadAsync(second)).IsEmpty();
+
+        // An IdOnly store never resolves a miss through the map, so it never invalidates anything.
+        using var idOnlyRoot = new TempRoot();
+        var idOnly = new JsonlEventStore<ConformanceEvent>(idOnlyRoot.Root);
+        await idOnly.AppendAsync(Guid.NewGuid(), 0, [new SSnapshotAdded(1)]);
+        for (var i = 0; i < 3; i++)
+            await Assert
+                .That(await idOnly.AppendAsync(Guid.NewGuid(), 0, [new SSnapshotAdded(1)]))
+                .IsEqualTo(1UL);
+        await Assert.That(idOnly.NegativeCacheInvalidations).IsEqualTo(0L);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────────────────────

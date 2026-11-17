@@ -168,11 +168,22 @@ public enum FileNameFormat
   - `DirectoryScans` — classification passes. Every enumeration pays one in both modes (that pass is
     where a foreign name, an unparseable id, the other layout and a whole-directory
     misconfiguration are diagnosed). `TypePrefix` pays one more at construction (the map) and one per
-    resolved miss; `IdOnly` pays exactly ONE more and only lazily, at the first observation of a
-    stream it does not have — a store that only touches streams it already has never scans.
+    resolved miss — but the two paths pay it differently, which is the whole point of the negative
+    cache: a READ remembers the miss (single-flight, so a burst of probes of one absent id pays one
+    pass), while an APPEND never trusts that memory and re-scans, because a remembered absence is not
+    evidence that the stream is still absent. `IdOnly` pays exactly ONE more and only lazily, at the
+    first observation of a stream it does not have — a store that only touches streams it already has
+    never scans.
   - `ForeignFormatFiles` — entries classified as the *other* layout, **MONOTONIC** because it is the
     gate of the `IdOnly` duplicate guard: once any pass has seen another layout here, appends check.
-    Non-zero with zero configured-format names is a misconfiguration, not an empty store.
+    It counts NAMES, which is what that gate needs; the whole-directory diagnosis asks the other
+    question and counts HISTORIES (`otherNonEmpty`, the foreign entries that are not ZERO-LENGTH), so
+    a directory of other-layout leftovers is an empty store, not a misconfigured one.
+  - `NegativeCacheInvalidations` — remembered misses dropped by a successful append of THAT id.
+    **Per id, never wholesale, and outside the scan gate** (`ConcurrentDictionary.TryRemove`): an
+    append that learns one prefix falsifies no other id's absence, and the hot path must not serialize
+    on the gate a directory pass holds. Identically `0` under `IdOnly`, where no miss is ever
+    remembered.
 - **The constructor can throw `InvalidOperationException`** (rev-5 delta): under `TypePrefix` it runs
   the map pass, so a root whose streams are all in the other layout fails at construction instead of
   at the first enumeration. Under `IdOnly` construction still touches nothing (no scan, no directory,
@@ -262,6 +273,18 @@ stream of the other — which is exactly why a mixture has to be diagnosed rathe
   later batch's first event is called (G7). The `id → type` map is learned from the names (one pass
   at construction, under `TypePrefix` only) and completed by every classification pass, so a cold
   start costs one pass — and a resolved **miss** costs one more, never one per id.
+- **The negative cache is the read path's.** The ids a miss failed to resolve are remembered, bounded
+  at 4,096 (the set is emptied past the capacity, never grown) and shared single-flight through the
+  same gate a directory pass holds: the winner scans, a reader that arrived meanwhile answers from the
+  double-check. Three consequences are deliberate, not accidental:
+  (1) **an append re-scans** — resolving a remembered absence to "no stream" there would fork a second
+  name beside a stream an external writer created after the map was built (B9), and it never WRITES
+  the cache either, since the entry it would record is the one that append falsifies (B10);
+  (2) **the invalidation is per id** — B11: dropping a new id's own entry costs neither a wholesale
+  clear nor the gate, so the append hot path never pays for a cache it does not read;
+  (3) **a read may be STALE** by one stream: a miss (or a map hit) is a fact about the map this
+  instance saw, an absent stream that appeared beside it is found by the next pass, and a new instance
+  re-reads everything. That is the stated price of the 4,096-id memory.
 - **Name grammar lives in one place** (`JsonlNames`): strip `.jsonl` only **after** an `EndsWith`
   guard (a `x.txt` is shorter than the suffix, and a bare slice throws inside a boot-time scan), then
   split the type prefix at the **first** `-` — a `D` GUID contains four hyphens, so a
@@ -345,11 +368,25 @@ enumeration:
 | unparseable id | configured SHAPE whose suffix is not a `D` GUID | `SkippedFileNames` + one warning per name |
 | foreign entry | anything else (a README, a lease, a non-`.jsonl` name, an empty stem) | `SkippedFileNames` + one warning per name |
 
-- **A whole directory in the other layout THROWS**: `configured == 0 && other > 0` →
+- **A whole directory in the other layout THROWS**: `configured == 0 && otherNonEmpty > 0` →
   `InvalidOperationException` naming the root, both counts, both formats and the two ways out
   (migrate the directory, or set `FileNameFormat`). It is raised from **every** scan — enumeration,
   construction (a `TypePrefix` map pass) and the `IdOnly` lazy pass — because "empty system" is the
-  one answer that lets an operator keep writing into a history it cannot see.
+  one answer that lets an operator keep writing into a history it cannot see. Both sides of the
+  comparison count HISTORIES: a ZERO-LENGTH configured name does not make a directory configured, and
+  a ZERO-LENGTH foreign one does not make it misconfigured (G6b, B5).
+- **Two other shapes are named instead of absorbed.** A **root that exists as a FILE**
+  (`RootIsAFile`) raises `IOException` — nothing can be enumerated, opened or created there — from
+  the enumeration and from any scan; a stream **NAME occupied by a DIRECTORY**
+  (`ThrowIfOccupiedByDirectory`) raises `InvalidOperationException` naming the obstacle, on the read
+  path and the append path alike, in both formats. Neither is a bare sharing violation and neither may
+  decay into "empty aggregate".
+- **A failed lazy pass is LATCHED, and the only recovery is a new instance.** The misconfigured
+  directory, an unreadable root and a root that is a file all publish the FAILURE (three states, not a
+  bool): every later observation re-raises the same exception, `DirectoryScans` stops at one, and the
+  store never quietly starts answering "empty aggregate". There is no reset member — the directory is
+  fixed and the store is constructed again, which is also what re-reads a directory a read had gone
+  stale on.
 - **Duplicate guard** (`AppendAsync`, before the encode, so a refused append has touched no file):
 
   | Mode | Check | Cost |
@@ -450,8 +487,14 @@ cost model instead of a snapshot of it.
   `TypePrefix` instance reads it back with `FilesOpened == 0`.
 - **G5a — one id in BOTH layouts, non-empty in the other one**: the append throws before a byte is
   written (`GetVersionAsync` unchanged) — the store never opens a second history.
+  `G5a_OtherFormatNonEmpty_AppendThrows` (TypePrefix) and `G5a_IdOnly_OtherFormatNonEmpty_AppendThrows`
+  (IdOnly, where the other layout's name is not derivable and the check costs the gated directory pass).
 - **G5b — the other layout's file is ZERO-LENGTH**: the append succeeds; a failed append's leftover
-  is not a stream.
+  is not a stream. `G5b_OtherFormatZeroLength_AppendSucceeds` (TypePrefix) and
+  `G5b_IdOnly_OtherFormatZeroLength_AppendSucceeds` (IdOnly).
+- **G5b' / `G5f` — TWO zero-length other-layout leftovers for one id**: still zero histories, so the
+  append succeeds and the multi-candidate refusal must not fire over leftovers
+  (`G5f_IdOnly_TwoZeroLengthOtherFormat_AppendSucceeds`).
 - **G5c — a short foreign name (`x.txt`)**: one `SkippedFileNames`, one warning, no throw — the
   `EndsWith` guard precedes the slice exactly for this.
 - **G5d — ONE warning per SCAN**: two other-format entries count two in `ForeignFormatFiles` but
@@ -463,6 +506,11 @@ cost model instead of a snapshot of it.
   `InvalidOperationException` from the ENUMERATION with `configured: 0` and `other-format: N` in the
   message; the mirror case (an `IdOnly`-only directory under `TypePrefix`) throws from the
   CONSTRUCTOR, because that is where its map pass runs.
+- **G6b — the diagnosis counts NON-EMPTY histories (`otherNonEmpty`)**: a ZERO-LENGTH configured-format
+  name does not make the directory configured, so a directory of other-layout histories plus one
+  leftover still throws instead of silently enumerating an empty system
+  (`G6b_ZeroLengthConfiguredName_WithOtherFormat_Throws`); the converse — a directory of nothing but
+  other-layout leftovers — is an empty store and stays silent (`B5`).
 - **G7 — a renamed event type is format dependent.** A stream renamed to `RetiredType-<id>.jsonl`:
   `IdOnly` still finds it (content), `TypePrefix` answers it only for `RetiredType` (name) and
   reports nothing as skipped; a later append keeps the retired prefix, and no
@@ -476,6 +524,47 @@ cost model instead of a snapshot of it.
   `expectedVersion` throws `ConcurrencyException` with the right `ActorId`/expected/actual; a current
   one is a no-op answering the observed version; `DirectoryScans` does not move; neither `<id>.jsonl`
   nor a second name appears.
+
+### The miss path (rev-5 delta, second pass): `B1`…`B11`
+
+Counter assertions stay deltas. The claim the B cases state together is that the **negative cache is the
+read path's**, single-flight, bounded, invalidated per id — and that an append is never stale.
+
+- **B1 — one pass for a BURST of concurrent misses** (`B1_TypePrefix_ConcurrentMisses_ShareOnePass`):
+  eight readers of an id nobody has move `DirectoryScans` by exactly `1`; the single-flight is the
+  double-check inside the gate, not a lock per reader.
+- **B1b — a repeated miss costs nothing** (`B1b_TypePrefix_RepeatedMiss_ScansOnce`): the second and
+  third observations of the same absent id, through two different members, pay no pass.
+- **B1c — an append drops that id's entry** (`B1c_TypePrefix_AppendClearsTheRememberedMiss`): the
+  append pays ONE pass (it re-scans — see B9), the two reads that follow pay none (map hit), and
+  `NegativeCacheInvalidations` moves by `1`. A miss recorded for ANOTHER id survives the map growth and
+  keeps costing nothing: that staleness is the price of the per-id drop, and it is stated in the case.
+- **B2 — a rival prefix that arrives after the map is found by the next SCAN**
+  (`B2_TypePrefix_RivalPrefixAfterTheMap_IsFoundByTheNextScan`): only an external file changes the
+  directory, the read and the append both answer from the map with no pass, the next miss pays the one
+  pass that records the conflict, and every later append for that id is refused naming both files.
+- **B2b — the ENCODING window** (`B2b_AppendEncodingWindow_RivalPrefixIsRegisteredThroughLearnPrefix`):
+  a prefix learned while the batch was encoding is REGISTERED as a conflict rather than dropped by a
+  silent `TryAdd`; this is the seam, not the window above.
+- **B3…B8 — the surface around the miss**: the lazy pass latches an `IOException`
+  (`B3_LazyPass_LatchesIoFailure`, root as a FILE), a mixed IdOnly directory's guard pass is counted
+  (`B4`), leftovers of the other layout are not a misconfiguration (`B5`), `FilesOpened` counts only
+  successful opens (`B6`), a stream NAME occupied by a DIRECTORY is diagnosed on both paths (`B7`), and
+  a read of a conflicted id answers while warning once (`B8`).
+- **B9 — an append never trusts a remembered absence**
+  (`B9_TypePrefix_AppendAfterRememberedMiss_RescansAndRefuses`): read-miss → an external writer creates
+  `Other-<id>.jsonl` → a read may stay stale → the append re-scans, resolves THAT stream and throws
+  `ConcurrencyException(expected 0, actual 1)`; no `<type>-<id>.jsonl` is forked and the rival still
+  holds its one event.
+- **B10 — the empty batch obeys the same rule**
+  (`B10_TypePrefix_EmptyBatchAfterRememberedMiss_Rescans`): it resolves its path like a writing append,
+  pays exactly the one re-scan, reports version `0` as a `ConcurrencyException` against the real count
+  and creates nothing.
+- **B11 — the drop is PER ID, and the hot path takes no gate**
+  (`B11_NewIdAppend_DropsOnlyItsOwnRememberedMiss`): a new id's first append leaves
+  `NegativeCacheInvalidations` at `0` and another id's remembered miss still costs no pass; the append
+  of the id that WAS remembered moves it to `1`. Under `IdOnly` it stays `0` for a structural reason —
+  the id IS the name, so nothing is ever remembered there.
 
 ## Repo surface
 
@@ -519,3 +608,13 @@ cost model instead of a snapshot of it.
    would make every v2026.9.0 directory a migration on upgrade. The two layouts share the line
    format, so the choice is reversible for a directory that was never mixed; a mixed one is
    diagnosed in both directions rather than merged.
+7. **The negative cache serves reads only, and it is invalidated per id** (B9…B11). The alternative —
+   trusting a remembered absence on the append path — forks a second name for an id that already has a
+   stream; the other alternative — dropping the whole cache whenever the map grows — has to take the
+   scan gate, so every first append of every id would serialize the store, and on `IdOnly` it would
+   maintain a cache that is never read. The price, a read that stays stale until the next pass, is
+   accepted and documented: an external writer's file is a directory-level event, and the append (the
+   only path that must never be stale) does pay the one pass a new id costs anyway.
+8. **No directory pass is added to the append path to close the rival-prefix window** (B2). It would
+   return exactly what the `id → type` map buys, on the one path that pays per append; the next
+   classification pass records the conflict and every later append for that id is refused.

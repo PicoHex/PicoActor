@@ -365,21 +365,46 @@ posterior cujo primeiro evento seja de outro tipo continua anexando ao nome com 
   `<id:D>.snap`, nunca pelo nome do stream). O sentido inverso não é oferecido: o prefixo faz parte do
   nome, um store `IdOnly` não consegue deduzi-lo e teria de renomear cada arquivo.
 - **Um diretório misto é diagnosticado, nunca mesclado.** Entradas válidas apenas no *outro* layout são
-  contadas e reportadas como **um** Warning por varredura (a detecção é
-  simétrica: `<id>.jsonl` em `TypePrefix` e `<type>-<id>.jsonl` em `IdOnly` contam ambos como "outro
-  formato"). Um diretório com **zero** nomes do formato configurado e **alguns** do outro lança
-  `InvalidOperationException` nomeando as duas contagens, os dois formatos e as duas saídas — da
-  enumeração, da construção e do lazy pass igualmente — em vez de reportar um sistema vazio. Um stream
-  de *outro tipo de evento* não é mistura: é o caso normal e não custa contador nem linha de log. Um
-  append para um id que já tem um stream não vazio no outro layout — ou dois prefixos diferentes — é
-  recusado antes de qualquer byte ser escrito.
+  contadas (`ForeignFormatFiles`, por **nome** e de forma monotônica: é o portão da guarda de duplicidade
+  do `IdOnly`) e reportadas como **um** Warning por varredura (a detecção é simétrica: `<id>.jsonl` em
+  `TypePrefix` e `<type>-<id>.jsonl` em `IdOnly` contam ambos como "outro formato"). O diagnóstico do
+  diretório inteiro conta **históricos**, não nomes: um diretório com **zero** históricos do formato
+  configurado e **alguns** não vazios do outro lança `InvalidOperationException` nomeando as duas
+  contagens, os dois formatos e as saídas — da enumeração, da construção e do lazy pass igualmente — em
+  vez de reportar um sistema vazio; já um diretório só de restos de comprimento zero (um append que falha
+  deixa um) é um armazenamento **vazio** e permanece silencioso. Um stream de *outro tipo de evento* não
+  é mistura: é o caso normal e não custa contador nem linha de log. Um append para um id que já tem um
+  stream não vazio no outro layout — ou dois prefixos diferentes — é recusado antes de qualquer byte ser
+  escrito.
 - **Custo.** `TypePrefix` paga uma passada de nomes de arquivo na construção (para aprender o mapa
   id → tipo), uma por resolução perdida, e um `stat` por append para a guarda de duplicidade. `IdOnly`
   não paga **nada** na construção nem para anexar a um stream que já possui; sua única passada de
-  diretório é preguiçosa, na primeira observação de um stream que não tem, e nunca mais — uma passada
-  que falha fica latcheada e é relançada, para que uma raiz mal configurada não degenere em silêncio
-  para "agregado vazio". Um lote vazio não escreve nem cria nada em nenhum dos modos, mas ainda
-  valida `expectedVersion`.
+  diretório é preguiçosa, na primeira observação de um stream que não tem, e nunca mais. Um lote vazio
+  não escreve nem cria nada em nenhum dos modos, mas resolve seu caminho **exatamente como um append que
+  escreve** e ainda valida `expectedVersion`.
+- **O cache de erros serve só ao CAMINHO DE LEITURA.** Um erro de `TypePrefix` é lembrado — um conjunto
+  limitado a 4.096 ids, esvaziado em vez de ampliado ao ultrapassá-lo — e compartilhado em
+  **single-flight**: um laço de sondagem sobre ids que ninguém tem paga **uma** passada de diretório
+  para toda a rajada e nenhuma para as repetições. Um **append nunca confia nessa memória**: resolver ali
+  "nenhum stream" criaria um segundo nome ao lado de um stream que um escritor externo criou depois de o
+  mapa ser montado, então um append **varre de novo** ao errar e, ao acertar, descarta apenas **a sua
+  própria** entrada — nunca em bloco, e sem pegar o portão da varredura. O preço é declarado: uma *leitura*
+  pode responder "vazio" para um stream que apareceu ao lado até a próxima passada, e
+  `NegativeCacheInvalidations` conta as entradas que um append realmente invalidou (identicamente `0` no
+  `IdOnly`, que nunca lembra um erro).
+- **Um mapa desatualizado é corrigido pela PRÓXIMA varredura.** Um prefixo rival que chega depois de o
+  mapa ser montado não é encontrado por uma leitura (um acerto de mapa não paga passada) nem por um
+  append: o armazenamento não acrescenta uma passada de diretório ao caminho de append para fechar essa
+  janela, porque devolveria exatamente o que o mapa rende, no único caminho que paga a cada append. A
+  próxima passada de classificação — uma enumeração, ou o erro de um id desconhecido — registra o
+  conflito, e a partir daí todo append para esse id é recusado e nomeia os dois arquivos.
+- **Uma raiz quebrada ou um nome ocupado é nomeado, não engolido.** Uma raiz que existe como **arquivo**
+  lança `IOException` (ali nada pode ser enumerado, aberto ou criado); um NOME de stream ocupado por um
+  **diretório** lança `InvalidOperationException` nomeando o obstáculo — no caminho de leitura e no de
+  append, nos dois formatos — em vez de "agregado vazio" ou uma violação de compartilhamento crua. Um
+  lazy pass que falha (má configuração, raiz ilegível, raiz que é um arquivo) fica **latcheado**: a mesma
+  exceção é relançada em toda observação posterior e o diretório nunca é varrido de novo, então a única
+  recuperação é uma **instância nova** depois de o diretório ser corrigido.
 
 ### Idle Passivation (opt-in) (Passivação por inatividade, opcional)
 

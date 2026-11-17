@@ -40,12 +40,19 @@ namespace PicoActor.EventStore.Jsonl;
 /// <see cref="FileNameFormat.TypePrefix"/> directory): the prefix is fixed at creation, so the same
 /// ambiguity applies.
 /// </item>
+/// <item>
+/// A stream NAME occupied by a DIRECTORY: nothing can be opened or created at that path, and the honest
+/// answer is neither "this aggregate is empty" (the read path) nor a bare sharing violation (the append
+/// path) but the sentence that names what is in the way. Every member that resolves that id raises it,
+/// in both formats, and it is the one case whose remedy is a file-system action of the operator's.
+/// </item>
 /// </list>
 /// <para>
-/// The remedy is the same for all three and it is always stated in the message: migrate the directory to
-/// one layout, move the files that do not belong to this store out of it, or set
-/// <see cref="JsonlEventStoreOptions.FileNameFormat"/> to the layout the directory was WRITTEN with.
-/// Nothing is deleted, moved or merged on the caller's behalf.
+/// The remedy is always stated in the message: migrate the directory to one layout, move the files that
+/// do not belong to this store out of it, set
+/// <see cref="JsonlEventStoreOptions.FileNameFormat"/> to the layout the directory was WRITTEN with, or
+/// move the directory that occupies a stream's name. Nothing is deleted, moved or merged on the caller's
+/// behalf.
 /// </para>
 /// <para>
 /// A root that cannot be READ is the fourth: the first pass that looks at it — the enumeration, the
@@ -101,11 +108,17 @@ public sealed class JsonlEventStore<TEventBase>
     private long _foreignFormatFiles;
 
     // The ids a TypePrefix MISS already failed to resolve, so a host that probes streams it does not
-    // have pays ONE directory pass per unknown id instead of one per probe. BOUNDED and cleared
-    // wholesale: an entry is a fact about this instance's map, worthless the moment that map grows —
-    // and an unbounded set would be a leak in the one path a probe loop drives.
+    // have pays ONE directory pass per unknown id instead of one per probe.
+    // IT SERVES THE READ PATH ONLY. An append that trusted a remembered absence would resolve the id to
+    // "no stream" and fork a second name beside the one that is there (an external writer's file this
+    // instance never scanned), so the append re-scans on a miss and never consults this cache.
+    // CONCURRENT, not a HashSet under the scan gate: the ONE mutation the append hot path performs —
+    // dropping the id its own append falsified — must not serialize on the gate a directory pass holds.
+    // BOUNDED: past the capacity the whole set is emptied, because the pass it saves is worth less than
+    // an unbounded allocation in the one path a probe loop drives.
     private const int MissingTypeCapacity = 4096;
-    private readonly HashSet<Guid> _missingTypes = new();
+    private readonly ConcurrentDictionary<Guid, byte> _missingTypes = new();
+    private long _negativeCacheInvalidations;
 
     // One lock, one state and one latched failure: the whole cost of the IdOnly lazy pass, which is
     // read on every observation of a stream that is not there and written at most once per instance.
@@ -172,7 +185,11 @@ public sealed class JsonlEventStore<TEventBase>
     /// Directory CLASSIFICATION passes this store has performed. EVERY enumeration pays one in both
     /// formats, because the pass is where a foreign name, an unparseable id, the other layout and a
     /// whole-directory misconfiguration are diagnosed. A <see cref="FileNameFormat.TypePrefix"/> store
-    /// pays one more at construction (to learn the <c>id → type</c> map) and one per resolved miss.
+    /// pays one more at construction (to learn the <c>id → type</c> map) and one per resolved miss — and
+    /// the TWO paths pay it differently, which is the whole point of the negative cache: a READ remembers
+    /// the miss, so a probe loop over ids nobody has pays one pass (single-flight inside the gate), while
+    /// an APPEND never trusts that memory and re-scans, because a remembered absence is not evidence that
+    /// the stream is still absent.
     /// <para>
     /// <see cref="FileNameFormat.IdOnly"/> pays exactly ONE more, and only lazily: at the FIRST
     /// observation of a stream it does not have (a load, a version, a cursor, a peek, an empty batch, or
@@ -186,13 +203,31 @@ public sealed class JsonlEventStore<TEventBase>
     /// Directory entries this store has classified as a stream in the OTHER naming format, summed over
     /// every pass — MONOTONIC, because it is the gate the <see cref="FileNameFormat.IdOnly"/> duplicate
     /// guard reads: once any scan has seen another layout in this directory, appends pay for one check
-    /// per id; a pure single-format directory never does. Non-zero with ZERO configured-format names means
-    /// the store is pointed at a directory of the other layout — a misconfiguration, not an empty store.
+    /// per id; a pure single-format directory never does.
+    /// <para>
+    /// It counts NAMES, not histories — that is what the gate above needs, since every foreign entry is
+    /// worth reporting. The whole-directory diagnosis is the OTHER question and uses the other count
+    /// (<c>otherNonEmpty</c>: the foreign entries that are not ZERO-LENGTH): a directory whose only
+    /// foreign names are failed-append leftovers holds no history at all, so it is an empty store, not a
+    /// misconfigured one. Non-zero here with ZERO configured-format names is therefore ambiguous on its
+    /// own; the throw is decided by histories.
+    /// </para>
     /// </summary>
     internal long ForeignFormatFiles => Interlocked.Read(ref _foreignFormatFiles);
 
     /// <summary>Live per-aggregate gate entries.</summary>
     internal int LockEntryCount => _locks.Count;
+
+    /// <summary>
+    /// Remembered misses this store has dropped because a successful append of THAT id falsified them.
+    /// PER ID and never wholesale: an append that learns a new prefix says nothing about another id's
+    /// absence, and the drop is a <see cref="ConcurrentDictionary{TKey,TValue}.TryRemove"/> that takes no
+    /// global lock — the append hot path must not serialize on the scan gate for a cache it never reads.
+    /// Under <see cref="FileNameFormat.IdOnly"/> no miss is ever REMEMBERED (the name is the id, so a
+    /// read never looks at the directory) and none is ever dropped, so the counter is identically zero
+    /// there.
+    /// </summary>
+    internal long NegativeCacheInvalidations => Interlocked.Read(ref _negativeCacheInvalidations);
 
     /// <inheritdoc/>
     /// <remarks>
@@ -230,8 +265,11 @@ public sealed class JsonlEventStore<TEventBase>
             //    version check that follows validates a HELD stream's expectedVersion in both formats.
             //    Only the duplicate guard and the write are skipped — there is nothing to write and
             //    nothing to create.
+            //    Its path is resolved by the APPEND path's resolver (and so is a writing append's,
+            //    below): a remembered miss is not an answer for an append, which re-scans instead of
+            //    forking a second name beside the stream it never saw.
             if (events.Count == 0)
-                return EmptyAppend(actorId, expectedVersion, PathFor(actorId), entry);
+                return EmptyAppend(actorId, expectedVersion, AppendingPathFor(actorId), entry);
 
             // 2. A non-empty batch knows its TYPE before its path: the prefix is events[0]'s concrete
             //    type name (its backtick arity kept, exactly as Type.Name reports it — never FullName),
@@ -241,8 +279,10 @@ public sealed class JsonlEventStore<TEventBase>
             // 3. Resolving the path is also the observation of a MISSING stream, which is the one
             //    moment an IdOnly store pays its lazy pass: a host that only appends by id must still
             //    learn that its whole directory is in the other layout before it forks a second stream.
-            //    A TypePrefix miss has already paid for its own pass inside PathFor.
-            var existing = PathFor(actorId);
+            //    A TypePrefix miss has already paid for its own pass inside PathFor — and an append does
+            //    NOT take the read path's remembered absence for an answer: it re-scans, because the miss
+            //    may have been recorded before another process created this id's stream.
+            var existing = AppendingPathFor(actorId);
             if (existing is null || !File.Exists(existing))
             {
                 // A name occupied by a DIRECTORY is not an absent stream: appending would fail on the
@@ -327,7 +367,13 @@ public sealed class JsonlEventStore<TEventBase>
             // while this append was encoding is REGISTERED as a conflict instead of being dropped —
             // a silent TryAdd would leave two names for one id with the guard none the wiser.
             if (existing is null)
+            {
                 LearnPrefix(actorId, typeName);
+
+                // ... and the read path's memory of this id is now false: drop THAT entry, and only it.
+                // No gate, no wholesale clear — an append of a new id falsifies no other id's absence.
+                ForgetMissingType(actorId);
+            }
 
             return version;
         }
@@ -776,7 +822,15 @@ public sealed class JsonlEventStore<TEventBase>
     /// costs one pass, not one pass per id.
     /// </para>
     /// </summary>
-    internal string? PathFor(Guid actorId)
+    internal string? PathFor(Guid actorId) => PathFor(actorId, trustRememberedMiss: true);
+
+    /// <summary>
+    /// The APPEND path's answer: identical to <see cref="PathFor"/> except in ONE respect — a remembered
+    /// miss is not trusted (see <see cref="ResolveTypeMiss"/>).
+    /// </summary>
+    private string? AppendingPathFor(Guid actorId) => PathFor(actorId, trustRememberedMiss: false);
+
+    private string? PathFor(Guid actorId, bool trustRememberedMiss)
     {
         if (_options.FileNameFormat != FileNameFormat.TypePrefix)
             return IdOnlyPathFor(actorId);
@@ -784,7 +838,7 @@ public sealed class JsonlEventStore<TEventBase>
         if (_typeById.TryGetValue(actorId, out var type))
             return KnownPathFor(actorId, type);
 
-        return ResolveTypeMiss(actorId);
+        return ResolveTypeMiss(actorId, trustRememberedMiss);
     }
 
     /// <summary>
@@ -816,21 +870,31 @@ public sealed class JsonlEventStore<TEventBase>
     /// pass for a whole BURST of them, because a probe loop over ids the store does not have is not a
     /// reason to re-read the directory per probe.
     /// <para>
-    /// TWO caches make that true: the double-check inside the gate (the common case — a concurrent reader
-    /// that arrived while the winner was scanning), and a bounded set of ids the map is known not to hold.
-    /// The negative entry is dropped wholesale whenever the map GROWS (a pass that learned something, or a
-    /// successful append of a new id): an absence recorded against an older map is not evidence about the
-    /// current one.
+    /// SINGLE-FLIGHT, on the gate a directory pass already holds: the winner scans, a reader that arrived
+    /// while it was scanning answers from the double-check inside the gate, and the ids the map is known
+    /// not to hold are remembered so the NEXT probe of them costs no pass at all.
+    /// </para>
+    /// <para>
+    /// THE NEGATIVE CACHE IS THE READ PATH'S, and <paramref name="trustRememberedMiss"/> is the whole
+    /// difference between the two callers. A read may answer "no stream" from memory: an absence is a fact
+    /// about the map THIS instance saw, and a stream another process created beside it is found by the
+    /// next pass, not by a probe. An append may NOT — resolving to "no stream" there would create a
+    /// SECOND name for an id that already has one, and the file this instance never scanned would become
+    /// the other half of a fork. So an append re-scans even when the miss is remembered, and it never
+    /// WRITES the cache either: the entry it would record is the one that same append falsifies a moment
+    /// later.
     /// </para>
     /// </summary>
-    private string? ResolveTypeMiss(Guid actorId)
+    private string? ResolveTypeMiss(Guid actorId, bool trustRememberedMiss)
     {
         lock (_lazyScanGate)
         {
             if (_typeById.TryGetValue(actorId, out var known))
                 return KnownPathFor(actorId, known);
 
-            if (_missingTypes.Contains(actorId))
+            // The map is consulted FIRST, for both callers: a resolved prefix is not an absence, so a
+            // stale negative entry can never shadow a stream this instance knows.
+            if (trustRememberedMiss && _missingTypes.ContainsKey(actorId))
                 return null;
 
             ScanTypeMap();
@@ -838,24 +902,36 @@ public sealed class JsonlEventStore<TEventBase>
             if (_typeById.TryGetValue(actorId, out var type))
                 return KnownPathFor(actorId, type);
 
-            // Bounded on purpose: past the capacity the set is emptied rather than grown, because the
-            // cost it saves (one pass) is worth less than an unbounded allocation.
-            if (_missingTypes.Count >= MissingTypeCapacity)
-                _missingTypes.Clear();
+            if (trustRememberedMiss)
+                RememberMissingType(actorId);
 
-            _missingTypes.Add(actorId);
             return null;
         }
     }
 
     /// <summary>
-    /// Forget every remembered miss. Called under the same gate a miss takes, and whenever the map GROWS —
-    /// the one event that can turn a remembered absence into a stream that is there.
+    /// Remember ONE absence for the read path, bounded: past the capacity the set is emptied rather than
+    /// grown. Called under the scan gate, which every other reader of the set takes too.
     /// </summary>
-    private void ForgetMissingTypes()
+    private void RememberMissingType(Guid actorId)
     {
-        lock (_lazyScanGate)
+        if (_missingTypes.Count >= MissingTypeCapacity)
             _missingTypes.Clear();
+
+        _missingTypes.TryAdd(actorId, 0);
+    }
+
+    /// <summary>
+    /// Drop the ONE remembered miss a successful append of that id has falsified. PER ID, and outside the
+    /// scan gate on purpose: an append that learns a new prefix falsifies no other entry, so a wholesale
+    /// clear would drop absences that still hold AND serialize every first append of every id against the
+    /// one gate a directory pass holds. Under <see cref="FileNameFormat.IdOnly"/> nothing is remembered at
+    /// all, so this is never reached there and the counter stays identically zero.
+    /// </summary>
+    private void ForgetMissingType(Guid actorId)
+    {
+        if (_missingTypes.TryRemove(actorId, out _))
+            Interlocked.Increment(ref _negativeCacheInvalidations);
     }
 
     /// <summary>
@@ -1017,9 +1093,11 @@ public sealed class JsonlEventStore<TEventBase>
     /// NAME, not with the directory.</item>
     /// </list>
     /// <para>
-    /// A pass that finds ZERO configured names and SOME other-format names THROWS: the store is pointed at
-    /// a directory of the other layout, and the honest answer is an error naming both formats and both
-    /// counts — not "this store is empty", which is how a whole history disappears from view.
+    /// A pass that finds ZERO configured HISTORIES and SOME OTHER-LAYOUT HISTORIES throws: the store is
+    /// pointed at a directory of the other layout, and the honest answer is an error naming both formats
+    /// and both counts — not "this store is empty", which is how a whole history disappears from view.
+    /// Both counts are of NON-EMPTY files (<c>otherNonEmpty</c> for the foreign side): a zero-length file
+    /// is a failed append's leftover, not a history.
     /// </para>
     /// </summary>
     /// <param name="firstEventType">
@@ -1160,11 +1238,10 @@ public sealed class JsonlEventStore<TEventBase>
     {
         if (_typeById.TryAdd(id, type))
         {
-            // The map GREW, and that is the one event that can turn a remembered absence into a stream
-            // that is there: a pass that learns any prefix saw a file the absences did not. Clearing
-            // wholesale (rather than per id) is what keeps a negative entry BOUNDED — it can never
-            // outlive the map it was recorded against.
-            ForgetMissingTypes();
+            // The map GREW. Nothing is dropped from the negative cache here: a resolved prefix is checked
+            // BEFORE the cache, so an entry for THIS id can never shadow it, and an entry for ANOTHER id
+            // is still a fact about the map this instance saw (the documented staleness). Dropping here
+            // would cost the scan gate on every learned prefix — the append hot path most of all.
             return;
         }
 

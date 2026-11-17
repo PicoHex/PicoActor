@@ -373,22 +373,48 @@ est né.
   l'agrégat, `<id:D>.snap`, jamais par le nom du flux). Le sens inverse n'est pas proposé : le préfixe
   fait partie du nom, un store `IdOnly` ne peut pas le déduire et devrait renommer chaque fichier.
 - **Un répertoire mixte est diagnostiqué, jamais fusionné.** Les entrées valides uniquement sous
-  l'*autre* disposition sont comptées et signalées par **un** Warning par
-  scan (la détection est symétrique : `<id>.jsonl` sous `TypePrefix` et `<type>-<id>.jsonl` sous
-  `IdOnly` relèvent tous deux de « l'autre format »). Un répertoire avec **zéro** nom au format
-  configuré et **quelques** noms dans l'autre lève `InvalidOperationException` en nommant les deux
-  comptes, les deux formats et les deux issues — depuis l'énumération, la construction et le lazy pass
-  de la même façon — au lieu de signaler un système vide. Un flux d'*un autre type d'événement* n'est
-  pas un mélange : c'est le cas normal, sans compteur ni ligne de log. Un append pour un id qui a déjà
-  un flux non vide dans l'autre disposition — ou deux préfixes différents — est refusé avant qu'un
-  seul octet ne soit écrit.
+  l'*autre* disposition sont comptées (`ForeignFormatFiles`, par **nom** et de façon monotone : c'est la
+  porte de la garde anti-doublon d'`IdOnly`) et signalées par **un** Warning par scan (la détection est
+  symétrique : `<id>.jsonl` sous `TypePrefix` et `<type>-<id>.jsonl` sous `IdOnly` relèvent tous deux de
+  « l'autre format »). Le diagnostic de répertoire entier compte des **historiques**, pas des noms : un
+  répertoire avec **zéro** historique au format configuré et **quelques** historiques non vides dans
+  l'autre lève `InvalidOperationException` en nommant les deux comptes, les deux formats et les issues —
+  depuis l'énumération, la construction et le lazy pass de la même façon — au lieu de signaler un
+  système vide ; en revanche un répertoire fait de résidus de longueur nulle (un append en échec en
+  laisse un) est un magasin **vide** et reste silencieux. Un flux d'*un autre type d'événement* n'est
+  pas un mélange : c'est le cas normal, sans compteur ni ligne de log. Un append pour un id qui a déjà un
+  flux non vide dans l'autre disposition — ou deux préfixes différents — est refusé avant qu'un seul
+  octet ne soit écrit.
 - **Coût.** `TypePrefix` paie un parcours des noms de fichiers à la construction (pour apprendre la
   table id → type), un par résolution manquée, et un `stat` par append pour la garde anti-doublon.
   `IdOnly` ne paie **rien** à la construction ni pour un append vers un flux qu'il possède déjà ; son
   unique parcours de répertoire est paresseux, à la première observation d'un flux absent, et jamais
-  ensuite — un parcours en échec est latché puis relancé, pour qu'une racine mal configurée ne dégénère
-  pas en silence en « agrégat vide ». Un lot vide n'écrit rien et ne crée rien dans les deux modes,
-  mais valide toujours `expectedVersion`.
+  ensuite. Un lot vide n'écrit rien et ne crée rien dans les deux modes, mais il résout son chemin
+  **exactement comme un append qui écrit** et valide toujours `expectedVersion`.
+- **Le cache des échecs ne sert qu'au CHEMIN DE LECTURE.** Un échec de `TypePrefix` est mémorisé — un
+  ensemble borné de 4 096 id, vidé plutôt qu'agrandi au-delà — et partagé en **single-flight** : une
+  boucle de sondage sur des id que personne n'a paie **un** parcours de répertoire pour toute la rafale,
+  et aucun pour les répétitions. Un **append ne fait jamais confiance à cette mémoire** : y résoudre
+  « aucun flux » créerait un second nom à côté d'un flux qu'un écrivain externe a créé après la
+  construction de la table, donc un append **re-scanne** en cas d'échec puis, en cas de succès, ne
+  supprime que **sa propre** entrée — jamais en bloc, et sans prendre la porte du scan. Le prix est
+  énoncé : une *lecture* peut répondre « vide » pour un flux apparu à côté jusqu'au parcours suivant, et
+  `NegativeCacheInvalidations` compte les entrées qu'un append a réellement invalidées (identiquement
+  `0` sous `IdOnly`, qui ne mémorise jamais un échec).
+- **Une table périmée est corrigée par le SCAN suivant.** Un préfixe rival qui arrive après la
+  construction de la table n'est pas trouvé par une lecture (un hit de table ne paie aucun parcours), ni
+  par un append : le magasin n'ajoute pas de parcours de répertoire au chemin d'append pour fermer cette
+  fenêtre, car il rendrait exactement ce que la table rapporte, sur le seul chemin qui paie à chaque
+  append. Le parcours de classification suivant — une énumération, ou l'échec d'un id inconnu — enregistre
+  le conflit, et dès lors tout append pour cet id est refusé et nomme les deux fichiers.
+- **Une racine cassée ou un nom occupé est nommé, jamais absorbé.** Une racine qui existe en tant que
+  **fichier** lève `IOException` (rien ne peut y être énuméré, ouvert ni créé) ; un NOM de flux occupé
+  par un **répertoire** lève `InvalidOperationException` en nommant l'obstacle — sur le chemin de
+  lecture comme sur celui d'append, dans les deux formats — au lieu d'« agrégat vide » ou d'une simple
+  violation de partage. Un lazy pass en échec (mauvaise configuration, racine illisible, racine qui est
+  un fichier) est **latché** : la même exception est levée à chaque observation ultérieure et le
+  répertoire n'est plus jamais re-scanné, donc la seule reprise est une **nouvelle instance** une fois le
+  répertoire réparé.
 
 ### Idle Passivation (opt-in) (Passivation par inactivité, optionnel)
 

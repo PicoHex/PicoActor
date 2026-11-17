@@ -373,22 +373,49 @@ Namen, mit dem der Stream geboren wurde.
   Gegenrichtung gibt es nicht: ein Präfix ist Teil des Namens, ein `IdOnly`-Store kann ihn nicht aus
   der Id ableiten und müsste jede Datei umbenennen.
 - **Ein gemischtes Verzeichnis wird diagnostiziert, nie verschmolzen.** Einträge, die nur im
-  *anderen* Layout gültig sind, werden gezählt und als **eine** Warnung pro
-  Scan gemeldet (die Erkennung ist symmetrisch: `<id>.jsonl` unter `TypePrefix` und
-  `<type>-<id>.jsonl` unter `IdOnly` gelten beide als „anderes Format“). Ein Verzeichnis mit **null**
-  Namen im konfigurierten Format und **einigen** im anderen wirft eine
-  `InvalidOperationException`, die beide Zähler, beide Formate und die zwei Auswege nennt — aus
-  Enumeration, Konstruktion und Lazy-Pass gleichermaßen — statt ein leeres System zu melden. Ein
-  Stream eines *anderen Event-Typs* ist keine Mischung: das ist der Normalfall, er kostet weder
-  Zähler noch Logzeile. Ein Append für eine Id, die bereits einen nicht-leeren Stream im anderen
-  Layout hat — oder zwei verschiedene Präfixe — wird abgelehnt, bevor ein Byte geschrieben ist.
+  *anderen* Layout gültig sind, werden gezählt (`ForeignFormatFiles`, nach **Namen** und monoton: das ist
+  das Gate des `IdOnly`-Duplikat-Schutzes) und als **eine** Warnung pro Scan gemeldet (die Erkennung ist
+  symmetrisch: `<id>.jsonl` unter `TypePrefix` und `<type>-<id>.jsonl` unter `IdOnly` gelten beide als
+  „anderes Format“). Die Ganzverzeichnis-Diagnose zählt **Historien**, nicht Namen: ein Verzeichnis mit
+  **null** Historien im konfigurierten Format und **einigen nicht-leeren** im anderen wirft eine
+  `InvalidOperationException`, die beide Zähler, beide Formate und die Auswege nennt — aus Enumeration,
+  Konstruktion und Lazy-Pass gleichermaßen — statt ein leeres System zu melden; ein Verzeichnis aus
+  lauter Überbleibseln der Länge null (ein fehlgeschlagenes Append hinterlässt eines) ist dagegen ein
+  **leerer** Store und bleibt still. Ein Stream eines *anderen Event-Typs* ist keine Mischung: das ist
+  der Normalfall, er kostet weder Zähler noch Logzeile. Ein Append für eine Id, die bereits einen
+  nicht-leeren Stream im anderen Layout hat — oder zwei verschiedene Präfixe — wird abgelehnt, bevor ein
+  Byte geschrieben ist.
 - **Kosten.** `TypePrefix` zahlt einen Dateinamen-Durchlauf bei der Konstruktion (für die Id → Typ
   Abbildung), einen pro aufgelöstem Fehlgriff und ein `stat` pro Append für den Duplikat-Schutz.
-  `IdOnly` zahlt bei der Konstruktion **nichts** und nichts für ein Append an einen bereits
-  vorhandenen Stream; sein einziger Verzeichnis-Durchlauf läuft lazy bei der ersten Beobachtung eines
-  Streams, den es nicht hat, und danach nie wieder — ein fehlgeschlagener Durchlauf wird gelatcht und
-  erneut geworfen, damit ein fehlkonfiguriertes Root nicht still zu „leeres Aggregat“ verfällt. Ein
-  leerer Batch schreibt und erzeugt in beiden Modi nichts, prüft aber weiterhin `expectedVersion`.
+  `IdOnly` zahlt bei der Konstruktion **nichts** und nichts für ein Append an einen bereits vorhandenen
+  Stream; sein einziger Verzeichnis-Durchlauf läuft lazy bei der ersten Beobachtung eines Streams, den es
+  nicht hat, und danach nie wieder. Ein leerer Batch schreibt und erzeugt in beiden Modi nichts, löst
+  seinen Pfad aber **genau wie ein schreibendes Append** auf und prüft weiterhin `expectedVersion`.
+- **Der Fehlgriff-Cache dient nur dem LESEPFAD.** Ein `TypePrefix`-Fehlgriff wird erinnert — ein
+  begrenztes Set von 4.096 Ids, das bei Überschreitung geleert statt vergrößert wird — und
+  **single-flight** geteilt: eine Probes-Schleife über Ids, die niemand hat, zahlt **einen**
+  Verzeichnis-Durchlauf für den ganzen Schwung und keinen für die Wiederholungen. Ein **Append
+  vertraut diesem Gedächtnis nie**: dort „kein Stream“ aufzulösen würde einen zweiten Namen neben einem
+  Stream anlegen, den ein externer Schreiber nach dem Aufbau der Abbildung erzeugt hat. Ein Append
+  scannt bei einem Fehlgriff also **erneut** und verwirft bei Erfolg nur **seinen eigenen** Eintrag —
+  niemals alles, und ohne das Scan-Gate zu nehmen. Der Preis wird benannt: ein *Lesen* darf „leer“ für
+  einen Stream antworten, der daneben entstanden ist, bis zum nächsten Durchlauf; und
+  `NegativeCacheInvalidations` zählt die Einträge, die ein Append tatsächlich widerlegt hat (unter
+  `IdOnly` identisch `0`, weil dort nie ein Fehlgriff erinnert wird).
+- **Eine veraltete Abbildung korrigiert der nächste SCAN.** Ein Rivale-Präfix, der nach dem Aufbau der
+  Abbildung eintrifft, wird von einem Lesen nicht gefunden (ein Map-Treffer kostet keinen Durchlauf) und
+  von einem Append **ebenso wenig**: der Store fügt dem Append-Pfad keinen Verzeichnis-Durchlauf hinzu,
+  um dieses Fenster zu schließen — er gäbe damit genau zurück, was die Abbildung einbringt, und zwar auf
+  dem einen Pfad, der pro Append zahlt. Der nächste Klassifikations-Durchlauf — eine Enumeration oder der
+  Fehlgriff einer unbekannten Id — hält den Konflikt fest, und von da an wird jedes Append für diese Id
+  abgelehnt und nennt beide Dateien.
+- **Ein kaputtes Root oder ein belegter Name wird benannt, nicht geschluckt.** Ein Root, der als
+  **Datei** existiert, wirft `IOException` (dort lässt sich nichts enumerieren, öffnen oder erzeugen);
+  ein Stream-NAME, den ein **Verzeichnis** belegt, wirft `InvalidOperationException` mit dem Hindernis im
+  Text — im Lesepfad wie im Append-Pfad, in beiden Formaten — statt „leeres Aggregat“ oder einer nackten
+  Freigabeverletzung. Ein fehlgeschlagener Lazy-Pass (Fehlkonfiguration, unlesbares Root, Root als Datei)
+  wird **gelatcht**: jede spätere Beobachtung wirft dieselbe Ausnahme, und das Verzeichnis wird nie erneut
+  gescannt — die einzige Erholung ist eine **neue Instanz**, sobald das Verzeichnis in Ordnung ist.
 
 ### Idle Passivation (opt-in) (Idle-Passivierung, optional)
 
