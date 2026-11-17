@@ -28,6 +28,7 @@ public sealed class PicoActorDiExtensionsTests
     {
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         var publisher = new RecordingMediatorPublisher();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor(publisher);
         container.Build();
         await using var scope = container.CreateScope();
@@ -55,6 +56,46 @@ public sealed class PicoActorDiExtensionsTests
 
 public sealed class PicoActorDiExtensionsStoreTests
 {
+    /// <summary>
+    /// The core ships NO concrete store, so the only place the mistake can be reported is
+    /// resolve time: the message must name the extension to call AND the package that carries
+    /// it — the host reads this message, not a doc.
+    /// </summary>
+    [Test]
+    public async Task AddPicoActor_WithoutStore_ResolveThrows_InvalidOperation_NamingInMemoryExtension()
+    {
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoActor();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var ex = await Assert
+            .That(() => scope.GetService(typeof(IActorSystem)))
+            .Throws<InvalidOperationException>();
+
+        await Assert.That(ex!.Message).Contains("AddPicoActorInMemoryStore");
+        await Assert.That(ex.Message).Contains("PicoActor.EventStore.InMemory");
+    }
+
+    /// <summary>
+    /// Registration order is free: the store may be registered BEFORE AddPicoActor(), because
+    /// the store is resolved inside the IActorSystem factory and never captured at registration.
+    /// </summary>
+    [Test]
+    public async Task AddPicoActorInMemoryStore_ThenAddPicoActor_ResolvesInMemoryStore()
+    {
+        var container = new SvcContainer(autoConfigureFromGenerator: false);
+        container.AddPicoActorInMemoryStore();
+        container.AddPicoActor();
+        container.Build();
+        await using var scope = container.CreateScope();
+
+        var system = (IActorSystem)scope.GetService(typeof(IActorSystem));
+
+        await Assert.That(system).IsNotNull();
+        await Assert.That(scope.GetService(typeof(IEventStore))).IsTypeOf<InMemoryEventStore>();
+    }
+
     /// <summary>
     /// The default store registration must not clobber a store the application already
     /// registered on the container (documented precedence: a container-registered
@@ -128,19 +169,6 @@ public sealed class PicoActorDiExtensionsStoreTests
         var resolved = scope.GetService(typeof(IEventStore));
 
         await Assert.That(ReferenceEquals(resolved, explicitStore)).IsTrue();
-    }
-
-    [Test]
-    public async Task AddPicoActor_NoArgs_RegistersDefaultInMemoryStore()
-    {
-        var container = new SvcContainer(autoConfigureFromGenerator: false);
-        container.AddPicoActor();
-        container.Build();
-        await using var scope = container.CreateScope();
-
-        var store = scope.GetService(typeof(IEventStore));
-
-        await Assert.That(store).IsTypeOf<InMemoryEventStore>();
     }
 
     [Test]

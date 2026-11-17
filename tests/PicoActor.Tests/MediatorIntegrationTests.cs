@@ -242,6 +242,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
@@ -278,6 +279,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
 
@@ -311,6 +313,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
 
@@ -390,6 +393,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
@@ -424,6 +428,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
@@ -466,6 +471,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
@@ -499,6 +505,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
@@ -541,6 +548,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
@@ -582,6 +590,7 @@ public sealed partial class MediatorIntegrationTests
 
         var container = new SvcContainer(autoConfigureFromGenerator: false);
         container.AddPicoMediator();
+        container.AddPicoActorInMemoryStore();
         container.AddPicoActor();
         container.Build();
         await using var scope = container.CreateScope();
