@@ -13,6 +13,7 @@
     <PackageReference Include="PicoMediator.DI" />
     <PackageReference Include="PicoLog.Abs" />
     <ProjectReference Include="..\..\src\PicoActor\PicoActor.csproj" />
+    <ProjectReference Include="..\PicoActor.TestSupport\PicoActor.TestSupport.csproj" />
     <ProjectReference
       Include="..\..\src\PicoActor.Gen\PicoActor.Gen.csproj"
       OutputItemType="Analyzer"
