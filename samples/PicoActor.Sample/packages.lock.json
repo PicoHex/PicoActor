@@ -52,8 +52,8 @@
       },
       "PicoSerDe.Core": {
         "type": "Transitive",
-        "resolved": "2026.13.3",
-        "contentHash": "iIAxCzEyZOkUgOUha5nt1reaxO/I08DnyBTtyPil5iq49fK6AZPPiRUv14qD/kmDAsBkQnf5HYLNkWbb8PLmeA=="
+        "resolved": "2026.14.0",
+        "contentHash": "7x2ua2bKW6Fs6ObS9sT1GBwTWg0pQcjUm6lmTHikrs9YuS4j9/WzJN1cUtHkgJPXA/+QINkyDxoRiDTDb+B+8g=="
       },
       "picoactor": {
         "type": "Project",
@@ -82,7 +82,7 @@
         "type": "Project",
         "dependencies": {
           "PicoActor.Abs": "[0.0.0-dev, )",
-          "PicoJetson": "[2026.13.*, )",
+          "PicoJetson": "[2026.14.*, )",
           "PicoLog.Abs": "[2026.11.*, )"
         }
       },
@@ -91,11 +91,11 @@
       },
       "PicoJetson": {
         "type": "CentralTransitive",
-        "requested": "[2026.13.*, )",
-        "resolved": "2026.13.3",
-        "contentHash": "30znhEAHWUt72FJKkVqauQi4OCvDWamjM6PoAAilog9+LRtiDBJW0gp8+HgK+tKvLM7VSwTgGl1OZzfQ/NqfFA==",
+        "requested": "[2026.14.*, )",
+        "resolved": "2026.14.0",
+        "contentHash": "f1iy5VonIQ3cSUVeLf1rRxDtPpUENZvwIm/S6QLeE01UjOeq0I0VfuYXbXiVU/ijaDkCpG1L+tqtvYHGRPHjgQ==",
         "dependencies": {
-          "PicoSerDe.Core": "2026.13.3"
+          "PicoSerDe.Core": "2026.14.0"
         }
       },
       "PicoLog.Abs": {

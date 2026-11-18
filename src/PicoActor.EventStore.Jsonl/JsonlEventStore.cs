@@ -2052,10 +2052,11 @@ public sealed class JsonlEventStore<TEventBase>
                 // produce a payload. What failed here is the type's own OUTPUT, before a byte moved.
                 ? "the event could not be written, and nothing was written — no line, no file: "
                     + $"{boundType.FullName}'s own generated serializer failed while producing the "
-                    + "payload. A known cause is an untyped 'object?' member, which PicoJetson does "
-                    + "not implement on write: its generated writer emits the member's NAME with no "
-                    + "value, and a name without a value is not JSON. The remedy is on the TYPE, not "
-                    + "on the file — give the member a concrete type, or leave it null."
+                    + "payload. A known cause is an untyped 'object?' member carrying a value the "
+                    + "wire has no form for: such a member goes out as the runtime value it holds, "
+                    + "so a string, number, boolean, array or object round-trips while an arbitrary "
+                    + "POCO (or a bare System.Object) does not. The remedy is on the TYPE, not on the "
+                    + "file — give the member a concrete type, or pass a value the JSON form covers."
             // The READ leg: the line EXISTS, and its payload is not this type's JSON.
             : $"the payload does not fit the tag: a line tagged \"{tag}\" must carry "
                 + $"{boundType.FullName}'s own JSON behind the discriminator. Check that the tag is "

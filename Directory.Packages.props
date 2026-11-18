@@ -54,9 +54,9 @@
     <PackageVersion Include="PicoMediator.Abs" Version="2026.11.*" />
     <PackageVersion Include="PicoMediator.DI" Version="2026.11.*" />
     <!-- Source-generated JSON serialization for the JSONL event store. First-party float
-         band: 2026.13.* accepts API-preserving releases of the band the store is built and
+         band: 2026.14.* accepts API-preserving releases of the band the store is built and
          tested against and refuses a breaking x bump. -->
-    <PackageVersion Include="PicoJetson" Version="2026.13.*" />
+    <PackageVersion Include="PicoJetson" Version="2026.14.*" />
     <!-- Own packages: consumed by PackageReference when UseProjectReferences=false.
          Exempt from the float rule: $(Version) is this repo's own release version. -->
     <PackageVersion Include="PicoActor" Version="$(Version)" />

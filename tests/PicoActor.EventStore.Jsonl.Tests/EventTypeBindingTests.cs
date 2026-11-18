@@ -541,13 +541,14 @@ public sealed class EventTypeBindingTests
 /// Bnd0 — the framework's two saga terminal events must have a serializer SOMEBODY generates, and the
 /// somebody is this store package (D2b of the event-type-bindings spec).
 /// <para>
-/// Why this test exists: PicoJetson is CALL-SITE driven. <see cref="JsonlEventStore{TEventBase}"/>
+/// Why this test exists: PicoSerDe generation is CALL-SITE driven. <see cref="JsonlEventStore{TEventBase}"/>
 /// serializes through a type PARAMETER — its call sites are <c>SerializeToUtf8Bytes(TEventBase)</c>
 /// and <c>Deserialize&lt;TEventBase&gt;</c> — and the generator ignores type parameters, so nothing in
 /// <c>PicoActor.Abs</c> (where the two events are declared) and nothing in this store's own store code
 /// ever produces a registration for them. The package therefore ships a bare generation point,
-/// <c>FrameworkEventSerializers.Generate</c>, whose only job is to hold four CLOSED call sites that
-/// name <see cref="SagaCompleted"/> and <see cref="SagaFailed"/> with a concrete type argument.
+/// <c>FrameworkEventSerializers</c>, whose only job is to carry the two attributes
+/// (<c>[GenerateSerializer(typeof(SagaCompleted))]</c> / <c>…(typeof(SagaFailed))</c>) that name those
+/// types CONCRETELY.
 /// </para>
 /// <para>
 /// Why the serializers are reached through DELEGATES: this test must fail when that generation point

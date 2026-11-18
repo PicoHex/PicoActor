@@ -219,59 +219,126 @@ public sealed class BoundEventWriteTests
             .IsTrue();
     }
 
-    // ── Bnd15: the object? member — null (the framework's only shape) round-trips ──────────────────
+    // ── Bnd15: the object? member reaches the wire — and says so when it cannot ────────────────────
 
+    /// <summary>
+    /// <see cref="SagaCompleted.Result"/> is <c>object?</c>, and PicoSerDe 2026.14 writes such a member
+    /// as whatever the RUNTIME value is (its "any-value" chain), so the store no longer has to refuse
+    /// everything but <c>null</c>. Three facts are pinned here, because each one is a promise an operator
+    /// reads a corpus by:
+    /// <list type="number">
+    /// <item><c>null</c> — the shape the framework itself produces, since every <c>MarkComplete</c> call
+    /// site is parameterless — is the literal D2 line, byte for byte, and reads back as
+    /// <c>SagaCompleted(null)</c>.</item>
+    /// <item>A <see cref="string"/> round-trips AS a string: the member's CLR type is <c>object</c>, so
+    /// "what comes back" is a question about the VALUE, and the answer is the value that went out.</item>
+    /// <item>An integer is the documented LOSS: it goes out as <c>42</c> and comes back as a
+    /// <see cref="long"/>, never as the <c>int</c>-holding box that was handed in. A consumer that
+    /// pattern-matches <c>is int</c> on a rebuilt completion is reading a wire with no integer width on
+    /// it — this test exists so that is a pinned fact rather than a surprise.</item>
+    /// </list>
+    /// The fourth case is the one the store owes an operator: a runtime type with NO JSON form
+    /// (<c>new object()</c>, an arbitrary POCO) must fail LOUDLY, name the event that could not be
+    /// written, and leave nothing behind — no file, no version. A silent <c>null</c>, a half-written line
+    /// or an unreadable one would all be worse than the refusal.
+    /// </summary>
     [Test, Timeout(15000)]
-    public async Task Bnd15_NullResult_RoundTrips_NonNullFailsLoudly(
+    public async Task Bnd15_ResultRoundTrip_UnrepresentableValueFailsLoudly(
         CancellationToken cancellationToken = default
     )
     {
         _ = cancellationToken;
         using var temp = new TempRoot();
         var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
-        var id = Guid.NewGuid();
 
-        // The shape the framework actually produces: every MarkComplete call site is parameterless, so
-        // `Result` is null on every completion line a saga stream has ever carried.
-        await store.AppendAsync(id, 0, [new SagaCompleted(null)]);
+        // ── 1. null: D2's line, pinned by literal ─────────────────────────────────────────────────
+        var nullId = Guid.NewGuid();
+        await store.AppendAsync(nullId, 0, [new SagaCompleted(null)]);
 
-        var lines = await File.ReadAllLinesAsync(StreamPath(temp.Root, id), cancellationToken);
-        await Assert.That(lines.Length).IsEqualTo(1);
+        var nullLines = await File.ReadAllLinesAsync(
+            StreamPath(temp.Root, nullId),
+            cancellationToken
+        );
+        await Assert.That(nullLines.Length).IsEqualTo(1);
 
-        // D2's recipe, pinned by literal. If the discriminator were spliced by keeping the payload whole,
-        // the line would read `{"$type":"PicoActorSagaCompleted",{"Result":null}` — the payload's own
-        // brace kept AND a comma in front of it: invalid JSON, invisible to this write, fatal on
-        // read-back. The literal below is the byte string the production corpus already carries (Bnd3
-        // pins it from the read side), which is why the payload's opening brace must be DROPPED.
-        await Assert.That(lines[0]).IsEqualTo(NullResultLine);
+        // If the discriminator were spliced by keeping the payload whole, the line would read
+        // `{"$type":"PicoActorSagaCompleted",{"Result":null}` — the payload's own brace kept AND a comma
+        // in front of it: invalid JSON, invisible to this write, fatal on read-back. The literal below is
+        // the byte string the production corpus already carries (Bnd3 pins it from the read side), which
+        // is why the payload's opening brace must be DROPPED.
+        await Assert.That(nullLines[0]).IsEqualTo(NullResultLine);
 
-        // Round trip through the CONCRETE deserializer: the extra leading `$type` member is tolerated
+        // Round trip through a CONCRETE deserializer too: the extra leading `$type` member is tolerated
         // (D2's invariant), so the line this store writes is a SagaCompleted line and not merely a
         // well-formed one. Reached through a METHOD GROUP on purpose — an invocation here would make the
         // test assembly generate the serializer itself and blind Bnd0's tripwire.
         DeserializeSagaCompleted deserialize = JsonSerializer.Deserialize<SagaCompleted>;
-        var nullResult = deserialize(Encoding.UTF8.GetBytes(lines[0]), null);
+        var nullResult = deserialize(Encoding.UTF8.GetBytes(nullLines[0]), null);
         await Assert.That(nullResult).IsEqualTo(new SagaCompleted(null));
         await Assert.That(nullResult!.Result).IsNull();
 
-        // ── The non-null half is blocked UPSTREAM, and this is where that shows ────────────────────
-        // The spec's D10 fidelity table predicts `Result = "boom"` round-trips as a string. It does not,
-        // and this store cannot make it: PicoJetson 2026.13's generated writer emits an EMPTY block for a
-        // non-null `object?` member (`if (value.Result != null) { }` — the property name is written with
-        // no value), and its generated reader drops such a value too (`// unsupported ctor param type:
-        // any`). The append therefore fails inside the serializer, before a byte reaches the disk.
-        // What this store owes its operator is asserted rather than the defect: a loud failure and NO
-        // stream, never a half-written or unreadable line. When PicoJetson learns to write untyped
-        // members this goes RED on purpose — that red is the signal to complete the string round trip
-        // the fidelity table promises.
-        var otherId = Guid.NewGuid();
+        var nullReloaded = await store.LoadAsync(nullId);
+        await Assert.That(nullReloaded.Count).IsEqualTo(1);
+        await Assert.That(nullReloaded[0].GetType()).IsEqualTo(typeof(SagaCompleted));
+        await Assert.That(nullReloaded[0]).IsEqualTo(new SagaCompleted(null));
+
+        // ── 2. a string round-trips AS a string ──────────────────────────────────────────────────
+        var stringId = Guid.NewGuid();
+        await store.AppendAsync(stringId, 0, [new SagaCompleted("boom")]);
+
+        var stringLines = await File.ReadAllLinesAsync(
+            StreamPath(temp.Root, stringId),
+            cancellationToken
+        );
+        await Assert.That(stringLines.Length).IsEqualTo(1);
+        await Assert
+            .That(stringLines[0])
+            .IsEqualTo("{\"$type\":\"PicoActorSagaCompleted\",\"Result\":\"boom\"}");
+
+        var stringReloaded = await store.LoadAsync(stringId);
+        await Assert.That(stringReloaded.Count).IsEqualTo(1);
+        var stringCompleted = stringReloaded[0] as SagaCompleted;
+        await Assert.That(stringCompleted).IsNotNull();
+
+        // The VALUE, not the box: `object?` means the rebuilt member is whatever the wire said, and the
+        // wire said a JSON string.
+        await Assert.That(stringCompleted!.Result is string).IsTrue();
+        await Assert.That(stringCompleted.Result).IsEqualTo("boom");
+        await Assert.That(stringCompleted).IsEqualTo(new SagaCompleted("boom"));
+
+        // ── 3. an integer goes out as 42 and comes back as a LONG ────────────────────────────────
+        var numberId = Guid.NewGuid();
+        await store.AppendAsync(numberId, 0, [new SagaCompleted(42L)]);
+
+        var numberLines = await File.ReadAllLinesAsync(
+            StreamPath(temp.Root, numberId),
+            cancellationToken
+        );
+        await Assert.That(numberLines.Length).IsEqualTo(1);
+        // One JSON number, exactly as the value was: no quotes, no decimal point.
+        await Assert
+            .That(numberLines[0].Contains("\"Result\":42", StringComparison.Ordinal))
+            .IsTrue();
+
+        var numberReloaded = await store.LoadAsync(numberId);
+        await Assert.That(numberReloaded.Count).IsEqualTo(1);
+        var numberCompleted = numberReloaded[0] as SagaCompleted;
+        await Assert.That(numberCompleted).IsNotNull();
+        await Assert.That(numberCompleted!.Result is long).IsTrue();
+        await Assert.That(numberCompleted.Result).IsEqualTo(42L);
+        // The promotion, spelled out: it is NOT the int that went in, and a consumer matching on `int`
+        // over a rebuilt corpus finds nothing.
+        await Assert.That(numberCompleted.Result is int).IsFalse();
+
+        // ── 4. a runtime type with no JSON form fails LOUDLY, and writes nothing ─────────────────
+        var refusedId = Guid.NewGuid();
         var error = await CaptureAsync(async () =>
         {
-            _ = await store.AppendAsync(otherId, 0, [new SagaCompleted("boom")]);
+            _ = await store.AppendAsync(refusedId, 0, [new SagaCompleted(new object())]);
         });
 
-        // "Loud" is pinned, not merely observed: the failure is one of the two documented shapes — a
-        // FormatException for a payload that does not fit the tag, an InvalidOperationException for a
+        // "Loud" is pinned, not merely observed: the failure is one of the two documented shapes — the
+        // serializer's FormatException for a value with no JSON form, an InvalidOperationException for a
         // missing serializer — and it NAMES the event. A bare `error is not null` would accept any
         // exception at all, including a NullReferenceException from this store, which is exactly the
         // regression this assertion is here to refuse.
@@ -283,9 +350,7 @@ public sealed class BoundEventWriteTests
         // WHOSE failure is it (I2): the WRITE leg's, and the remedy has to say so. Both legs share one
         // wrapper, and the READ leg's advice — "check that the file holds lines this store wrote" — was
         // being handed to a caller who is MID-APPEND: there is no line and there is no file, so that
-        // sentence sends the operator looking for something this failure never created. The two legs
-        // fail for different reasons (this one is the type's own output, blocked before a byte moves),
-        // so one wording cannot serve both.
+        // sentence sends the operator looking for something this failure never created.
         await Assert
             .That(
                 error.Message.Contains(
@@ -297,8 +362,10 @@ public sealed class BoundEventWriteTests
         await Assert
             .That(error.Message.Contains("could not be written", StringComparison.Ordinal))
             .IsTrue();
-        await Assert.That(File.Exists(StreamPath(temp.Root, otherId))).IsFalse();
-        await Assert.That(await store.GetVersionAsync(otherId)).IsEqualTo(0UL);
+
+        // Nothing was written: no line, no file, no version.
+        await Assert.That(File.Exists(StreamPath(temp.Root, refusedId))).IsFalse();
+        await Assert.That(await store.GetVersionAsync(refusedId)).IsEqualTo(0UL);
     }
 
     // ── The zero-member payload: the splice must not leave a dangling separator (D2) ───────────────
