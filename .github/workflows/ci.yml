@@ -147,9 +147,17 @@ jobs:
       # above, and this step only adds RID-specific runtime packs, so a float bump can
       # never slip in here. The rewritten lock stays on the runner — it is never
       # committed, and a committed RID group would be rejected by the locked restore.
+      #
+      # -f net10.0 is REQUIRED, not cosmetic: the sample is multi-targeted
+      # (net10.0;net11.0), and `dotnet publish` on a multi-targeted project without
+      # an explicit framework fails with NETSDK1129 "the project does not have a
+      # single target framework". Pinning the framework also keeps the published
+      # artifact byte-identical to the pre-multi-target one (net10.0 AOT), so the
+      # native smoke run below still validates the same code path.
       - name: AOT publish (Counter sample)
         run: >
           dotnet publish samples/PicoActor.Sample/PicoActor.Sample.csproj
+          -f net10.0
           -c Release -r ${{ matrix.rid }}
           --self-contained
           -o publish/${{ matrix.rid }}

@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <!-- A plain library, not a test host: it carries the [Test] conformance base that store
          test projects inherit. TUnit's props would otherwise force OutputType=Exe and
          IsTestProject=true, so both are re-declared here (props are imported before the body). -->

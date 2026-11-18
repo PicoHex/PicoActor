@@ -79,6 +79,85 @@
           "PicoMediator.Abs": "2026.11.1"
         }
       }
+    },
+    "net11.0": {
+      "Microsoft.DotNet.ILCompiler": {
+        "type": "Direct",
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "lw6gUL92db6XPwYsQwaGwrJxgRM0X0qQKl0QkwuZIACMtgH0eFu6jmq6W+/L8qTxQZwggfV/dGjICyMqVHdehg=="
+      },
+      "Microsoft.NET.ILLink.Tasks": {
+        "type": "Direct",
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "gK2aq4XvChj5kvozpPHrkfKkr7zc5Z4xoTrJb4GPZzDEPMlCk0TX632bwY3LsWcX2UVcVRQBBGzsBGC2lq6YhA=="
+      },
+      "Microsoft.SourceLink.GitHub": {
+        "type": "Direct",
+        "requested": "[11.0.*, )",
+        "resolved": "11.0.100",
+        "contentHash": "aBHHGAxLog2OC1nbXyCFyfy1lG9qwYO/COBPc/5cJEqbXpiznmz+wxLU+TVrI+2LzQYFSKpn7pk+RHtx9eHe9w==",
+        "dependencies": {
+          "Microsoft.Build.Tasks.Git": "11.0.100",
+          "Microsoft.SourceLink.Common": "11.0.100",
+          "System.IO.Hashing": "11.0.0"
+        }
+      },
+      "PicoDI.Abs": {
+        "type": "Direct",
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "xehIWfCaRpVzFWxvg3C7/65pqkpD/mY4b2S4dwk4H2hWQNbZNe1/ZAFhEvre7OyI2srI6WRjJGPCElSVgEHIFA=="
+      },
+      "PicoLog.Abs": {
+        "type": "Direct",
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "58IIOrC5CUXtDpHplyNo9juFJ81sXyOLweAHB8PFKAHbx0NEKXXqjWH7osrAHlnfygs4U/oL2VSJV3/vXMbe4w=="
+      },
+      "PicoMediator.Abs": {
+        "type": "Direct",
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "cWush6YBacYDs0wHC07mm2WjwgHZDglUGEDVb/9ILG1ugSfcZQJM6QZkn9E02WjHR2eSRRWwkqAn9NI5/ukHKw=="
+      },
+      "Microsoft.Build.Tasks.Git": {
+        "type": "Transitive",
+        "resolved": "11.0.100",
+        "contentHash": "juE7HH7MfWolKodshqdxaJjFK3A4wp/UqMN69sVtBBU2hT2Bs1vwjAy0dwdsIUFlff0jEOqT7qcXQiD8l3+z3A==",
+        "dependencies": {
+          "System.IO.Hashing": "11.0.0"
+        }
+      },
+      "Microsoft.SourceLink.Common": {
+        "type": "Transitive",
+        "resolved": "11.0.100",
+        "contentHash": "7BbbX7EWxjEEU1Evc5hPF7aoncC/qq0avTgyUQN7fXXexWbfy4PgDFd35U90wdomwBGkn1zaYTW7kdwxiVdtnQ=="
+      },
+      "System.IO.Hashing": {
+        "type": "Transitive",
+        "resolved": "11.0.0",
+        "contentHash": "U+Bv2qCYt6eONi+arSP0QIp4uTO6os6uceBsqiAwruZ+Wo2HrRhO/0tj38M9URJtS+4DhAtT3ka2TGNFYsnhyQ=="
+      },
+      "picoactor.abs": {
+        "type": "Project",
+        "dependencies": {
+          "PicoDI.Abs": "[2026.11.*, )",
+          "PicoMediator": "[2026.11.*, )",
+          "PicoMediator.Abs": "[2026.11.*, )"
+        }
+      },
+      "PicoMediator": {
+        "type": "CentralTransitive",
+        "requested": "[2026.11.*, )",
+        "resolved": "2026.11.1",
+        "contentHash": "5opsTZgQ5pJm/8OhMq48Vczuxtspjhufa4QBWJHmjBAUmGwI0O41tftTcJhG/wYGdDOeQV1HIp9BAJNR/NvrBQ==",
+        "dependencies": {
+          "PicoDI.Abs": "2026.11.1",
+          "PicoMediator.Abs": "2026.11.1"
+        }
+      }
     }
   }
 }
