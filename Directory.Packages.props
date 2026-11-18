@@ -62,6 +62,12 @@
     <PackageVersion Include="PicoDI" Version="2026.11.*" />
     <PackageVersion Include="PicoDI.Abs" Version="2026.11.*" />
     <PackageVersion Include="PicoLog.Abs" Version="2026.11.*" />
+    <!-- A FLOAT CAN CATCH A PUBLISH IN FLIGHT. PicoMediator 2026.11.2 appeared on the feed before its
+         own dependency PicoMediator.Abs 2026.11.2 finished propagating, and one CI leg restored inside
+         that window and failed NU1107 (a version conflict that resolves itself minutes later). The
+         answer is to retry, NOT to narrow the band: an upper bound added for a few minutes of upstream
+         lag would hold us below a perfectly good version forever, which is the pinning this policy
+         exists to remove. -->
     <PackageVersion Include="PicoMediator" Version="2026.11.*" />
     <PackageVersion Include="PicoMediator.Abs" Version="2026.11.*" />
     <PackageVersion Include="PicoMediator.DI" Version="2026.11.*" />
