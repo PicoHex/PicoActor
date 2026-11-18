@@ -444,11 +444,17 @@ le total).
   (`unknown-<id>.jsonl`, catégorisation propre à un hôte) est **joignable par id**, invisible pour l'énumération par type, jamais compté dans `ForeignFormatFiles` et
   ne déclenche jamais le throw sur tout le répertoire. Un préfixe ne contient pas de `-` ; des noms courts
   identiques partagent un préfixe.
-- **`SagaCompleted.Result` est `object?` — et son sérialiseur ne sait pas écrire de valeur non nulle** (le
-  writer généré n'écrit que le nom du membre, pas de valeur). `null` — la seule forme qu'un **store
-  persistant** accepte aujourd'hui — fait l'aller-retour ; toute autre valeur échoue sur place et n'écrit pas
-  un octet. `MarkComplete(result)` avec un résultat non nul ne peut pas être persisté : le lot terminal lève
-  et rien n'est écrit. Gardez `Result` à `null` dans un store persistant.
+- **`SagaCompleted.Result` est `object?` — et il est persisté.** Le writer généré répartit sur le type
+  **d'exécution** : ce qu'un store persistant conserve est ce que la valeur était. `null` devient
+  `{"Result":null}` et se relit `null` ; une `string` ou un `bool` fait l'aller-retour tel quel ; un
+  **entier se relit en `long`** (écrivez `7`, relisez `7L` — un seul type de nombre JSON, 64 bits, donc
+  toutes les sortes d'entiers s'y rejoignent ; cet élargissement est un comportement documenté, pas un
+  défaut). Un type d'exécution pour lequel la chaîne any-value n'a **aucune forme JSON** — un simple
+  `new object()`, par exemple — est refusé **avant qu'un octet ne soit écrit** : le lot terminal lève
+  `FormatException` (« has no JSON form in the any-value chain; write it with a concrete member type or a
+  custom converter ») et ne laisse ni fichier ni version. `MarkComplete(result)` avec un résultat `null`,
+  `string`, `bool` ou entier est donc persisté et rejoué ; pour plus riche, mettez la structure dans un
+  événement métier de votre propre base et gardez `Result` dans ces formes.
 - **Règles d'enregistrement.** Les liaisons vivent sur l'instance d'options —
   `options.EventTypeBindings.Add<T>(tag)` **avant** de construire le store : le constructeur **gèle et copie**
   la table, donc un `Add` ultérieur lève au lieu d'être ignoré en silence. Un type a exactement un tag et un

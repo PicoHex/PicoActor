@@ -444,11 +444,18 @@ Defaults, `0…2`, `RegisteredCount` die Gesamtzahl).
   (`unknown-<id>.jsonl`, die eigene Kategorisierung eines Hosts) **per id** erreichbar, in der Typ-Enumeration unsichtbar, zählt nie in
   `ForeignFormatFiles` und löst nie den Verzeichnis-weiten Throw aus. Ein Präfix enthält kein `-`; gleiche
   Kurznamen teilen sich ein Präfix.
-- **`SagaCompleted.Result` ist `object?` — und der Serializer kann einen Nicht-null-Wert gar nicht
-  schreiben** (der generierte Writer schreibt nur den Membernamen, keinen Wert). `null` — die einzige Form,
-  die ein **persistenter Store** heute akzeptiert — geht hin und zurück; alles andere scheitert sofort und
-  schreibt kein Byte. `MarkComplete(result)` mit einem Nicht-null-Ergebnis lässt sich nicht persistieren:
-  der Terminal-Batch wirft und schreibt nichts. In einem persistenten Store `Result` auf `null` halten.
+- **`SagaCompleted.Result` ist `object?` — und wird persistiert.** Der generierte Writer entscheidet nach
+  dem **Laufzeittyp**: Was ein persistenter Store behält, ist das, was der Wert war. `null` wird zu
+  `{"Result":null}` und liest sich als `null` zurück; ein `string` oder ein `bool` geht als solcher hin
+  und zurück; eine **Ganzzahl liest sich als `long`** zurück (`7` schreiben, `7L` lesen — ein einziger
+  JSON-Zahlentyp, 64 Bit, dort treffen sich alle Ganzzahlarten; diese Erweiterung ist dokumentiertes
+  Verhalten, kein Fehler). Ein Laufzeittyp, für den die any-value-Kette **keine JSON-Form** hat — etwa ein
+  schlichtes `new object()` —, wird **abgelehnt, bevor ein Byte geschrieben wird**: der Terminal-Batch
+  wirft `FormatException` („has no JSON form in the any-value chain; write it with a concrete member type
+  or a custom converter“) und hinterlässt keine Datei, keine Version. `MarkComplete(result)` mit einem
+  `null`-, `string`-, `bool`- oder Ganzzahl-Ergebnis wird damit persistiert und spielt wieder ab; für
+  alles Reichere gehört die Struktur in ein Business-Event deiner eigenen Basis, und `Result` bleibt bei
+  diesen Formen.
 - **Regeln der Registrierung.** Bindungen liegen auf der options-Instanz —
   `options.EventTypeBindings.Add<T>(tag)` **vor** dem Konstruieren des Stores: Der Konstruktor **friert die
   Tabelle ein und kopiert sie**, ein späteres `Add` wirft also, statt still ignoriert zu werden. Ein Typ hat

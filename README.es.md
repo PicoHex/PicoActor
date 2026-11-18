@@ -438,11 +438,17 @@ enruta los eventos del framework al mismo store: el framework pre-registra
   (`unknown-<id>.jsonl`, categorización propia de un host) es **alcanzable por id**, invisible a la enumeración por tipo, nunca cuenta en `ForeignFormatFiles` y nunca
   dispara el throw de todo el directorio. Un prefijo no contiene `-`; nombres cortos iguales comparten
   prefijo.
-- **`SagaCompleted.Result` es `object?` — y su serializador no sabe escribir ningún valor distinto de
-  null** (el writer generado escribe solo el nombre del miembro, sin valor). `null` — la única forma que un
-  **store persistente** acepta hoy — hace ida y vuelta; cualquier otra cosa falla en el acto y no escribe un
-  solo byte. `MarkComplete(result)` con un resultado no nulo no se puede persistir: el lote terminal lanza y
-  no se escribe nada. En un store persistente, mantén `Result` en `null`.
+- **`SagaCompleted.Result` es `object?` — y se persiste.** El writer generado reparte según el tipo
+  **en ejecución**: lo que un store persistente conserva es lo que el valor era. `null` se convierte en
+  `{"Result":null}` y se relee como `null`; una `string` o un `bool` hace ida y vuelta tal cual; un
+  **entero se relee como `long`** (escribe `7`, relee `7L` — un solo tipo de número JSON, 64 bits, así que
+  todas las clases de entero se encuentran ahí; ese ensanchamiento es comportamiento documentado, no un
+  fallo). Un tipo en ejecución para el que la cadena any-value **no tiene forma JSON** — un simple
+  `new object()`, por ejemplo — se rechaza **antes de que se escriba un byte**: el lote terminal lanza
+  `FormatException` («has no JSON form in the any-value chain; write it with a concrete member type or a
+  custom converter») y no deja ni archivo ni versión. `MarkComplete(result)` con un resultado `null`,
+  `string`, `bool` o entero, por tanto, se persiste y se reproduce; para algo más rico, pon la estructura
+  en un evento de negocio de tu propia base y mantén `Result` en esas formas.
 - **Reglas de registro.** Las ataduras viven en la instancia de opciones —
   `options.EventTypeBindings.Add<T>(tag)` **antes** de construir el store: el constructor **congela y copia**
   la tabla, así que un `Add` posterior lanza en vez de ignorarse en silencio. Un tipo tiene exactamente un tag

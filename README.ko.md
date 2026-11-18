@@ -420,11 +420,16 @@ saga 스트림에는 직렬화기가 한 번도 본 적 없는 타입이 들어�
   프리픽스 밖의 이름(`unknown-<id>.jsonl`, 호스트 자체 분류)은 **id 로 접근 가능**하고 타입 열거에는 보이지 않으며,
   `ForeignFormatFiles` 에 세어지지 않고 디렉터리 전체 예외도 일으키지 않습니다. 프리픽스에는 `-` 가 없고,
   같은 짧은 이름은 같은 프리픽스를 공유합니다.
-- **`SagaCompleted.Result` 는 `object?` 이며, 직렬화기는 비-null 값을 아예 쓸 수 없습니다**(생성된 writer 가
-  멤버 이름만 쓰고 값을 쓰지 않습니다). `null`——**영속 store** 가 오늘 받아들이는 유일한 형태——은 정상적으로
-  왕복합니다. 그 밖의 값은 그 자리에서 실패하고 한 바이트도 쓰지 않습니다. 비-null 결과를 담은
-  `MarkComplete(result)` 는 영속화할 수 없습니다——종단 배치가 예외가 되고 아무것도 쓰이지 않습니다. 영속
-  store 에서는 `Result` 를 `null` 로 유지하세요.
+- **`SagaCompleted.Result` 는 `object?` 이며, 이제 영속화됩니다.** 생성된 writer 는 **런타임** 타입으로
+  분기하므로, 영속 store 가 보관하는 것은 값이 원래 무엇이었는지 그대로입니다. `null` 은
+  `{"Result":null}` 로 쓰이고 `null` 로 읽힙니다. `string` 이나 `bool` 은 자기 자신 그대로 왕복합니다.
+  **정수는 `long` 으로 읽힙니다**(`7` 을 쓰고 `7L` 을 읽습니다 — JSON 숫자 타입은 64비트 하나뿐이라 모든
+  정수 종류가 거기서 만납니다. 이 확장은 문서화된 동작이며 결함이 아닙니다). any-value 체인에 **JSON
+  형태가 없는** 런타임 타입 — 예컨대 평범한 `new object()` — 은 **한 바이트도 쓰기 전에 거부**됩니다.
+  종단 배치가 `FormatException`("has no JSON form in the any-value chain; write it with a concrete member
+  type or a custom converter")을 던지고 파일도 버전도 남기지 않습니다. 따라서 `null`, `string`, `bool`
+  또는 정수 결과를 담은 `MarkComplete(result)` 는 영속화되고 재생됩니다. 그보다 복잡한 것은 구조를
+  자신의 기반 타입 비즈니스 이벤트에 넣고 `Result` 는 위 형태들로 유지하세요.
 - **등록 규칙.** 바인딩은 options 인스턴스에 있습니다——store 를 생성하기 **전에**
   `options.EventTypeBindings.Add<T>(tag)` 를 호출합니다. 생성자는 이 표를 **동결하고 복사**하므로, 이후의
   `Add` 는 조용히 무시되지 않고 예외가 됩니다. 한 타입에는 tag 가 하나, 한 tag 는 타입 하나만 가리킵니다

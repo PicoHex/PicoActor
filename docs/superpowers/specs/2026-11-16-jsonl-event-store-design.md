@@ -1,4 +1,4 @@
-# Generic JSONL event store — design (rev 5 + stream-naming delta + event-type-binding delta)
+# Generic JSONL event store — design (rev 5 + stream-naming delta + event-type-binding delta + `object?` delta)
 
 **Rev-6 delta — event type bindings (`EventTypeBindings`).** Added after the rev-5 / naming round and
 marked inline where it applies: §Public surface (`EventTypeBindings` + the option property),
@@ -7,6 +7,14 @@ outside `TEventBase`** writable and readable — the framework's own `SagaComple
 because `SagaActor` persists them into the aggregate's stream in the same flush — and it is **additive
 on the wire**: a stream of `TEventBase` events is byte-identical to rev 5, an unrecognised `$type` still
 takes the `TEventBase` path, and the table is empty until a consumer or the store puts something in it.
+
+**Rev-7 delta — `object?` members (`SagaCompleted.Result`, PicoJetson 2026.14.0).** Added after the
+rev-6 round and marked inline where it applies: §Failure policy «`object?` results» and §Testing (`Bnd15`).
+It is a **serializer** delta, not a store one: the line format, the bindings and the naming are untouched,
+and a `null` result is byte-identical to rev 5. What changes is that a `SagaCompleted.Result` no longer has
+to be `null` — the generated writer dispatches on the runtime type now — so the old «must be null» rule is
+replaced by the fidelity the any-value chain can offer, and the loud failure the store owes survives for
+the types that chain cannot express.
 
 **Rev-5 delta — stream naming (`FileNameFormat`).** Added after the round-5 fixes and marked
 inline where it applies: §Intent (the rename is gone), §File layout «Name layouts», §Failure
@@ -505,6 +513,33 @@ refuses at its FIRST bound write — with no file created and no silent substitu
 - **No alias layer.** The two framework tags are permanent wire format. A consumer binding may REPLACE a
   default (and then writes its own tag), but the store never rewrites, translates or guesses a tag.
 
+### `object?` results (rev-7 delta: PicoJetson 2026.14.0)
+
+`SagaCompleted.Result` is `object?`. Rev 5 had to state the worst case — a durable store accepted **`null`
+only**, because the 2026.13 writer emitted the member with no value and the reader assigned `default!` to
+the constructor parameter. PicoJetson 2026.14.0 writes the member by dispatching on the value's **runtime**
+type, so the store inherits a fidelity contract instead of a prohibition. This is the contract; a store
+outside it is a store on a serializer below 2026.14.0.
+
+| `Result` written | Line on disk | Reads back as | Runtime type |
+|---|---|---|---|
+| `null` | `{"Result":null}` | `null` | — |
+| `"boom"` | `{"Result":"boom"}` | `"boom"` | `string` |
+| `true` | `{"Result":true}` | `true` | `bool` |
+| `42L`, or any integer kind (`7`) | `{"Result":42}` / `{"Result":7}` | `42` / `7` | `long` — the documented widening: JSON has one 64-bit number type |
+| a runtime type the chain has no JSON form for (`new object()`) | — nothing is written — | — | `FormatException` at encode, **before** the first byte |
+
+- **The refusal is the store's obligation, unchanged.** An unrepresentable runtime type is not coerced
+  with `ToString()`: the terminal batch throws `FormatException` and the store writes **no file, no
+  version** — the same outcome rev 5 pinned for every non-null value, now narrowed to the types the
+  chain cannot express and carrying a remedy («a concrete member type or a custom converter»).
+- **Integer kinds are not recoverable from the line.** One JSON number type, 64 bits: `7` written as an
+  `int` reads back `7L`. Typed payloads — and the original kind — belong in a business event of the
+  consumer's own base; `Result` carries `null`, `string`, `bool` or an integer.
+- **Nothing else moved.** The line of a `null` result is byte-identical (`{"$type":"PicoActorSagaCompleted",
+  "Result":null}`), the tag, the binding and the stream name are the same, and Bnd0's generation tripwire
+  still observes the framework serializers through a closed call site in another class.
+
 ## Rebuild cost
 
 `OpenAsync(v + 1)` scans the file's bytes (page cache) to locate the offset and then deserializes
@@ -722,12 +757,17 @@ number; element and flush counts, the exact bytes on disk, and the log are the o
 - **Bnd10 — the naming format changes a name, never a line** (`Bnd10_IdOnly_And_TypePrefix_Agree`): the
   same mixed batch written under `IdOnly` and under `TypePrefix` (separate roots) produces byte-identical
   streams and the same version.
-- **Bnd15 — `Result` is `null`, or nothing is written**
-  (`Bnd15_NullResult_RoundTrips_NonNullFailsLoudly`): `SagaCompleted(null)` writes the corpus line and
-  decodes back through the CONCRETE deserializer, reached as a method group so this assembly generates
-  nothing and Bnd0's tripwire stays blind. A non-null `Result` is blocked UPSTREAM by PicoJetson's writer,
-  and the test pins what the store owes: a loud failure with **no stream, no version**. It goes red on
-  purpose the day the serializer learns untyped members.
+- **Bnd15 — `Result` round-trips, and what cannot be represented still fails loudly** (rev-7 delta;
+  `Bnd15_Result_RoundTrips_UnrepresentableFailsLoudly`): every case decodes back through the CONCRETE
+  deserializer, reached as a method group so this assembly generates nothing and Bnd0's tripwire stays
+  blind. `SagaCompleted(null)` writes the corpus line (`{"Result":null}`) and reads `null`;
+  `SagaCompleted("boom")` writes `{"Result":"boom"}` and reads `"boom"`; a `bool` comes back a `bool`; an
+  integer result writes a bare JSON number and reads back a **`long`** (the documented widening, asked for
+  as `long` because that is what the chain produces). A runtime type the any-value chain has no JSON form
+  for (`new object()`) is still refused UPSTREAM, before any byte is written, and the test pins what the
+  store owes there: a loud failure with **no stream, no version** and a message that carries the remedy.
+  The case was written to go red the day the serializer learned untyped members; that day is PicoJetson
+  2026.14.0, and the half that flipped is exactly the half that said «non-null is blocked».
 
 #### `BoundEventReadTests.cs` — the read path
 

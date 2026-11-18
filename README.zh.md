@@ -388,10 +388,14 @@ var system = new ActorSystem(new ActorSystemOptions { EventStore = store });
 - **命名。** 两个框架 tag 就是生产语料已有的 tag，是永久线格式（无 alias）。流仍按首事件的 CLR 短名命名；
   在 `TypePrefix` 下，落在所有已注册**类型**前缀之外的名字（`unknown-<id>.jsonl`，宿主自己的分类）**按 id 可达**、按类型枚举不可见、
   不计入 `ForeignFormatFiles`、也不会触发整目录抛。前缀不含 `-`；同短名共用一个前缀。
-- **`SagaCompleted.Result` 是 `object?`，而序列化器根本写不出非 null 的值**（生成的 writer 只写出成员名、
-  不写值）。`null`——**持久化存储**今天唯一接受的形状——能正常往返；其它任何值都会当场失败，且一个字节也
-  不会写入。带非 null 结果的 `MarkComplete(result)` 无法持久化：终态批次直接抛，什么都不会写入。
-  持久化存储里请让 `Result` 保持 `null`。
+- **`SagaCompleted.Result` 是 `object?`，而且现在可以持久化。** 生成的 writer 按**运行时**类型派发，
+  所以持久化存储保留的就是值原本的样子：`null` 写成 `{"Result":null}`、读回 `null`；`string` 或 `bool`
+  原样往返；**整数读回是 `long`**（写 `7`、读回 `7L`——JSON 数字类型只有一个 64 位类型，各种整数都汇到
+  那里；这个提升是文档化行为，不是缺陷）。any-value 链**没有 JSON 形态**的运行时类型——比如一个普通的
+  `new object()`——会在**写出任何一个字节之前被拒绝**：终态批次抛出 `FormatException`（"has no JSON form
+  in the any-value chain; write it with a concrete member type or a custom converter"），既不留文件，
+  也不留版本。因此带 `null`、`string`、`bool` 或整数结果的 `MarkComplete(result)` 可以持久化并回放；
+  更复杂的结构请放进你自己基类的业务事件，让 `Result` 保持上面这几种形态。
 - **注册规则。** 绑定挂在 options 实例上——在构造 store **之前**调用
   `options.EventTypeBindings.Add<T>(tag)`：构造函数会**冻结并拷贝**这张表，之后的 `Add` 会抛异常，而不是被
   静默忽略。一个类型只有一个 tag，一个 tag 只命名一个类型（同一对重复调用是 no-op，但仅限**冻结前**；

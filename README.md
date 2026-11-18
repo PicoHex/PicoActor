@@ -416,11 +416,17 @@ is how many defaults were actually applied, `0…2`, and `RegisteredCount` is th
   a name outside every registered *type* prefix (`unknown-<id>.jsonl`, a host's own categorisation) is
   reachable **by id**, invisible to type enumeration, never counted `ForeignFormatFiles` and never
   triggers the whole-directory throw. A prefix contains no `-`; equal short names share one prefix.
-- **`SagaCompleted.Result` is `object?`, and the serializer cannot write a non-null value at all** (the
-  generated writer emits the member with no value). `null` — the only shape a **durable store** accepts
-  today — round-trips; anything else fails loudly and writes nothing. `MarkComplete(result)` with a
-  non-null result cannot be persisted: the terminal batch throws and nothing is written. Keep `Result`
-  null in a persistent store.
+- **`SagaCompleted.Result` is `object?` — and it is persisted.** The generated writer dispatches on the
+  **runtime** type, so what a durable store keeps is what the value was: `null` becomes
+  `{"Result":null}` and reads back `null`; a `string` or a `bool` round-trips as itself; an **integer
+  reads back as `long`** (write `7`, read back `7L` — one JSON number type, 64-bit, so every integer
+  kind meets there, and that widening is the documented behaviour, not a bug). A runtime type the
+  any-value chain has **no JSON form for** — a plain `new object()`, say — is refused **before a byte
+  is written**: the terminal batch throws `FormatException` ("has no JSON form in the any-value chain;
+  write it with a concrete member type or a custom converter") and leaves no file, no version behind.
+  `MarkComplete(result)` with a `null`, `string`, `bool` or integer result therefore persists and
+  replays; for anything richer, put the structure in a business event of your own base and keep
+  `Result` to those forms.
 - **Registration rules.** Bindings live on the options instance — `options.EventTypeBindings.Add<T>(tag)`
   before the store is constructed: the constructor **freezes and copies** the table, so a later `Add`
   throws instead of being silently ignored. One type has exactly one tag and one tag names exactly one
