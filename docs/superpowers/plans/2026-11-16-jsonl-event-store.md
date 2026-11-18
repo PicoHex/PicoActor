@@ -1,5 +1,16 @@
 # JSONL event store + store-family move — implementation plan (rev 3)
 
+> **SUPERSEDED — lock files (2026-11-18, commit `7bff365`).** This plan is a historical record of how
+> the work was done. Its steps tell the implementer to "commit its updated `packages.lock.json`" and
+> state "CI uses locked restore"; **that policy was reversed after the work landed.** A
+> `packages.lock.json` is now a LOCAL RECORD: every restore writes it, `.gitignore` keeps it out of the
+> tree, it is never committed and never reviewed, and CI runs no locked restore at all (the resolved
+> versions leave each run as the `resolved-versions` artifact). Where this plan and the current
+> `Directory.Packages.props` / `ci.yml` disagree about lock files, the current files win.
+>
+> The lock-file instructions inside the steps are annotated in place below ("restore it, do not commit
+> it") rather than rewritten, so the record of the original decision stays readable.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship `PicoActor.EventStore.Jsonl` (a generic, AOT/source-generated JSONL event store) and move `InMemoryEventStore` into `PicoActor.EventStore.InMemory`, so the core package carries no concrete store.
@@ -19,7 +30,7 @@
 - Append order: read-only witness (also for empty batches) → `expectedVersion` → torn-tail truncate → **one** `WriteAsync` → `FlushAsync(CancellationToken.None)` → update cache. A rejected append never changes content (a missing stream may be left as a zero-length file).
 - Torn tail (unterminated final line) ignored; a **terminated** bad line throws; corruption is not repaired.
 - Count/`End`/`GetVersionAsync` come from one byte scan (line count, no JSON validation).
-- Build 0 warnings; `dotnet csharpier format` touched files before each commit; every new project and every existing project whose references change commits its updated `packages.lock.json` (CI uses locked restore).
+- Build 0 warnings; `dotnet csharpier format` touched files before each commit; a project whose references changed only needs a `dotnet restore` — the `packages.lock.json` a restore writes is a local, gitignored record and is **not** committed (there is no locked restore in CI; see the Superseded note above).
 - **Do not pre-refresh `api/*.public.txt`**; `scripts/release.ps1` refreshes it at release time.
 - Test arithmetic: `PicoActor.Tests` **229 → 230** (Task 2b: +2 −1) **→ 213** (Task 2c moves 17 out); `PicoActor.EventStore.InMemory.Tests` **17 at Task 2c** (the base still has 12 cases) **→ 18** after Task 3a adds one conformance case; `PicoActor.Abs.Tests` **51** unchanged.
 
@@ -63,7 +74,7 @@ Documented, not testable in-repo: PicoAgent adoption (file rename, second codec,
 
 - [ ] **Step 1:** project: `net10.0`, `IsTestProject=false`, `PackageReference` TUnit **and PicoJetson** with `PrivateAssets="none"` (spelled out: the default `contentfiles;analyzers;build` cuts the generator and `build/PicoJetson.targets` off — this project is a registration consumer, so it needs both), `ProjectReference` to `PicoActor.Abs` only.
 - [ ] **Step 2:** move the base (namespace `PicoActor.TestSupport`); seed: `public abstract record ConformanceEvent : IDomainEvent` with `[PicoDerivedType(typeof(SSnapshotAdded), "ss-added")]`; `public sealed record SSnapshotAdded(int Delta) : ConformanceEvent` (name kept — `RebuildReaderPathTests.cs:280` uses it).
-- [ ] **Step 3:** `PicoActor.Tests` references TestSupport; add `global using PicoActor.TestSupport;`; delete the local declarations. Run `dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-progress` → **229/229**; `dotnet restore` the project and commit its updated `packages.lock.json` (TestSupport now brings PicoJetson transitively).
+- [ ] **Step 3:** `PicoActor.Tests` references TestSupport; add `global using PicoActor.TestSupport;`; delete the local declarations. Run `dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-progress` → **229/229**; `dotnet restore` the project so its local `packages.lock.json` record picks up the new transitive PicoJetson (the file is gitignored: restore it, do not commit it).
 - [ ] **Step 4: Commit** `git add tests/PicoActor.TestSupport tests/PicoActor.Tests && git commit -m "test: share the conformance base and a polymorphic seed event"`.
 
 ---
@@ -76,8 +87,8 @@ Documented, not testable in-repo: PicoAgent adoption (file rename, second codec,
 
 - [ ] **Step 1:** csproj: `PackageId=PicoActor.EventStore.InMemory`, `IsPackable=true`, `PackageReadmeFile`, `..\..\README.md`, tags `PicoHex;PicoActor;AOT;In-memory event store`, dual `UseProjectReferences` item groups for `PicoActor.Abs` (no `PicoLog.Abs`/`PicoDI.Abs`: the file has no logger; DI comes from Abs).
 - [ ] **Step 2:** `git mv src/PicoActor/InMemoryEventStore.cs src/PicoActor.EventStore.InMemory/`; namespace update; add `GlobalUsings.cs` (`global using System.Collections.Concurrent;` + `global using PicoActor.Abs;` — `ConcurrentDictionary` is not in implicit usings); no behaviour change.
-- [ ] **Step 3:** add the package to `PicoActor.Tests` + `samples`; `dotnet restore` both and commit their updated `packages.lock.json`; `dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-progress` → **229/229**.
-- [ ] **Step 4: Commit** (`git add` the new directory explicitly + the lock files): `git commit -m "feat(store): move the in-memory store into its own package"`.
+- [ ] **Step 3:** add the package to `PicoActor.Tests` + `samples`; `dotnet restore` both (their `packages.lock.json` records are gitignored local files, not commit content); `dotnet test --project tests/PicoActor.Tests/PicoActor.Tests.csproj --no-progress` → **229/229**.
+- [ ] **Step 4: Commit** (`git add` the new directory explicitly; the lock files stay untracked and gitignored): `git commit -m "feat(store): move the in-memory store into its own package"`.
 
 ---
 

@@ -29,11 +29,21 @@
            · Version="$(Version)" is exempt: those are the packages this repo
              releases itself, versioned by the tag, not by a feed range.
 
-         Nothing is pinned against these floats: a plain restore takes the newest
-         version inside each declared range, every time, so a patch arrives on its own
-         and needs no job at all. What a restore can never do is step OUTSIDE the range,
-         and the band itself moves only when a person moves it (the policy is "adapt our
-         code to upstream", never "hold upstream back").
+         A plain restore takes the newest version inside each declared range on a fresh
+         checkout (CI, a docker build), so a patch arrives on its own and needs no job at
+         all. What a restore can never do is step OUTSIDE the range, and the band itself
+         moves only when a person moves it (the policy is "adapt our code to upstream",
+         never "hold upstream back").
+
+         The developer machine is the narrower case and gets its own paragraph: a restore
+         that finds a stale `packages.lock.json` beside the project keeps reproducing the
+         versions recorded in it instead of re-resolving the range, and asking restore to
+         force the operation does not change that. The file is a LOCAL RECORD — gitignored,
+         never committed, never reviewed. Re-evaluating it (the force evaluate switch) or
+         working from a checkout that has no such file is what lets the float move; every
+         restore writes a fresh record as it goes, so the file exists to make a local run
+         repeatable and auditable, not to pin the build.
+
          .github/workflows/upstream-watch.yml reports a band exit, because a restore is
          silent about exactly that move. The versions a build resolved are in the
          `resolved-versions` CI artifact, not in a tracked file.

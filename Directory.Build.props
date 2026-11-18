@@ -84,11 +84,11 @@
 
        and append it to RuntimeIdentifiers so the publish-time runtime pack gets a
        restore. That single inference baked a "net10.0/win-x64" dependency group into
-       this repo's committed lock files: the lock then recorded whichever host last
-       refreshed it. CI is a five RID matrix, so a lock generated on win-x64 fails
-       locked restore on the linux/osx legs and the other way round, with NU1004
-       "the project's runtime identifiers have changed" — green on one leg, red on the
-       other, decided by whoever happened to run the refresh.
+       this repo's lock files (local records, never committed): the lock then recorded
+       whichever host last refreshed it. CI is a five RID matrix, so a lock generated
+       on win-x64 failed locked restore on the linux/osx legs and the other way round,
+       with NU1004 "the project's runtime identifiers have changed" — green on one
+       leg, red on the other, decided by whoever happened to run the refresh.
 
        Setting it to false drops the inference: RuntimeIdentifiers stays empty unless a
        RID is actually asked for, so restore resolves the same graph and writes the same
@@ -102,8 +102,12 @@
        Consequence for CI: because the solution restore is RID-neutral, a publish step
        must NOT use the no-restore flag — the assets for net10.0/<rid> are not there and
        it would fail with NETSDK1047. Each publish carries its own -r and restores that
-       RID first. (That RID restore does rewrite the lock file beside the project, but
-       only on the runner; a committed RID group is rejected by the locked restore.)
+       RID first. (That RID restore does rewrite the lock file beside the project, on
+       the runner exactly as on a developer machine, but the file is not tracked:
+       packages.lock.json is gitignored in this repo, so a rewritten record can never
+       reach a commit, a review or another host. The .gitignore entry is the only guard
+       left: there is no locked restore to reject a RID group, so nothing else in the
+       build would notice one.)
 
        (No literal double hyphen appears in this comment: XML comments may not contain
        one, and a props file that does not parse silently loses every property it

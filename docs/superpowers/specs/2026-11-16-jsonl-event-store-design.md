@@ -1,5 +1,13 @@
 # Generic JSONL event store — design (rev 5 + stream-naming delta + event-type-binding delta + `object?` delta)
 
+> **SUPERSEDED — lock files (2026-11-18, commit `7bff365`).** This design is a historical record. It
+> lists `packages.lock.json` as repo surface to be updated "for every new project (locked restore in
+> CI)"; **that policy was reversed after the work landed.** A `packages.lock.json` is now a LOCAL
+> RECORD: written by every restore, kept out of the tree by `.gitignore`, never committed, never
+> reviewed, and CI runs no locked restore at all (the resolved versions leave each run as the
+> `resolved-versions` artifact). For lock-file handling the current `Directory.Packages.props` /
+> `ci.yml` govern, not this document; the affected table cells are annotated in place below.
+
 **Rev-6 delta — event type bindings (`EventTypeBindings`).** Added after the rev-5 / naming round and
 marked inline where it applies: §Public surface (`EventTypeBindings` + the option property),
 §Failure policy «Bindings and framework events», §Testing (`Bnd0`–`Bnd21`). The delta makes a **type
@@ -112,7 +120,7 @@ PicoActor.Abs (existing: IEventStore, IEventLogReader, IEventCursor,
 | `PicoActor` (core) | keeps `ActorSystem`, options, DI; **no** concrete store |
 | `tests/PicoActor.TestSupport/` (new) | `EventLogReaderConformanceBase` + a `public abstract record ConformanceEvent : IDomainEvent` with `[PicoDerivedType(typeof(SSnapshotAdded), "ss-added")]` |
 | `tests/PicoActor.EventStore.InMemory.Tests/`, `tests/PicoActor.EventStore.Jsonl.Tests/` | split the store tests; no `EventStore.Abs.Tests` (nothing to assert in a contracts-only package) |
-| `PicoActor.slnx`, `ci.yml`, `release.yml`, `packages.lock.json` (each new project), `api/PicoActor.EventStore.*.public.txt`, `samples/`, `scripts/verify-package.sh` | see §Repo surface |
+| `PicoActor.slnx`, `ci.yml`, `release.yml`, `packages.lock.json` (each new project — a local, gitignored record since 2026-11-18; **not** committed), `api/PicoActor.EventStore.*.public.txt`, `samples/`, `scripts/verify-package.sh` | see §Repo surface |
 
 **Namespace/GlobalUsings changes**: `src/PicoActor/GlobalUsings.cs` keeps `using PicoActor.Abs;`
 (stores are referenced only where constructed); `src/**`, `tests/**`, `samples/**` that construct
@@ -834,13 +842,13 @@ These are the cases the guard revisions added, and they live in the same three f
 | `PicoActor.slnx` | the three new src projects + two new test projects (+ TestSupport) |
 | `ci.yml` | a `dotnet test --project` step per new test project; the AOT sample step keeps its 5-RID publish+run |
 | `release.yml` | explicit pack order: `PicoActor.Abs` → `PicoActor.EventStore.InMemory` → `PicoActor.EventStore.Jsonl` → `PicoActor`, each with `-p:RestoreAdditionalProjectSources=…/artifacts/nupkg` |
-| `packages.lock.json` | every new project (locked restore in CI) |
+| `packages.lock.json` | nothing to commit: every new project writes it as a local, gitignored record (no locked restore in CI — see the Superseded note) |
 | `api/PicoActor.EventStore.*.public.txt` | new packages → release.ps1 reports API changed; **do not** pre-refresh |
 | `samples/` | (a) add **both** `PicoActor.EventStore.InMemory` and `PicoActor.EventStore.Jsonl` project references; (b) add a `[PicoDerivedType]` event base (the existing sample events are bare `record : IDomainEvent` and cannot be used with the store); (c) append → rebuild to `Version == N` → open a **new** store instance and read `N` again → assert no sentinel file remains, in a temp dir that is deleted; `=== Done ===` stays the last line |
 | `scripts/verify-package.sh` | **four edits**: (1) the `pack` section adds `src/PicoActor.EventStore.InMemory`; (2) the nuspec print loop adds that package; (3) the clean loop gains `picoactor.eventstore.inmemory`; (4) the probe references **only** that package (not `PicoActor`), plus a negative probe: `PicoActor` alone + `AddPicoActor()` must throw `InvalidOperationException` — that is the publish-face proof of C2 |
 | `PicoActor.csproj` / `PicoActorDiExtensions` docs | drop "provides InMemoryEventStore"; the no-arg DI now throws without a registered store |
 | `Directory.Packages.props` | add `PicoJetson` `2026.13.*`; add `PicoActor.EventStore.InMemory` and `PicoActor.EventStore.Jsonl` at `$(Version)` (the repo's own-package convention); Gen is not in CPM (`IsPackable=false`) |
-| `Directory.Build.props` | nothing new (lock files + AOT/trimmable are automatic for packable projects) |
+| `Directory.Build.props` | nothing new (the gitignored lock record + AOT/trimmable are automatic for packable projects) |
 
 ## Documentation and versioning
 

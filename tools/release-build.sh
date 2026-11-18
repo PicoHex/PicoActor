@@ -174,14 +174,17 @@ fi
 # middle of the pack loop cannot leave a rewritten lock file behind).
 #
 # Why: `dotnet pack -p:UseProjectReferences=false` restores the project in PACKAGE
-# mode — the published shape — and that restore REWRITES the checked-in lock file
-# (project-reference entries become package references to the staged feed). It is a
-# generated artefact of packaging, not a change to keep, and it would trip the R4
-# clean-tree check below with exit 6, blaming the build for the packer's own
-# bookkeeping. scripts/verify-package.sh (283-297) snapshots the single lock file it
-# touches for exactly this reason; this script packs every packable project, so it
-# snapshots all of them. Restoration is idempotent: the success path calls it once,
-# the trap may call it again, and the second call is a no-op.
+# mode — the published shape — and that restore REWRITES the lock file (a local record,
+# gitignored, not tracked in this repo) (project-reference entries become package
+# references to the staged feed). It is a generated artefact of packaging, not a change
+# to keep. Since 2026-11-18 that file is gitignored, so a rewritten record can no longer
+# trip the R4 clean-tree check below — the snapshot/restore is kept because the record is
+# still the only evidence of "which versions did this pack resolve", and leaving a
+# PACKAGE-mode record behind would mislead the next restore on that machine.
+# scripts/verify-package.sh (283-297) snapshots the single lock file it touches for
+# exactly this reason; this script packs every packable project, so it snapshots all of
+# them. Restoration is idempotent: the success path calls it once, the trap may call it
+# again, and the second call is a no-op.
 # ─────────────────────────────────────────────────────────────────────────────
 lock_work="$(mktemp -d)" || die 5 "cannot create the lock-file backup directory"
 lock_list="${lock_work}.list"
