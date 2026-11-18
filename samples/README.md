@@ -11,5 +11,5 @@ rebuild), idempotent StopAsync — plus the saga + event-outflow part
 PicoDI/PicoMediator wiring).
 
 ```bash
-dotnet run --project samples/PicoActor.Sample
+dotnet run --project samples/PicoActor.Sample -f net10.0
 ```

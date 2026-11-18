@@ -19,7 +19,7 @@ stable test binary per run):
 
 # Full-fidelity fallback (closest to the TUnit runner; add -p:PublishAot=false
 # because the shared AOT tier sets PublishAot=true)
- dotnet run --project tests/PicoActor.Tests/PicoActor.Tests.csproj -p:PublishAot=false
+ dotnet run --project tests/PicoActor.Tests/PicoActor.Tests.csproj -f net10.0 -p:PublishAot=false
 ```
 
 > **Known MTP instability (measured):** solution-level `dotnet test PicoActor.slnx`
