@@ -31,12 +31,18 @@ namespace PicoActor.EventStore.Jsonl;
 /// every future reader — the attribute says what it means.
 /// </para>
 /// <para>
+/// <para>
+/// <see cref="PicoJsonSerializableAttribute"/> (JSON only) rather than the cross-format
+/// <c>GenerateSerializer</c>: this store writes JSON lines and nothing else, so asking the other four
+/// format generators for code would be dead weight — and it keeps the attribute in the package this
+/// project already references, instead of leaning on <c>PicoSerDe.Core</c> arriving transitively.
+/// </para>
 /// <c>Bnd0_FrameworkEventSerializer_IsGenerated</c> is the tripwire: it observes the registration from
 /// another assembly and goes red the moment this generation point disappears.
 /// </para>
 /// </summary>
-[GenerateSerializer(typeof(SagaCompleted))]
-[GenerateSerializer(typeof(SagaFailed))]
+[PicoJsonSerializable(typeof(SagaCompleted))]
+[PicoJsonSerializable(typeof(SagaFailed))]
 internal static class FrameworkEventSerializers
 {
     /// <summary>

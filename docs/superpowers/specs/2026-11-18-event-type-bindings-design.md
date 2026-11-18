@@ -239,6 +239,12 @@ clean.
 
 ### D10 — `object?` members of framework events (fidelity table)
 
+> **Superseded for 2026.11.2+.** PicoSerDe 2026.14.0 made an `object?` member reach the wire: `null`
+> round-trips, `string`/`bool` verbatim, integers read back as `long`, and a runtime type the any-value
+> chain cannot express throws before a byte is written. The table below describes **2026.11.0–2026.11.1**
+> (PicoJetson 2026.13.3) and is kept as the record of why the tripwire test exists; the shipped contract
+> is in `docs/release-notes/v2026.11.2.md`.
+
 `SagaCompleted.Result` is `object?`. PicoJetson treats `object` as a dynamic member:
 
 | Value written | Today's outcome (measured, PicoJetson 2026.13) |
