@@ -6,9 +6,11 @@ namespace PicoActor.Abs;
 /// On replay the framework recognizes this event to restore _completed and does not
 /// deliver it to the subclass Mutate.
 /// <para>
-/// <see cref="Result"/> is typed <c>object?</c> and is persisted with the event — with a
-/// persistent store this requires polymorphic serialization support; keep it a simple
-/// serializable type (record/string) as the design guidance requires.
+/// <see cref="Result"/> is typed <c>object?</c> and is persisted with the event: the generated
+/// writer dispatches on the value's runtime type, so <c>null</c>, <c>string</c> and <c>bool</c>
+/// round-trip as themselves and an integer reads back as <c>long</c>. A runtime type the
+/// any-value chain has no JSON form for throws before a byte is written — keep structured
+/// payloads in a business event of your own base.
 /// </para>
 /// </summary>
 public sealed record SagaCompleted(object? Result) : IDomainEvent;
