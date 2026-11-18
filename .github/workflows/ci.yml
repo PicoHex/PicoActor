@@ -123,7 +123,7 @@ jobs:
       # resolution, and that is exactly the run somebody needs to inspect.
       - name: Upload resolved versions (restore record)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: resolved-versions-${{ matrix.rid }}
           path: |
