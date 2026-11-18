@@ -93,24 +93,43 @@ jobs:
         shell: bash
         run: mkdir -p artifacts/nupkg
 
+      # No locked mode: nothing is committed to lock AGAINST. The declarations in
+      # Directory.Packages.props float on purpose, and the packages.lock.json a restore
+      # writes is a local record of what this leg resolved -- gitignored, never reviewed,
+      # never replayed. The record still has to survive the run, so it leaves as the
+      # `resolved-versions` artifact uploaded below.
+      #
+      # This restore is deliberately RID-NEUTRAL and must stay that way: PublishAot
+      # would otherwise have the SDK infer the host publish RID at restore time and
+      # bake a "net10.0/<host-rid>" group into the lock file beside each project
+      # (UseDefaultPublishRuntimeIdentifier=false in Directory.Build.props). Nothing is
+      # committed any more, so a RID group can no longer reach a review, but neutrality
+      # is what keeps this restore comparable with a restore on any other machine.
+      # Consequence: NO RID-specific assets are produced here, so the AOT publish below
+      # must not use the no-restore flag — it would fail with NETSDK1047 (no target for
+      # net10.0/<rid>).
       - name: Restore
-        # Locked mode: the committed packages.lock.json is authoritative, so a
-        # re-resolved graph (or a float that moved under us) FAILS here instead of
-        # silently building against versions nobody reviewed. Refreshing the lock
-        # files is the job of .github/workflows/deps-refresh.yml, not of a build.
-        #
-        # This restore is deliberately RID-NEUTRAL and must stay that way: PublishAot
-        # would otherwise have the SDK infer the host publish RID at restore time and
-        # bake a "net10.0/<host-rid>" group into the committed lock files
-        # (UseDefaultPublishRuntimeIdentifier=false in Directory.Build.props). A lock
-        # refreshed on win-x64 would then fail NU1004 "runtime identifiers have
-        # changed" on every other matrix leg. Consequence: NO RID-specific assets are
-        # produced here, so the AOT publish below must not use the no-restore flag —
-        # it would fail with NETSDK1047 (no target for net10.0/<rid>).
-        run: dotnet restore PicoActor.slnx -p:UseProjectReferences=true -p:RestoreLockedMode=true
+        run: dotnet restore PicoActor.slnx -p:UseProjectReferences=true
 
       - name: Build
         run: dotnet build PicoActor.slnx --no-restore -c Release -p:UseProjectReferences=true
+
+      # The resolved versions, as data instead of as a committed file. Restore writes
+      # `packages.lock.json` beside every project (RestorePackagesWithLockFile=true in
+      # Directory.Build.props) and .gitignore keeps it out of the tree; uploading it here
+      # is what makes "which exact versions did this build use" answerable after the
+      # runner is gone -- the one job the tracked lock used to do.
+      # `if: always()` on purpose: a leg that fails after restore still produced a
+      # resolution, and that is exactly the run somebody needs to inspect.
+      - name: Upload resolved versions (restore record)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-versions-${{ matrix.rid }}
+          path: |
+            **/packages.lock.json
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Test PicoActor.Abs
         run: dotnet test --project tests/PicoActor.Abs.Tests/PicoActor.Abs.Tests.csproj --no-build -c Release
@@ -139,14 +158,11 @@ jobs:
       # publishing would fail with NETSDK1047). Same shape as the PicoNode / PicoSerDe /
       # PicoAgent AOT steps.
       #
-      # Locked mode stays out of that implicit restore: a `-r <rid>` restore REPLACES
-      # the runtime section of the sample's packages.lock.json (it does not accumulate
-      # RIDs), so one committed lock can never cover a five-RID matrix and locked mode
-      # would fail with NU1004 "runtime identifiers have changed". Nothing is unguarded
-      # by that: the compile graph is already pinned by the locked solution restore
-      # above, and this step only adds RID-specific runtime packs, so a float bump can
-      # never slip in here. The rewritten lock stays on the runner — it is never
-      # committed, and a committed RID group would be rejected by the locked restore.
+      # That implicit restore REPLACES the runtime section of the sample's
+      # packages.lock.json (it does not accumulate RIDs), which is now simply what a
+      # local record looks like: the file is not compared against anything. It stays on
+      # the runner because .gitignore keeps it out of the tree, so no commit can carry a
+      # `net10.0/<rid>` group.
       #
       # -f net10.0 is REQUIRED, not cosmetic: the sample is multi-targeted
       # (net10.0;net11.0), and `dotnet publish` on a multi-targeted project without

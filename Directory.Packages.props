@@ -29,20 +29,22 @@
            · Version="$(Version)" is exempt: those are the packages this repo
              releases itself, versioned by the tag, not by a feed range.
 
-         Reproducibility comes from the lock files, not from pinning: every project
-         ships a committed packages.lock.json (RestorePackagesWithLockFile in
-         Directory.Build.props) and CI restores with RestoreLockedMode=true, so a
-         float is held to exactly what was reviewed. .github/workflows/deps-refresh.yml
-         is the only path that re-resolves the floats (a force-evaluate restore plus a
-         PR), which is what makes a float actually move instead of freezing.
-         Dependabot groups them: see .github/dependabot.yml.
+         Nothing is pinned against these floats: a plain restore takes the newest
+         version inside each declared range, every time, so a patch arrives on its own
+         and needs no job at all. What a restore can never do is step OUTSIDE the range,
+         and the band itself moves only when a person moves it (the policy is "adapt our
+         code to upstream", never "hold upstream back").
+         .github/workflows/upstream-watch.yml reports a band exit, because a restore is
+         silent about exactly that move. The versions a build resolved are in the
+         `resolved-versions` CI artifact, not in a tracked file.
+         Dependabot groups the declarations: see .github/dependabot.yml.
 
          Known consequence of floating PicoDI.Abs / PicoLog.Abs / PicoMediator.Abs:
          each ships an analyzers/dotnet/cs dll, so a y release can change emitted
          generated code even when the public API did not. The rule still floats them
          (the promise is about the API and the source generator is where the ecosystem
-         ships its fixes); the committed lock file is what makes such a move visible in
-         review instead of arriving at restore time.
+         ships its fixes); the per-build `resolved-versions` artifact is what makes such
+         a move visible after the fact instead of arriving silently.
          (No literal double hyphen appears in this comment: XML comments may not
          contain one, and a props file that fails to parse loses every property it
          declares — the symptom is NU1015 "no version for package", not a syntax

@@ -33,24 +33,21 @@
     <!-- Default version for local / non-CI builds -->
     <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
 
-    <!-- Committed NuGet lock files (one packages.lock.json per project).
-         Directory.Packages.props floats every dependency on its non-breaking (last)
-         segment — first-party 2026.<x>.*, official  x.y.* — and the lock file is what
-         makes those floats reproducible (identical graphs locally and in CI) and
-         reviewable (a version move shows up as a lock-file diff, not a silent
-         restore-time upgrade).
-         CI restores with RestoreLockedMode=true — a stale lock file FAILS the build
-         instead of being regenerated. .github/workflows/deps-refresh.yml is the only
-         path that intentionally rewrites these files (the force-evaluate flag).
+    <!-- packages.lock.json is a RECORD, not a pin, and this switch is what writes it.
 
-         Caveat worth knowing on the first NU1004: PublishAot=true (see
-         Directory.Build.targets) makes the SDK contribute Microsoft.NET.ILLink.Tasks
-         and Microsoft.DotNet.ILCompiler as implicit DIRECT dependencies, so a lock
-         file also pins the SDK's bundled runtime patch (e.g. 10.0.15). A runner that
-         rolls onto a newer 10.0.x band than the lock file was generated on therefore
-         fails locked restore with "packages lock file is inconsistent". That is not a
-         dependency bug: dispatch deps-refresh.yml and merge its PR to re-stamp the
-         SDK band. -->
+         What floats: the DECLARATIONS in Directory.Packages.props ("which safe range"),
+         today.
+         What this produces: the packages.lock.json a restore writes beside each project
+         ("which exact versions this restore resolved").
+         Where it lives: on disk, not in the repository — the file is gitignored. It stays
+         out of git because `dotnet publish` adds RID-specific entries
+         (Microsoft.DotNet.ILCompiler) to it, so a tracked lock dirtied the tree on every
+         release.
+         How to answer "which versions did that build use": the `resolved-versions`
+         artifact ci.yml uploads (one per leg), not a file in git.
+
+         Deliberately still TRUE: with this off NuGet neither writes nor reads a lock file,
+         so a restore resolves silently and leaves nothing to inspect. Untracked is not off. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
 
     <!-- Central Package Management is NOT declared here: the single declaration lives
