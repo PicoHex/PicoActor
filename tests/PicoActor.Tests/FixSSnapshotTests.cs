@@ -637,27 +637,35 @@ public sealed class FixSSnapshotTests
     [Test]
     public async Task SnapshotWrite_ReceivesTheActorsStopToken()
     {
-        var store = new SnapshotTokenRecordingStore();
-        var system = new ActorSystem(
-            new ActorSystemOptions { EventStore = store, SnapshotEveryNEvents = 5 }
-        );
-        system.Register<SSnapshotCounter>(
-            cmd => new SSnapshotCounter((SSnapshotCreate)cmd),
-            () => new SSnapshotCounter()
-        );
+        // REPEATED on purpose. The invariant is "after StopAsync returns, StopToken fires", and the way
+        // it used to break was a race: the loop could exit (mailbox completed) and dispose the CTS before
+        // the stopper's Cancel(), which then threw ObjectDisposedException and was swallowed — leaving a
+        // stopped actor whose token never fires. One lucky run proves nothing; ten cycles of create /
+        // snapshot / stop hit the window on a loaded runner (it went red on linux-arm64 with net11.0).
+        for (var cycle = 0; cycle < 10; cycle++)
+        {
+            var store = new SnapshotTokenRecordingStore();
+            var system = new ActorSystem(
+                new ActorSystemOptions { EventStore = store, SnapshotEveryNEvents = 5 }
+            );
+            system.Register<SSnapshotCounter>(
+                cmd => new SSnapshotCounter((SSnapshotCreate)cmd),
+                () => new SSnapshotCounter()
+            );
 
-        var actor = await system.CreateAsync<SSnapshotCounter>(new SSnapshotCreate(0));
-        var id = actor.Id;
-        for (var i = 0; i < 11; i++)
-            await system.AskAsync<object?>(id, new SSnapshotAdd(1));
+            var actor = await system.CreateAsync<SSnapshotCounter>(new SSnapshotCreate(0));
+            var id = actor.Id;
+            for (var i = 0; i < 11; i++)
+                await system.AskAsync<object?>(id, new SSnapshotAdd(1));
 
-        await Assert.That(store.SaveCount).IsGreaterThan(0);
-        var token = store.LastToken;
-        await Assert.That(token.CanBeCanceled).IsTrue();
+            await Assert.That(store.SaveCount).IsGreaterThan(0);
+            var token = store.LastToken;
+            await Assert.That(token.CanBeCanceled).IsTrue();
 
-        // It is the actor's OWN token, not a fresh one: it observes the actor's stop.
-        await system.StopAsync(id);
-        await Assert.That(token.IsCancellationRequested).IsTrue();
+            // It is the actor's OWN token, not a fresh one: it observes the actor's stop.
+            await system.StopAsync(id);
+            await Assert.That(token.IsCancellationRequested).IsTrue();
+        }
     }
 
     /// <summary>

@@ -275,16 +275,13 @@ public abstract class Actor : IActor, IAsyncDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
-        // The loop owns its CTS: dispose on every exit path (normal stop,
-        // creation failure, discard, init failure).
-        try
-        {
-            await RunCoreAsync(ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            _cts.Dispose();
-        }
+        // The loop does NOT dispose its CTS. Disposing here races with SignalStop's Cancel(): the
+        // loop can exit (mailbox completed) and dispose before the stopper cancels, and a Cancel() on
+        // a disposed source throws ObjectDisposedException — which would leave StopToken forever
+        // un-cancelled. StopToken must stay observable after the actor stops (that is its contract),
+        // and a CancellationTokenSource with no timer holds no unmanaged resource, so the collector
+        // owns it from here.
+        await RunCoreAsync(ct).ConfigureAwait(false);
     }
 
     private async Task RunCoreAsync(CancellationToken ct)
@@ -558,19 +555,27 @@ public abstract class Actor : IActor, IAsyncDisposable
         if (Interlocked.Exchange(ref _stopped, 1) != 0)
             return;
 
-        // Order matters: close the mailbox BEFORE cancelling. The loop disposes its CTS
-        // on exit, so Cancel() can throw ObjectDisposedException — running it last keeps
-        // the writer closure (and therefore the stop) effective even then.
-        _ready.TrySetResult(true);
-        _mailbox.Writer.TryComplete();
+        // CANCEL FIRST, then close the mailbox. The previous order (close, then cancel) lost the
+        // cancellation: the loop can observe the completed mailbox, exit and dispose its CTS before
+        // this thread reaches Cancel(), which then throws ObjectDisposedException and is swallowed —
+        // leaving a stopped actor whose StopToken never fires, so a snapshot writer (or any async
+        // work started with StopToken) waits forever. Observable on .NET 11 under load
+        // (SnapshotWrite_ReceivesTheActorsStopToken went red on linux-arm64/net11.0, green on net10.0).
+        // Cancelling first makes the signal unlosable: Cancel() cannot be pre-empted by a disposal it
+        // itself is not racing with, and the mailbox close below does not depend on the CTS at all.
         try
         {
             _cts.Cancel();
         }
         catch (ObjectDisposedException)
         {
-            // The loop already exited and disposed its CTS: the stop is a no-op.
+            // Only reachable when the loop exited and disposed the CTS before this call — in that
+            // case the token was already cancelled by whichever path ended the loop, or the actor
+            // never started. Nothing left to signal.
         }
+
+        _ready.TrySetResult(true);
+        _mailbox.Writer.TryComplete();
     }
 
     /// <summary>
