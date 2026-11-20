@@ -2,6 +2,7 @@ F:PicoActor.EventStore.Jsonl.FileNameFormat.IdOnly : PicoActor.EventStore.Jsonl.
 F:PicoActor.EventStore.Jsonl.FileNameFormat.TypePrefix : PicoActor.EventStore.Jsonl.FileNameFormat = 1 const
 F:PicoActor.EventStore.Jsonl.FileNameFormat.value__ : int
 I:PicoActor.EventStore.Jsonl.JsonlEventStoreOptions : System.IEquatable`1<PicoActor.EventStore.Jsonl.JsonlEventStoreOptions>
+I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventLogOffsetReader
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventLogReader
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventStore
 I:PicoActor.EventStore.Jsonl.JsonlEventStore`1 : PicoActor.Abs.IEventStoreEnumerator

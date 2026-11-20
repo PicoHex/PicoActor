@@ -84,6 +84,7 @@ M:PicoActor.Abs.ICommandSender.Send(System.Guid actorId, PicoActor.Abs.ICommand 
 M:PicoActor.Abs.IDomainEventPublisher.PublishAsync(System.Guid actorId, ulong version, System.Collections.Generic.IReadOnlyList`1<PicoActor.Abs.IDomainEvent> events) : System.Threading.Tasks.ValueTask abstract
 M:PicoActor.Abs.IDomainEventSubscriber`1.Handle(PicoActor.Abs.DomainEventEnvelope`1<TEvent> envelope, PicoActor.Abs.ICommandSender sender, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask abstract
 M:PicoActor.Abs.IEventCursor.MoveNextAsync(System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<bool> abstract
+M:PicoActor.Abs.IEventLogOffsetReader.OpenAtOffsetAsync(System.Guid actorId, long byteOffset, ulong firstVersion, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IEventCursor> abstract
 M:PicoActor.Abs.IEventLogReader.GetVersionAsync(System.Guid actorId, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<ulong> abstract
 M:PicoActor.Abs.IEventLogReader.OpenAsync(System.Guid actorId, ulong fromVersion, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IEventCursor> abstract
 M:PicoActor.Abs.IEventLogReader.PeekFirstAsync(System.Guid actorId, System.Threading.CancellationToken ct = null) : System.Threading.Tasks.ValueTask`1<PicoActor.Abs.IDomainEvent> abstract
@@ -123,6 +124,8 @@ P:PicoActor.Abs.ActorOutputEvent.Data : string { get; init; }
 P:PicoActor.Abs.ActorOutputEvent.TurnId : string { get; init; }
 P:PicoActor.Abs.ActorOutputEvent.Type : string { get; init; }
 P:PicoActor.Abs.ActorSnapshot.Payload : byte[] { get; init; }
+P:PicoActor.Abs.ActorSnapshot.StreamLength : long { get; init; }
+P:PicoActor.Abs.ActorSnapshot.StreamOffset : long { get; init; }
 P:PicoActor.Abs.ActorSnapshot.Version : ulong { get; init; }
 P:PicoActor.Abs.ConcurrencyException.ActorId : System.Guid { get; }
 P:PicoActor.Abs.ConcurrencyException.ActualVersion : ulong { get; }
@@ -182,6 +185,7 @@ T:interface PicoActor.Abs.IDomainEvent
 T:interface PicoActor.Abs.IDomainEventPublisher
 T:interface PicoActor.Abs.IDomainEventSubscriber`1
 T:interface PicoActor.Abs.IEventCursor
+T:interface PicoActor.Abs.IEventLogOffsetReader
 T:interface PicoActor.Abs.IEventLogReader
 T:interface PicoActor.Abs.IEventSourcedActor
 T:interface PicoActor.Abs.IEventStore
