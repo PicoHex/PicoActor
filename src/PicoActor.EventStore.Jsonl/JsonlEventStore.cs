@@ -74,7 +74,6 @@ public sealed class JsonlEventStore<TEventBase>
     // classifier both.
     private const string StreamSuffix = JsonlNames.StreamSuffix;
     private const string SnapshotSuffix = ".snap";
-    private const int ScanBufferBytes = 64 * 1024;
 
     // The three states of the ONE lazy directory pass an IdOnly store performs. Three, not a bool: a
     // pass that threw must be RAISED AGAIN on every later observation instead of being remembered as
@@ -2129,51 +2128,15 @@ public sealed class JsonlEventStore<TEventBase>
     /// </summary>
     private Scan ScanStream(Stream stream, ulong fromVersion, string path)
     {
-        var skip = fromVersion <= 1 ? 0UL : fromVersion - 1;
-        var buffer = new byte[ScanBufferBytes];
-        var lineBlank = true;
-        var count = 0UL;
-        var offset = skip == 0 ? 0L : -1L;
-        var lineStart = 0L;
-        var absolute = 0L;
+        // The walk itself lives in JsonlLines (the ONE line rule): the counting stays here a REPORT, so
+        // the torn-tail warning and the counter are raised exactly where they always were — once per pass
+        // that saw a fragment — whatever the scan does internally.
+        var scanned = JsonlLines.Scan(stream, fromVersion);
 
-        int read;
-        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
-        {
-            for (var i = 0; i < read; i++)
-            {
-                var value = buffer[i];
-                if (value != JsonlLines.NewLine)
-                {
-                    if (!JsonlLines.IsBlankByte(value))
-                        lineBlank = false;
-                    continue;
-                }
-
-                if (!lineBlank)
-                {
-                    count++;
-                    if (offset < 0 && count == skip)
-                        offset = absolute + i + 1;
-                }
-
-                lineStart = absolute + i + 1;
-                lineBlank = true;
-            }
-
-            absolute += read;
-        }
-
-        var tornTail = lineStart < absolute;
-        if (tornTail)
+        if (scanned.TornTail)
             ReportTornTail(path);
 
-        // Past the end (or a torn tail): the remaining bytes are where a next event would start, and the
-        // caller's capacity is 0 there, so the cursor yields nothing either way.
-        if (offset < 0)
-            offset = lineStart;
-
-        return new Scan(count, offset, tornTail);
+        return new Scan(scanned.Count, scanned.Offset, scanned.TornTail);
     }
 
     private void ReportTornTail(string path)
