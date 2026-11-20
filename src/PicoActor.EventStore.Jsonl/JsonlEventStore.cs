@@ -66,6 +66,7 @@ namespace PicoActor.EventStore.Jsonl;
 public sealed class JsonlEventStore<TEventBase>
     : IEventStore,
         IEventLogReader,
+        IEventLogOffsetReader,
         IEventStoreEnumerator,
         IEventStoreSnapshot
     where TEventBase : class, IDomainEvent
@@ -104,7 +105,16 @@ public sealed class JsonlEventStore<TEventBase>
     // two files the message named and be refused again by the one it did not.
     private readonly ConcurrentDictionary<Guid, List<string>> _conflictingPrefixes = new();
 
+    // THE SNAPSHOT CALIBRATION (I6/D2): the byte position each aggregate's LAST append ended at, keyed
+    // by the version that append produced. Written by AppendAsync after its flush, consumed by
+    // SaveSnapshotAsync only when the version matches — never recomputed from File.Length, which an
+    // append between the flush and the snapshot would make describe a longer stream than the snapshot
+    // covers. One small struct per id that appended in THIS process (the same boundedness as
+    // _typeById: one entry per live aggregate), overwritten by that id's next append.
+    private readonly ConcurrentDictionary<Guid, (ulong Version, long Offset)> _tailOffsets = new();
+
     private long _deserializedEvents;
+    private long _offsetOpens;
     private long _tornTailLines;
     private long _skippedFileNames;
     private long _filesOpened;
@@ -308,6 +318,15 @@ public sealed class JsonlEventStore<TEventBase>
     /// <summary>Events this store has DESERIALIZED (a load or a cursor move), not lines it has read.</summary>
     internal long DeserializedEventCount => Interlocked.Read(ref _deserializedEvents);
 
+    /// <summary>
+    /// How many times a snapshot's recorded byte offset was ACCEPTED and used to skip the line scan
+    /// (spec 2026-11-19). It is the fast path's own witness: a rebuild that fell back — no offset in the
+    /// header, or an offset this store refused — leaves it where it was, so a test can say which of the
+    /// two paths a recovery actually took instead of guessing from timings. Counted AFTER the handle is
+    /// open and the position is verified: a refused offset is not an open.
+    /// </summary>
+    internal long OffsetOpens => Interlocked.Read(ref _offsetOpens);
+
     /// <summary>Unterminated final lines seen and ignored — one per crash-torn append.</summary>
     internal long TornTailLines => Interlocked.Read(ref _tornTailLines);
 
@@ -509,6 +528,12 @@ public sealed class JsonlEventStore<TEventBase>
             // 11. The cache describes the file as it now is.
             var version = entry.Count + (ulong)events.Count;
             entry.Seed(version, stream.Length);
+
+            // ... and so does the snapshot calibration. The position comes from THIS append's own
+            // handle, in the step that produced the version: it is the offset at which the first event
+            // AFTER this version starts. A File.Length read later — at snapshot time — would be a
+            // different number as soon as one more append landed, so it is never used.
+            _tailOffsets[actorId] = (version, stream.Position);
 
             // The prefix is fixed at CREATION: the map learns it once the bytes are on disk, so an id
             // that is later recreated keeps pointing at the file its first event named. It learns
@@ -784,6 +809,116 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <inheritdoc/>
+    ValueTask<IEventCursor?> IEventLogOffsetReader.OpenAtOffsetAsync(
+        Guid actorId,
+        long byteOffset,
+        ulong firstVersion,
+        CancellationToken ct
+    ) => OpenAtOffsetAsync(actorId, byteOffset, firstVersion, ct);
+
+    /// <summary>
+    /// The SEEK open (D4): a cursor over the events from <paramref name="byteOffset"/> on, numbered from
+    /// <paramref name="firstVersion"/>. The lines before the position are never read — not as events and
+    /// not as a count — which is the whole point: a stream whose snapshot covers all but its last
+    /// megabytes costs one seek and one tail read instead of a full pass of line numbering.
+    /// <para>
+    /// The position is VERIFIED, because it comes from a snapshot that may describe another file, an
+    /// older stream or a truncated one (I2: an offset is advisory). Only a position that is the first
+    /// byte of a line inside THIS file is believed. Anything else — past the end, inside a line, on a
+    /// carriage return — is refused with ONE warning and a <see langword="null"/> cursor, never an
+    /// exception: the caller's answer to <see langword="null"/> is today's version open, so a refusal
+    /// costs speed and nothing else.
+    /// </para>
+    /// <para>
+    /// <see cref="IEventCursor.End"/> is <see cref="ulong.MaxValue"/>: this open counts nothing, so the
+    /// length is derived by the caller from the events it actually reads (I4). Reporting the scan open's
+    /// <c>End</c> here would mean the scan this method exists to avoid.
+    /// </para>
+    /// </summary>
+    private ValueTask<IEventCursor?> OpenAtOffsetAsync(
+        Guid actorId,
+        long byteOffset,
+        ulong firstVersion,
+        CancellationToken ct
+    )
+    {
+        // Version 0 does not exist (versions are 1-based) and a negative position is nonsense: both are
+        // the CALLER's mistakes, so they throw instead of degrading.
+        if (firstVersion == 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(firstVersion),
+                firstVersion,
+                "firstVersion is 1-based."
+            );
+
+        ArgumentOutOfRangeException.ThrowIfNegative(byteOffset);
+
+        ct.ThrowIfCancellationRequested();
+
+        // An absent stream is an observation like every other read, so this is the READ path's resolver:
+        // a misconfigured root is diagnosed here instead of after an accidental full replay.
+        var path = ExistingPathFor(actorId);
+        if (path is null)
+            return new ValueTask<IEventCursor?>((IEventCursor?)null);
+
+        var stream = OpenRead(path);
+        try
+        {
+            var length = stream.Length;
+
+            // I2, asked as two questions: is the position inside the file, and is it the first byte of a
+            // line? Position 0 needs no evidence — it is the start of the stream by definition.
+            if (byteOffset > length || !IsLineStart(stream, byteOffset))
+            {
+                _logger?.Warning(
+                    $"Ignoring the byte offset {byteOffset} recorded for aggregate '{actorId:D}' in "
+                        + $"'{path}': "
+                        + $"{(byteOffset > length ? "it is past the end of the stream" : "it is not the start of a line")}"
+                        + $" (the stream is {length} bytes long). Falling back to counting its lines."
+                );
+                stream.Dispose();
+                return new ValueTask<IEventCursor?>((IEventCursor?)null);
+            }
+
+            stream.Position = byteOffset;
+            Interlocked.Increment(ref _offsetOpens);
+
+            return new ValueTask<IEventCursor?>(
+                (IEventCursor?)
+                    new JsonlCursor(
+                        stream,
+                        // Not measured (see the summary): the caller derives the length from the drain.
+                        end: ulong.MaxValue,
+                        // ... and therefore no yield budget either: the end of the file is the only bound.
+                        capacity: ulong.MaxValue,
+                        firstVersion,
+                        line => DeserializeLine(line, path),
+                        () => ReportTornTail(path)
+                    )
+            );
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="position"/> is the first byte after a newline (and always true for 0,
+    /// the start of the stream). This is the ONLY evidence an offset can be believed on: a position that
+    /// is not a line boundary makes the first line read a fragment of another event.
+    /// </summary>
+    private static bool IsLineStart(FileStream stream, long position)
+    {
+        if (position <= 0)
+            return true;
+
+        stream.Seek(position - 1, SeekOrigin.Begin);
+        return stream.ReadByte() == JsonlLines.NewLine;
+    }
+
+    /// <inheritdoc/>
     /// <remarks>
     /// NEVER throws for a snapshot it cannot use — a missing file, a bad magic, a truncated header, a
     /// version of 0 and a payload-length mismatch all mean "no snapshot". The event stream is
@@ -812,11 +947,130 @@ public sealed class JsonlEventStore<TEventBase>
             return new ValueTask<ActorSnapshot?>((ActorSnapshot?)null);
         }
 
-        return new ValueTask<ActorSnapshot?>(
-            JsonlSnapshotFile.TryDecode(file, out var version, out var payload)
-                ? new ActorSnapshot(version, payload)
-                : null
-        );
+        if (
+            !JsonlSnapshotFile.TryDecode(
+                file,
+                out var version,
+                out var payload,
+                out var streamLength,
+                out var streamOffset
+            )
+        )
+            return new ValueTask<ActorSnapshot?>((ActorSnapshot?)null);
+
+        var snapshot = new ActorSnapshot(version, payload)
+        {
+            // The CALIBRATION travels with the snapshot (I6): 0/0 when the header carries none (a legacy
+            // snapshot, or a version some other process appended), which is the "scan" answer. Reading
+            // it is what lets a rebuild seek instead of counting lines.
+            StreamLength = streamLength,
+            StreamOffset = streamOffset,
+        };
+
+        if (streamOffset > 0 && !VerifiableOffset(actorId, snapshot, out var problem))
+        {
+            // I2: an offset this store cannot verify is IGNORED, never fatal. The snapshot itself stays
+            // usable — its version and payload are the stream's business, not the offset's — so the
+            // rebuild takes today's path and reaches today's answer, and the operator gets ONE line
+            // saying why the accelerator was not used.
+            _logger?.Warning(
+                $"Ignoring the byte offset {streamOffset} recorded by snapshot '{path}' for aggregate "
+                    + $"'{actorId:D}': {problem}. Rebuilding with a full scan of the stream."
+            );
+            snapshot = snapshot with { StreamOffset = 0, StreamLength = 0 };
+        }
+
+        return new ValueTask<ActorSnapshot?>(snapshot);
+    }
+
+    /// <summary>
+    /// Can this calibration still be believed of the stream file (I2)? The offset alone answers "is it a
+    /// line start of SOME file"; only the recorded LENGTH answers "did this stream SHRINK since", which
+    /// is the one shape an offset cannot see for itself — a truncated stream keeps line boundaries that
+    /// point into a shorter history, so the version an offset would derive is a lie.
+    /// <para>
+    /// Read-only and cheap: one open, two seeks. It never throws for a stream it cannot reach (that is a
+    /// "no", and the caller's warning names it), and it never touches the offset's own arithmetic.
+    /// </para>
+    /// </summary>
+    private bool VerifiableOffset(Guid actorId, ActorSnapshot snapshot, out string problem)
+    {
+        problem = string.Empty;
+
+        // Belt and braces for a HALF calibration: an offset with no covered length cannot be checked for
+        // a shrink, so it is not believed. The decoder already drops such a pair (a tail cannot start
+        // past the end of the stream it is the tail of) and the rebuild gates on both fields as well, so
+        // this is a third, silent layer rather than the only one.
+        if (snapshot.StreamLength <= 0 || snapshot.StreamOffset > snapshot.StreamLength)
+        {
+            problem = "its header carries no stream length to check it against";
+            return false;
+        }
+
+        var streamPath = VerifiableStreamPathFor(actorId);
+        if (streamPath is null || !File.Exists(streamPath))
+        {
+            problem = "this aggregate has no stream file to check the offset against";
+            return false;
+        }
+
+        using var stream = OpenRead(streamPath);
+        var length = stream.Length;
+
+        if (snapshot.StreamOffset > length)
+        {
+            problem = $"the stream is only {length} bytes long";
+            return false;
+        }
+
+        if (length < snapshot.StreamLength)
+        {
+            problem =
+                $"the stream is shorter ({length} bytes) than the {snapshot.StreamLength} bytes the "
+                + "snapshot covers, so it was truncated or rolled back";
+            return false;
+        }
+
+        // BOTH recorded positions must be line boundaries of THIS file: the offset because the first
+        // line read from it would otherwise be a fragment of another event, the covered length because a
+        // snapshot that ends inside a line describes a stream no append of this store produced.
+        if (!IsLineStart(stream, snapshot.StreamOffset))
+        {
+            problem = "it is not the start of a line in this stream";
+            return false;
+        }
+
+        if (!IsLineStart(stream, snapshot.StreamLength))
+        {
+            problem = "the stream length it records does not end a line of this stream";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The stream path a calibration can be checked against, resolved WITHOUT the read path's
+    /// diagnostics: verifying a snapshot must not turn a misconfigured or unreadable root into a
+    /// <see cref="LoadSnapshotAsync"/> failure, because that member answers "no snapshot" for everything
+    /// it cannot use. A <see cref="FileNameFormat.TypePrefix"/> miss answers null — "the name is not
+    /// known yet" — and the offset is then simply not believed; the STREAM read that follows diagnoses
+    /// the directory as loudly as it always has.
+    /// </summary>
+    private string? VerifiableStreamPathFor(Guid actorId)
+    {
+        if (_options.FileNameFormat != FileNameFormat.TypePrefix)
+            return IdOnlyPathFor(actorId);
+
+        try
+        {
+            return ReadingPathFor(actorId);
+        }
+        catch (Exception ex)
+            when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     /// <inheritdoc/>
@@ -834,7 +1088,23 @@ public sealed class JsonlEventStore<TEventBase>
         ArgumentNullException.ThrowIfNull(snapshot);
         ct.ThrowIfCancellationRequested();
 
-        var bytes = JsonlSnapshotFile.Encode(snapshot.Version, snapshot.Payload);
+        // THE CALIBRATION IS ATTACHED, NEVER COMPUTED (I6): the position the append path recorded for
+        // THIS version, and only for this version. A fresh process, a restored store or a snapshot of a
+        // version this instance never appended has nothing to attach and writes 0 = "unknown" — the
+        // rebuild then scans, which is today's cost and today's answer. File.Length is not consulted:
+        // between the append's flush and this call another append may have moved the end of the file,
+        // and the header would then describe a longer stream than the snapshot covers.
+        var (streamLength, streamOffset) =
+            _tailOffsets.TryGetValue(actorId, out var tail) && tail.Version == snapshot.Version
+                ? (tail.Offset, tail.Offset)
+                : (0L, 0L);
+
+        var bytes = JsonlSnapshotFile.Encode(
+            snapshot.Version,
+            snapshot.Payload,
+            streamLength,
+            streamOffset
+        );
         JsonlSnapshotFile.WriteAtomic(SnapshotPathFor(actorId), bytes);
         return default;
     }

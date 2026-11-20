@@ -26,7 +26,36 @@ namespace PicoActor.Abs;
 /// snapshot every later recovery of that aggregate restores.
 /// </para>
 /// </summary>
-public sealed record ActorSnapshot(ulong Version, byte[] Payload);
+public sealed record ActorSnapshot(ulong Version, byte[] Payload)
+{
+    /// <summary>
+    /// The byte offset of the stream at which the FIRST event after <see cref="Version"/> starts, or
+    /// <c>0</c> when the store does not know it.
+    /// <para>
+    /// An ACCELERATOR, never an authority: a recovery may seek to this position instead of counting
+    /// every line, and it MUST verify it before believing it (a store hands it out only after checking
+    /// it against the stream file, and a recovery that cannot verify it takes the scan path). The
+    /// stream stays complete and authoritative; this member only says where its tail begins.
+    /// </para>
+    /// <para>
+    /// 0 is "unknown", and it is the DEFAULT: a store records the position its append ENDED at, so a
+    /// snapshot whose version this store did not write — a fresh process, a restored directory, a
+    /// legacy snapshot — carries 0 and costs a scan, never a wrong tail.
+    /// </para>
+    /// </summary>
+    public long StreamOffset { get; init; }
+
+    /// <summary>
+    /// The stream's byte length as of the append that produced <see cref="Version"/> (equal to
+    /// <see cref="StreamOffset"/> when the snapshot ends the file), or <c>0</c> when unknown.
+    /// <para>
+    /// This is what makes a shrink VISIBLE: a file shorter than this covered length was truncated or
+    /// rolled back, and the recorded offset — which may still point at a line start of the old file —
+    /// must not be used, because the version it would derive is a lie.
+    /// </para>
+    /// </summary>
+    public long StreamLength { get; init; }
+}
 
 /// <summary>
 /// Optional companion contract for <see cref="IEventStore"/>: snapshot persistence, used as

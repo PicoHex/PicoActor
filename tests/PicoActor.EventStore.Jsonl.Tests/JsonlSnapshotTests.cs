@@ -139,16 +139,29 @@ public sealed class JsonlSnapshotTests
             cancellationToken
         );
 
-        await Assert.That(bytes.Length).IsEqualTo(19);
+        // 36-byte header + the 3 payload bytes (spec 2026-11-19, D3: the header gained the two stream
+        // positions; the ARITHMETIC of this test is unchanged, only the header's length).
+        await Assert.That(bytes.Length).IsEqualTo(JsonlSnapshotFile.HeaderBytes + 3);
         await Assert.That(Encoding.ASCII.GetString(bytes, 0, 4)).IsEqualTo(Magic);
         await Assert.That(bytes[4]).IsEqualTo((byte)0x08);
         await Assert.That(bytes[5]).IsEqualTo((byte)0x07);
         await Assert.That(bytes[11]).IsEqualTo((byte)0x01);
 
-        // bytes 12..16: the payload length, little-endian u32.
+        // bytes 12..16: the payload length, little-endian u32 — THE SAME POSITION the old layout used,
+        // which is what makes an old reader's "file.Length - 16 == payloadLength" check fail loudly
+        // rather than read a payload of the wrong length.
         await Assert.That(bytes[12]).IsEqualTo((byte)3);
         await Assert.That(bytes[13]).IsEqualTo((byte)0);
-        await Assert.That(bytes[16]).IsEqualTo((byte)0xAA);
+
+        // No stream appended for this id, so the store knows no position: 0 = "unknown" in both fields.
+        await Assert.That(bytes[16]).IsEqualTo((byte)0); // reserved, 4 bytes
+        await Assert.That(bytes[19]).IsEqualTo((byte)0);
+        await Assert.That(bytes[20]).IsEqualTo((byte)0); // stream length, 8 bytes
+        await Assert.That(bytes[27]).IsEqualTo((byte)0);
+        await Assert.That(bytes[28]).IsEqualTo((byte)0); // stream offset, 8 bytes
+        await Assert.That(bytes[35]).IsEqualTo((byte)0);
+
+        await Assert.That(bytes[JsonlSnapshotFile.HeaderBytes]).IsEqualTo((byte)0xAA);
     }
 
     [Test, Timeout(15000)]

@@ -395,9 +395,16 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
     }
 
     /// <summary>
-    /// Rebuild through the store's cursor read port: open ONCE at <c>snapshot.Version + 1</c>,
-    /// take the stream length from that cursor's <see cref="IEventCursor.End"/> and materialize
-    /// only the tail the snapshot does not already cover.
+    /// Rebuild through the store's cursor read port: open ONCE at the snapshot's tail, take the
+    /// stream length from THAT ONE observation and materialize only the events the snapshot does
+    /// not already cover.
+    /// <para>
+    /// TWO openings, one observation each. A store that can seek
+    /// (<see cref="IEventLogOffsetReader"/>) is opened at the byte offset the snapshot recorded, and
+    /// the length is derived from the events that read produced; every other store — and every snapshot
+    /// without a usable offset — is opened at <c>snapshot.Version + 1</c> and the length is the
+    /// <see cref="IEventCursor.End"/> the store's scan reported. Both converge on the same replay.
+    /// </para>
     /// <para>
     /// The single observation is the point: the rollback guard, the "did the tail arrive" check
     /// and the reconstructed <c>Version</c> all come from ONE <see cref="IEventCursor.End"/>, so a
@@ -467,24 +474,72 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
         List<IDomainEvent> tail;
         ulong end;
 
-        // The cursor lives in THIS scope only: released before anything is constructed, and
-        // before the full-replay re-open of the same stream.
-        await using (var cursor = await reader.OpenAsync(id, openAt).ConfigureAwait(false))
+        // Did the stream length come from a SCAN of the whole file (the version open) or from the tail
+        // read itself (the offset open)? The distinction decides the mismatch guard below, so it is a
+        // named fact rather than a comment.
+        var endFromScan = false;
+
+        // THE FAST PATH (D4): a snapshot may carry the byte position its tail starts at, and a store
+        // that can seek is asked to open THERE — no line numbering, no second pass. The snapshot alone
+        // does not decide: the store verifies the position against the stream file before believing it
+        // (I2) and answers "no cursor" when it cannot, which drops us onto the scan path below, so a
+        // stale/damaged offset costs speed and never correctness. `v < ulong.MaxValue` keeps the clamp
+        // below meaningful: there is no version after the maximum one.
+        IEventCursor? atOffset = null;
+        if (
+            snapshot is { Version: > 0, StreamOffset: > 0, StreamLength: > 0 } calibrated
+            && v < ulong.MaxValue
+            && reader is IEventLogOffsetReader offsetReader
+        )
         {
-            end = cursor.End;
+            atOffset = await offsetReader
+                .OpenAtOffsetAsync(id, calibrated.StreamOffset, openAt)
+                .ConfigureAwait(false);
+        }
 
-            // Nothing to rebuild FROM: no factory call, no initialization, not even a Version-0
-            // actor.
-            if (end == 0)
-                return default;
+        if (atOffset is not null)
+        {
+            // The cursor lives in THIS scope only: released before anything is constructed, and
+            // before the full-replay re-open of the same stream.
+            await using (atOffset)
+            {
+                tail = await DrainAsync(atOffset).ConfigureAwait(false);
+            }
 
-            tail = await DrainAsync(cursor).ConfigureAwait(false);
+            // I4, ONE observation: the offset open numbers nothing ahead of its position, so the stream
+            // length is not something this path can look up — it is DERIVED from what the read produced.
+            // The rebuilt version is therefore snapshot.Version + the events that were really there,
+            // which is exactly what a scan would have concluded for the same file, and it can never mix
+            // two views of the stream. A torn tail at EOF is reported by the cursor, exactly as the scan
+            // path reports it, and is not one of these events.
+            end = v + (ulong)tail.Count;
+        }
+        else
+        {
+            await using (var cursor = await reader.OpenAsync(id, openAt).ConfigureAwait(false))
+            {
+                end = cursor.End;
+
+                // Nothing to rebuild FROM: no factory call, no initialization, not even a Version-0
+                // actor.
+                if (end == 0)
+                    return default;
+
+                tail = await DrainAsync(cursor).ConfigureAwait(false);
+                endFromScan = true;
+            }
         }
 
         // Rollback (a snapshot newer than the stream) and shrink (the drain delivered less than
         // End) are MISMATCHES, not exceptions: discard the snapshot, replay from version 1.
         // The `v > end` clause is defensive, subsumed by the count check; kept for readability.
-        if (v > end || v + (ulong)tail.Count != end)
+        //
+        // The guard is the SCAN path's, and only its: it compares the snapshot against a length taken by
+        // a DIFFERENT pass than the drain. On the offset path `end` was derived from that very drain, so
+        // the comparison is true by construction — a tautology is not a check, and pretending otherwise
+        // would hide that the offset path's rollback protection is the store's verification (I2/I3),
+        // which sends a shrunken stream down THIS scan path in the first place.
+        if (endFromScan && (v > end || v + (ulong)tail.Count != end))
             return await FullReplayAsync<T>(reader, id, rebuildFactory).ConfigureAwait(false);
 
         var actor = (ActorBase)(IActor)rebuildFactory();
