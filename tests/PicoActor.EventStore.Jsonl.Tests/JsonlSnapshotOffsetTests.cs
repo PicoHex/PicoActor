@@ -993,6 +993,73 @@ public sealed class JsonlSnapshotOffsetTests
             message.Contains("covered prefix", StringComparison.OrdinalIgnoreCase)
         );
 
+    // ── The uncalibrated-snapshot notice (adapters) ────────────────────────────────────────────
+
+    /// <summary>
+    /// A snapshot written by a store that did NOT append the events carries no calibration, and the
+    /// rebuild of that aggregate silently keeps counting lines. The write side therefore says so: one
+    /// Info line naming the remedy, because "the accelerator is missing" is otherwise unobservable.
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task UncalibratedSnapshot_IsWritten_WithOneInfoNamingTheRemedy(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+
+        // This instance never appended a thing, so it has no position to attach.
+        await store.SaveSnapshotAsync(id, new ActorSnapshot(3, [1, 2, 3]));
+
+        var uncalibrated = logger.Entries.Count(entry =>
+            entry.Level == PicoLog.Abs.LogLevel.Info
+            && entry.Message.Contains("WITHOUT calibration", StringComparison.Ordinal)
+        );
+        await Assert.That(uncalibrated).IsEqualTo(1);
+
+        // The snapshot itself is still written, still readable, and still honest about its calibration.
+        var reloaded = await store.LoadSnapshotAsync(id);
+        await Assert.That(reloaded).IsNotNull();
+        await Assert.That(reloaded!.Version).IsEqualTo(3UL);
+        await Assert.That(reloaded.StreamOffset).IsEqualTo(0L);
+    }
+
+    /// <summary>
+    /// The notice is for the MISSING case only: a snapshot this store did append for carries its
+    /// calibration, and must not be told it is unaccelerated.
+    /// </summary>
+    [Test, Timeout(15000)]
+    public async Task CalibratedSnapshot_DoesNotClaimToBeUncalibrated(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var logger = new RecordingLogger();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1), new SSnapshotAdded(2)]);
+
+        await store.SaveSnapshotAsync(id, new ActorSnapshot(2, [1, 2]));
+
+        var uncalibrated = logger.Entries.Count(entry =>
+            entry.Message.Contains("WITHOUT calibration", StringComparison.Ordinal)
+        );
+        await Assert.That(uncalibrated).IsEqualTo(0);
+
+        var reloaded = await store.LoadSnapshotAsync(id);
+        await Assert.That(reloaded!.StreamOffset).IsGreaterThan(0L);
+    }
+
     /// <summary>The warning a header that contradicts itself owes: one line, saying the calibration is unusable.</summary>
     private static int CountUnusableCalibrationWarnings(RecordingLogger logger) =>
         logger.Messages.Count(message =>

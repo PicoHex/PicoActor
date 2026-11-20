@@ -1252,6 +1252,29 @@ public sealed class JsonlEventStore<TEventBase>
                 ? CaptureCalibration(actorId, tail.Offset)
                 : SnapshotCalibration.Unknown;
 
+        // A SNAPSHOT WITHOUT CALIBRATION IS SILENT ON THE REBUILD SIDE, so it says so here instead. The
+        // write still succeeds (a snapshot is an accelerator: losing the acceleration is not a failure), but
+        // an operator who writes snapshots through a store that did not append those events — a second
+        // instance, a restored store, a sealer of its own — would otherwise never learn that every rebuild
+        // of this aggregate keeps counting lines. One line per such write, guarded like every other sink
+        // call: a broken logger must not turn a durable snapshot into a failed one.
+        if (calibration.StreamOffset == 0 && snapshot.Payload.Length > 0)
+        {
+            try
+            {
+                _logger?.Info(
+                    $"Snapshot for aggregate '{actorId:D}' v{snapshot.Version} was written WITHOUT "
+                        + "calibration: this store did not append that version, so a rebuild will count "
+                        + "the stream's lines instead of seeking to the snapshot. Write snapshots through "
+                        + "the store instance that appended the events."
+                );
+            }
+            catch (Exception)
+            {
+                // silent: a log sink's failure must not fail a snapshot write.
+            }
+        }
+
         var bytes = JsonlSnapshotFile.Encode(snapshot.Version, snapshot.Payload, calibration);
         JsonlSnapshotFile.WriteAtomic(SnapshotPathFor(actorId), bytes);
         return default;
