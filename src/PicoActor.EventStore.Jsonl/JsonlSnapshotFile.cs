@@ -1,27 +1,68 @@
 namespace PicoActor.EventStore.Jsonl;
 
 /// <summary>
+/// The fast-path calibration a snapshot header carries: the stream positions a rebuild may SEEK to
+/// instead of counting lines, plus the bounded content witness that decides whether they still describe
+/// THIS stream — and, when they do not, the one-line reason they were dropped.
+/// <para>
+/// The geometry and the witness answer different questions, and the fast path needs both. The positions
+/// can only prove "this byte is the start of a line of this file" and "the file did not shrink"; they are
+/// blind to the covered PREFIX being replaced by a DIFFERENT history of the same length or longer, which
+/// rebuilds a state the stream never had. The witness is what sees that (spec 2026-11-19, I2).
+/// </para>
+/// </summary>
+/// <param name="StreamLength">Stream byte length the snapshot covers; 0 = unknown.</param>
+/// <param name="StreamOffset">Byte position at which the first event AFTER the snapshot's version
+/// starts; 0 = unknown.</param>
+/// <param name="CoveredPrefixWitness">XOR of the FNV-1a hashes of the first min(64, offset) bytes and of
+/// the min(4096, offset) bytes before <paramref name="StreamOffset"/>; 0 = unknown.</param>
+/// <param name="UnusableReason">
+/// Null when the pair is coherent. Non-null — with every other field zeroed — when the header contradicts
+/// itself, and this is the sentence the operator is owed: a calibration that describes nothing must not
+/// be dropped in silence.
+/// </param>
+internal readonly record struct SnapshotCalibration(
+    long StreamLength,
+    long StreamOffset,
+    ulong CoveredPrefixWitness,
+    string? UnusableReason = null
+)
+{
+    /// <summary>No calibration at all: a legacy 16-byte header, or a snapshot nothing recorded a position for.</summary>
+    internal static readonly SnapshotCalibration Unknown = new(0, 0, 0, null);
+
+    /// <summary>True when a rebuild may try the seek; the store still verifies it against the stream.</summary>
+    internal bool IsCalibrated => StreamOffset > 0 && StreamLength > 0;
+}
+
+/// <summary>
 /// On-disk shape of one aggregate snapshot:
 /// <code>
-/// "PASJ" | u64 version | u32 payloadLength | u32 reserved(0) | u64 streamLength | u64 streamOffset | payload
+/// "PASJ" | u64 version | u32 payloadLength | u32 reserved(0) | u64 streamLength | u64 streamOffset
+///        | u64 coveredPrefixWitness | payload
 /// </code>
 /// (the actor's own <c>PAS1</c> envelope lives inside the payload, not here).
 /// <para>
-/// THE TWO LENGTH FIELDS ARE THE REBUILD FAST PATH (spec 2026-11-19, D3). <c>streamOffset</c> is the
-/// byte position at which the first event AFTER <c>version</c> starts, and <c>streamLength</c> is the
-/// stream's byte length as of that append; both are 0 = "unknown". A rebuild seeks to the offset instead
-/// of counting every line, and the recorded LENGTH is what exposes a truncated (rolled back) stream.
+/// THE THREE CALIBRATION FIELDS ARE THE REBUILD FAST PATH (spec 2026-11-19, D3). <c>streamOffset</c> is the
+/// byte position at which the first event AFTER <c>version</c> starts, <c>streamLength</c> is the stream's
+/// byte length as of that append, and <c>coveredPrefixWitness</c> is the bounded content witness of the
+/// bytes BEFORE that position; all three are 0 = "unknown". A rebuild seeks to the offset instead of
+/// counting every line, and the pair of positions is verified against the stream: the recorded LENGTH
+/// exposes a truncated (rolled back) stream, the WITNESS exposes a prefix that was rewritten into a
+/// different history of the same geometry. A calibration that passes only the geometric tests can
+/// describe a stream that never existed — the witness is a NECESSARY part of the fast path, not an extra.
 /// </para>
 /// <para>
 /// THE HEADER IS FORWARD-ONLY, and the <c>reserved</c> u32 is why. An older reader validates
-/// <c>file.Length - 16 == payloadLength</c>; a 36-byte header leaves 20 extra bytes on disk, so that
+/// <c>file.Length - 16 == payloadLength</c>; a 44-byte header leaves 28 extra bytes on disk, so that
 /// check FAILS and the older reader answers "no snapshot" — a full replay, which is the documented, safe
 /// degradation (a snapshot is an accelerator). Writing a second, 16-byte layout for those readers would
 /// mean two formats that can drift, so there is exactly one.
 /// </para>
 /// <para>
 /// A 16-byte header (magic + version + payloadLength + payload, what an older store wrote) still
-/// decodes: <see cref="TryDecode"/> reports both offset fields as 0, i.e. "unknown, scan".
+/// decodes: <see cref="TryDecode"/> reports <see cref="SnapshotCalibration.Unknown"/> — "no calibration,
+/// scan" — and that is not a fault, so it raises no warning.
 /// </para>
 /// <para>
 /// Multi-byte fields go through <see cref="BinaryPrimitives"/> and never through
@@ -42,9 +83,9 @@ internal static class JsonlSnapshotFile
 
     /// <summary>
     /// Bytes before the payload: 4 magic + 8 version + 4 payload length + 4 reserved + 8 stream length +
-    /// 8 stream offset. The field offsets below are that list, written once.
+    /// 8 stream offset + 8 covered-prefix witness. The field offsets below are that list, written once.
     /// </summary>
-    internal const int HeaderBytes = 36;
+    internal const int HeaderBytes = 44;
 
     /// <summary>Bytes before the payload of the ORIGINAL layout (magic + version + length), still read.</summary>
     internal const int LegacyHeaderBytes = 16;
@@ -54,20 +95,20 @@ internal static class JsonlSnapshotFile
     private const int ReservedOffset = 16;
     private const int StreamLengthOffset = 20;
     private const int StreamOffsetOffset = 28;
+    private const int CoveredPrefixWitnessOffset = 36;
 
     /// <summary>
-    /// Encode one snapshot file. <paramref name="streamLength"/> and <paramref name="streamOffset"/> are
-    /// the CAPTURED positions the append path recorded (0 = unknown); nothing here measures the stream.
+    /// Encode one snapshot file. <paramref name="calibration"/> is the CAPTURED positions and witness the
+    /// append path recorded (0 = unknown); nothing here measures the stream.
     /// </summary>
     internal static byte[] Encode(
         ulong version,
         ReadOnlySpan<byte> payload,
-        long streamLength,
-        long streamOffset
+        SnapshotCalibration calibration
     )
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(streamLength);
-        ArgumentOutOfRangeException.ThrowIfNegative(streamOffset);
+        ArgumentOutOfRangeException.ThrowIfNegative(calibration.StreamLength);
+        ArgumentOutOfRangeException.ThrowIfNegative(calibration.StreamOffset);
 
         var bytes = new byte[HeaderBytes + payload.Length];
         Magic.CopyTo(bytes);
@@ -82,11 +123,15 @@ internal static class JsonlSnapshotFile
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(ReservedOffset, 4), 0);
         BinaryPrimitives.WriteUInt64LittleEndian(
             bytes.AsSpan(StreamLengthOffset, 8),
-            (ulong)streamLength
+            (ulong)calibration.StreamLength
         );
         BinaryPrimitives.WriteUInt64LittleEndian(
             bytes.AsSpan(StreamOffsetOffset, 8),
-            (ulong)streamOffset
+            (ulong)calibration.StreamOffset
+        );
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            bytes.AsSpan(CoveredPrefixWitnessOffset, 8),
+            calibration.CoveredPrefixWitness
         );
         payload.CopyTo(bytes.AsSpan(HeaderBytes));
         return bytes;
@@ -97,24 +142,23 @@ internal static class JsonlSnapshotFile
     /// could not act on: a short header, a bad magic, a version of 0 (covers no events) or a
     /// <c>payloadLength</c> that disagrees with the bytes on disk (a torn write).
     /// <para>
-    /// Both a 36-byte (current) and a 16-byte (original) header decode; the original one reports
-    /// <paramref name="streamLength"/> and <paramref name="streamOffset"/> as 0 — "unknown" — which is
-    /// what makes its recoveries scan. A calibration that contradicts itself (a tail starting past the
-    /// end of its own stream) is reported as 0/0 too, never half-believed.
+    /// Both a 44-byte (current) and a 16-byte (original) header decode; the original one reports
+    /// <see cref="SnapshotCalibration.Unknown"/> — "unknown" — which is what makes its recoveries scan.
+    /// A pair of positions that contradicts itself is reported as unknown too, never half-believed, but
+    /// WITH <see cref="SnapshotCalibration.UnusableReason"/> set: the caller owns the logger, so the
+    /// reason travels out of the decoder as a sentence instead of a silently zeroed pair.
     /// </para>
     /// </summary>
     internal static bool TryDecode(
         ReadOnlySpan<byte> file,
         out ulong version,
         out byte[] payload,
-        out long streamLength,
-        out long streamOffset
+        out SnapshotCalibration calibration
     )
     {
         version = 0;
         payload = [];
-        streamLength = 0;
-        streamOffset = 0;
+        calibration = SnapshotCalibration.Unknown;
 
         if (file.Length < LegacyHeaderBytes || !file[..4].SequenceEqual(Magic))
             return false;
@@ -126,8 +170,8 @@ internal static class JsonlSnapshotFile
             return false;
 
         // The CURRENT layout first: its header is longer, so "the length field equals what is left on
-        // disk" can be true of only one of the two layouts — a 16-byte file leaves at least 20 bytes
-        // unaccounted for by this test, and a 36-byte one leaves exactly the payload.
+        // disk" can be true of only one of the two layouts — a 16-byte file leaves at least 28 bytes
+        // unaccounted for by this test, and a 44-byte one leaves exactly the payload.
         if (file.Length >= HeaderBytes && file.Length - HeaderBytes == length)
         {
             payload = file[HeaderBytes..].ToArray();
@@ -136,21 +180,20 @@ internal static class JsonlSnapshotFile
                 BinaryPrimitives.ReadUInt64LittleEndian(file[StreamLengthOffset..][..8]);
             var firstEventOffset = (long)
                 BinaryPrimitives.ReadUInt64LittleEndian(file[StreamOffsetOffset..][..8]);
+            var witness = BinaryPrimitives.ReadUInt64LittleEndian(
+                file[CoveredPrefixWitnessOffset..][..8]
+            );
 
             // A pair that contradicts itself describes nothing a rebuild can use: the position of a tail
             // cannot be past the end of the stream it is the tail of. Both are dropped together
-            // (0 = unknown), never half-believed.
-            if (coveredLength >= 0 && firstEventOffset >= 0 && firstEventOffset <= coveredLength)
-            {
-                streamLength = coveredLength;
-                streamOffset = firstEventOffset;
-            }
-
+            // (0 = unknown), never half-believed — and the reason is carried out, because the operator
+            // reads the fast path's degradation in the log, not in a header dump.
+            calibration = ReadCalibration(coveredLength, firstEventOffset, witness);
             return true;
         }
 
         // The ORIGINAL layout: no calibration to report, so a rebuild scans. Written by a previous
-        // release, and still first-class here.
+        // release, and still first-class here — and not a fault, so it carries no reason.
         if (file.Length - LegacyHeaderBytes == length)
         {
             payload = file[LegacyHeaderBytes..].ToArray();
@@ -158,6 +201,57 @@ internal static class JsonlSnapshotFile
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// The calibration a header describes, or the reason it describes NONE. Half-calibrations are the
+    /// interesting case: a position with no covered length cannot be checked for a shrink, and a covered
+    /// length with no position has nothing to seek to — each is reported as unknown WITH its own reason
+    /// rather than passed through as a number a rebuild would act on.
+    /// </summary>
+    private static SnapshotCalibration ReadCalibration(
+        long coveredLength,
+        long firstEventOffset,
+        ulong witness
+    )
+    {
+        // A negative field is the high bit of a value no append can produce: a corrupt header.
+        if (coveredLength < 0 || firstEventOffset < 0)
+            return new SnapshotCalibration(
+                0,
+                0,
+                0,
+                $"its positions do not fit in a stream length ({coveredLength}/{firstEventOffset})"
+            );
+
+        if (firstEventOffset == 0 && coveredLength == 0)
+            return SnapshotCalibration.Unknown;
+
+        if (firstEventOffset > 0 && coveredLength == 0)
+            return new SnapshotCalibration(
+                0,
+                0,
+                0,
+                $"it records the stream position {firstEventOffset} but no covered stream length"
+            );
+
+        if (firstEventOffset == 0 && coveredLength > 0)
+            return new SnapshotCalibration(
+                0,
+                0,
+                0,
+                $"it records the {coveredLength} bytes it covers but no stream position"
+            );
+
+        if (firstEventOffset > coveredLength)
+            return new SnapshotCalibration(
+                0,
+                0,
+                0,
+                $"the stream position {firstEventOffset} is past the {coveredLength} bytes it covers"
+            );
+
+        return new SnapshotCalibration(coveredLength, firstEventOffset, witness, null);
     }
 
     /// <summary>Write <paramref name="bytes"/> through a temp file + flush + rename.</summary>

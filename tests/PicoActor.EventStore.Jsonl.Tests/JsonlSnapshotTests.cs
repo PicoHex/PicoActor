@@ -139,9 +139,11 @@ public sealed class JsonlSnapshotTests
             cancellationToken
         );
 
-        // 36-byte header + the 3 payload bytes (spec 2026-11-19, D3: the header gained the two stream
-        // positions; the ARITHMETIC of this test is unchanged, only the header's length).
-        await Assert.That(bytes.Length).IsEqualTo(JsonlSnapshotFile.HeaderBytes + 3);
+        // 44-byte header + the 3 payload bytes (spec 2026-11-19, D3: the header gained the two stream
+        // positions and the covered-prefix witness). The 44 is a LITERAL, not JsonlSnapshotFile.HeaderBytes:
+        // asserting the constant against itself would make this test agree with whatever the format became,
+        // which is the one thing it exists to catch.
+        await Assert.That(bytes.Length).IsEqualTo(44 + 3);
         await Assert.That(Encoding.ASCII.GetString(bytes, 0, 4)).IsEqualTo(Magic);
         await Assert.That(bytes[4]).IsEqualTo((byte)0x08);
         await Assert.That(bytes[5]).IsEqualTo((byte)0x07);
@@ -153,15 +155,18 @@ public sealed class JsonlSnapshotTests
         await Assert.That(bytes[12]).IsEqualTo((byte)3);
         await Assert.That(bytes[13]).IsEqualTo((byte)0);
 
-        // No stream appended for this id, so the store knows no position: 0 = "unknown" in both fields.
+        // No stream appended for this id, so the store knows no position and witnessed no prefix: 0 =
+        // "unknown" in all three calibration fields.
         await Assert.That(bytes[16]).IsEqualTo((byte)0); // reserved, 4 bytes
         await Assert.That(bytes[19]).IsEqualTo((byte)0);
         await Assert.That(bytes[20]).IsEqualTo((byte)0); // stream length, 8 bytes
         await Assert.That(bytes[27]).IsEqualTo((byte)0);
         await Assert.That(bytes[28]).IsEqualTo((byte)0); // stream offset, 8 bytes
         await Assert.That(bytes[35]).IsEqualTo((byte)0);
+        await Assert.That(bytes[36]).IsEqualTo((byte)0); // covered-prefix witness, 8 bytes
+        await Assert.That(bytes[43]).IsEqualTo((byte)0);
 
-        await Assert.That(bytes[JsonlSnapshotFile.HeaderBytes]).IsEqualTo((byte)0xAA);
+        await Assert.That(bytes[44]).IsEqualTo((byte)0xAA);
     }
 
     [Test, Timeout(15000)]

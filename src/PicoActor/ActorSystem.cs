@@ -482,9 +482,10 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
         // THE FAST PATH (D4): a snapshot may carry the byte position its tail starts at, and a store
         // that can seek is asked to open THERE — no line numbering, no second pass. The snapshot alone
         // does not decide: the store verifies the position against the stream file before believing it
-        // (I2) and answers "no cursor" when it cannot, which drops us onto the scan path below, so a
-        // stale/damaged offset costs speed and never correctness. `v < ulong.MaxValue` keeps the clamp
-        // below meaningful: there is no version after the maximum one.
+        // (I2 — line-boundary geometry, the covered length AND the witness of the bytes the snapshot was
+        // taken over) and answers "no cursor" when it cannot, which drops us onto the scan path below,
+        // so an offset costs speed and never correctness. `v < ulong.MaxValue` keeps the clamp below
+        // meaningful: there is no version after the maximum one.
         IEventCursor? atOffset = null;
         if (
             snapshot is { Version: > 0, StreamOffset: > 0, StreamLength: > 0 } calibrated
@@ -537,8 +538,10 @@ public sealed class ActorSystem : IActorSystem, IActorPassivationHost
         // The guard is the SCAN path's, and only its: it compares the snapshot against a length taken by
         // a DIFFERENT pass than the drain. On the offset path `end` was derived from that very drain, so
         // the comparison is true by construction — a tautology is not a check, and pretending otherwise
-        // would hide that the offset path's rollback protection is the store's verification (I2/I3),
-        // which sends a shrunken stream down THIS scan path in the first place.
+        // would hide that the offset path's rollback protection is the store's verification (I2/I3):
+        // geometry AND the covered-prefix witness, which is the only thing that refuses a stream
+        // REWRITTEN in place under the snapshot — and that refusal is what sends such a stream down THIS
+        // scan path in the first place.
         if (endFromScan && (v > end || v + (ulong)tail.Count != end))
             return await FullReplayAsync<T>(reader, id, rebuildFactory).ConfigureAwait(false);
 

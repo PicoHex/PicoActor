@@ -452,7 +452,11 @@ public sealed class FileNameFormatTests
         // The container is unchanged: PASJ magic, little-endian header, raw payload — byte for byte.
         await Assert.That(Encoding.ASCII.GetString(bytes, 0, 4)).IsEqualTo("PASJ");
         await Assert
-            .That(bytes.SequenceEqual(JsonlSnapshotFile.Encode(snapshot.Version, payload, 0, 0)))
+            .That(
+                bytes.SequenceEqual(
+                    JsonlSnapshotFile.Encode(snapshot.Version, payload, SnapshotCalibration.Unknown)
+                )
+            )
             .IsTrue();
 
         // A NEW instance (not the writer) reads it back — and needs no stream map to do it.

@@ -111,6 +111,10 @@ public sealed class JsonlEventStore<TEventBase>
     // append between the flush and the snapshot would make describe a longer stream than the snapshot
     // covers. One small struct per id that appended in THIS process (the same boundedness as
     // _typeById: one entry per live aggregate), overwritten by that id's next append.
+    //
+    // The POSITION is only half of what a snapshot needs to record: SaveSnapshotAsync also measures the
+    // bounded content witness of the bytes before it (see CoveredPrefixWitness), because a position alone
+    // cannot tell this stream from a DIFFERENT history rewritten under it at the same geometry.
     private readonly ConcurrentDictionary<Guid, (ulong Version, long Offset)> _tailOffsets = new();
 
     private long _deserializedEvents;
@@ -120,6 +124,13 @@ public sealed class JsonlEventStore<TEventBase>
     private long _filesOpened;
     private long _directoryScans;
     private long _foreignFormatFiles;
+
+    // THE COVERED-PREFIX WITNESS (I2): how much of a stream the snapshot's calibration is hashed
+    // against. Two windows, 64 bytes at the start and 4096 bytes before the recorded position, so a
+    // verification costs a fixed 4160 bytes read twice instead of a checksum of a 47 MB prefix — the
+    // whole point of the fast path is that reading the covered history is what the rebuild does NOT do.
+    private const int HeadWindowBytes = 64;
+    private const int TailWindowBytes = 4096;
 
     // The ids a TypePrefix MISS already failed to resolve, so a host that probes streams it does not
     // have pays ONE directory pass per unknown id instead of one per probe.
@@ -952,8 +963,7 @@ public sealed class JsonlEventStore<TEventBase>
                 file,
                 out var version,
                 out var payload,
-                out var streamLength,
-                out var streamOffset
+                out var calibration
             )
         )
             return new ValueTask<ActorSnapshot?>((ActorSnapshot?)null);
@@ -963,19 +973,40 @@ public sealed class JsonlEventStore<TEventBase>
             // The CALIBRATION travels with the snapshot (I6): 0/0 when the header carries none (a legacy
             // snapshot, or a version some other process appended), which is the "scan" answer. Reading
             // it is what lets a rebuild seek instead of counting lines.
-            StreamLength = streamLength,
-            StreamOffset = streamOffset,
+            StreamLength = calibration.StreamLength,
+            StreamOffset = calibration.StreamOffset,
         };
 
-        if (streamOffset > 0 && !VerifiableOffset(actorId, snapshot, out var problem))
+        if (calibration.UnusableReason is { } unusable)
+        {
+            // A header that contradicts ITSELF (a position with no covered length, a length with no
+            // position, a position past the length it covers) describes nothing a rebuild can act on.
+            // The decoder drops the pair; the warning is owed HERE, because a calibration that vanished
+            // without a word is the store's one silent failure mode — an operator would have no way to
+            // know the accelerator was never even considered.
+            _logger?.Warning(
+                $"Ignoring the stream calibration recorded by snapshot '{path}' for aggregate "
+                    + $"'{actorId:D}': {unusable}. The calibration is unusable, so the rebuild counts "
+                    + "the stream's lines instead."
+            );
+        }
+        else if (
+            snapshot.StreamOffset > 0
+            && !VerifiableOffset(
+                actorId,
+                snapshot,
+                calibration.CoveredPrefixWitness,
+                out var problem
+            )
+        )
         {
             // I2: an offset this store cannot verify is IGNORED, never fatal. The snapshot itself stays
             // usable — its version and payload are the stream's business, not the offset's — so the
             // rebuild takes today's path and reaches today's answer, and the operator gets ONE line
             // saying why the accelerator was not used.
             _logger?.Warning(
-                $"Ignoring the byte offset {streamOffset} recorded by snapshot '{path}' for aggregate "
-                    + $"'{actorId:D}': {problem}. Rebuilding with a full scan of the stream."
+                $"Ignoring the byte offset {snapshot.StreamOffset} recorded by snapshot '{path}' for "
+                    + $"aggregate '{actorId:D}': {problem}. Rebuilding with a full scan of the stream."
             );
             snapshot = snapshot with { StreamOffset = 0, StreamLength = 0 };
         }
@@ -984,23 +1015,40 @@ public sealed class JsonlEventStore<TEventBase>
     }
 
     /// <summary>
-    /// Can this calibration still be believed of the stream file (I2)? The offset alone answers "is it a
-    /// line start of SOME file"; only the recorded LENGTH answers "did this stream SHRINK since", which
-    /// is the one shape an offset cannot see for itself — a truncated stream keeps line boundaries that
-    /// point into a shorter history, so the version an offset would derive is a lie.
+    /// Can this calibration still be believed of the stream file (I2)? TWO questions, and neither is
+    /// enough alone.
     /// <para>
-    /// Read-only and cheap: one open, two seeks. It never throws for a stream it cannot reach (that is a
-    /// "no", and the caller's warning names it), and it never touches the offset's own arithmetic.
+    /// The GEOMETRY — is the position a line start of THIS file, and did the stream SHRINK since — is what
+    /// an offset can answer about itself: a truncated stream keeps line boundaries that point into a
+    /// shorter history, so the version an offset would derive is a lie.
+    /// </para>
+    /// <para>
+    /// The GEOMETRY IS BLIND to the one shape that matters most: a stream rewritten IN PLACE into a
+    /// different history with no fewer bytes, whose position is still a line start. Every geometric test
+    /// passes there, the recorded length is not smaller, and a rebuild would derive its version from a
+    /// drain of the wrong prefix — a SILENT wrong state, which is the one outcome this store never
+    /// allows. <paramref name="coveredPrefixWitness"/> is the answer: the writer's hash of the bytes the
+    /// snapshot was taken over, recomputed here over the same two windows.
+    /// </para>
+    /// <para>
+    /// Read-only and cheap: one open, two seeks, and two windows of at most 64 and 4096 bytes. It never
+    /// throws for a stream it cannot reach (that is a "no", and the caller's warning names it), and it
+    /// never touches the offset's own arithmetic.
     /// </para>
     /// </summary>
-    private bool VerifiableOffset(Guid actorId, ActorSnapshot snapshot, out string problem)
+    private bool VerifiableOffset(
+        Guid actorId,
+        ActorSnapshot snapshot,
+        ulong coveredPrefixWitness,
+        out string problem
+    )
     {
         problem = string.Empty;
 
         // Belt and braces for a HALF calibration: an offset with no covered length cannot be checked for
-        // a shrink, so it is not believed. The decoder already drops such a pair (a tail cannot start
-        // past the end of the stream it is the tail of) and the rebuild gates on both fields as well, so
-        // this is a third, silent layer rather than the only one.
+        // a shrink, so it is not believed. The decoder already refuses such a pair and SAYS SO (the header
+        // warning names it), and the rebuild gates on both fields, so this is the last of three layers
+        // rather than the only one.
         if (snapshot.StreamLength <= 0 || snapshot.StreamOffset > snapshot.StreamLength)
         {
             problem = "its header carries no stream length to check it against";
@@ -1046,7 +1094,112 @@ public sealed class JsonlEventStore<TEventBase>
             return false;
         }
 
+        // ... and the PREFIX the snapshot was taken over must still be the one on disk. This is the only
+        // check that can see a history rewritten in place, and it is asked LAST: a refusal above is more
+        // specific, and a mismatched witness on a file that also fails geometry would hide the geometry.
+        if (coveredPrefixWitness == 0)
+        {
+            problem =
+                "it carries no witness of the bytes it was taken over, so they cannot be checked "
+                + "against this stream's";
+            return false;
+        }
+
+        if (CoveredPrefixWitness(streamPath, snapshot.StreamOffset) != coveredPrefixWitness)
+        {
+            problem =
+                "the covered prefix of the stream does not match the one the snapshot was taken over";
+            return false;
+        }
+
         return true;
+    }
+
+    /// <summary>
+    /// The bytes a position was VERIFIED against, hashed: two bounded windows, never the whole prefix.
+    /// <para>
+    /// The first <see cref="HeadWindowBytes"/> bytes of the stream and the <see cref="TailWindowBytes"/>
+    /// bytes immediately BEFORE <paramref name="offset"/>, XORed together. Both are computed RELATIVE TO
+    /// THE OFFSET, which is what lets one witness survive appends: events added after the position change
+    /// neither window, so a fast-path snapshot keeps working as its tail grows. A rewrite of the covered
+    /// prefix changes at least one of them (the head, the bytes just before the boundary, or both), which
+    /// is exactly the case a geometric test cannot see.
+    /// </para>
+    /// <para>
+    /// O(1) by construction — 64 + 4096 bytes read through two small positional reads — and it is a
+    /// WITNESS, not a checksum of the history: it is deliberately not a proof, only a bound on the ways a
+    /// stream can be rewritten under a snapshot without being noticed. <c>0</c> means "could not be
+    /// measured" and is never a claim about content.
+    /// </para>
+    /// </summary>
+    private static ulong CoveredPrefixWitness(string streamPath, long offset)
+    {
+        if (offset <= 0)
+            return 0;
+
+        var headLength = (int)Math.Min(HeadWindowBytes, offset);
+        var tailLength = (int)Math.Min(TailWindowBytes, offset);
+        var head = new byte[headLength];
+        var tail = new byte[tailLength];
+
+        try
+        {
+            // A HANDLE of its own, not the caller's buffered stream: two positional reads must not
+            // disturb (or be disturbed by) the seek a verification is in the middle of.
+            using var handle = File.OpenHandle(
+                streamPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite
+            );
+            if (
+                !TryReadExactly(handle, 0, head)
+                || !TryReadExactly(handle, offset - tailLength, tail)
+            )
+                return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Unreadable prefix: "cannot be measured", never an exception. On the write side that means
+            // no calibration is attached at all; on the read side it means the offset is not believed.
+            return 0;
+        }
+
+        var witness = Fnv1a64(head) ^ Fnv1a64(tail);
+
+        // 0 is the format's "unknown". A real measurement landing exactly there is one chance in 2^64
+        // and costs a line scan, so it is not worth a second hash — but it must never be written, or a
+        // rebuild would read it as "unwitnessed" and refuse a calibration that is perfectly good.
+        return witness == 0 ? 1UL : witness;
+    }
+
+    /// <summary>Fill <paramref name="destination"/> from <paramref name="position"/>, or fail if the file ends first.</summary>
+    private static bool TryReadExactly(SafeFileHandle handle, long position, Span<byte> destination)
+    {
+        var read = 0;
+        while (read < destination.Length)
+        {
+            var chunk = RandomAccess.Read(handle, destination[read..], position + read);
+            if (chunk <= 0)
+                return false;
+
+            read += chunk;
+        }
+
+        return true;
+    }
+
+    /// <summary>FNV-1a, 64-bit: the smallest stable content hash a header can carry (no seed, no table).</summary>
+    private static ulong Fnv1a64(ReadOnlySpan<byte> bytes)
+    {
+        var hash = 14695981039346656037UL;
+        foreach (var value in bytes)
+        {
+            hash ^= value;
+            hash *= 1099511628211UL;
+        }
+
+        return hash;
     }
 
     /// <summary>
@@ -1094,19 +1247,58 @@ public sealed class JsonlEventStore<TEventBase>
         // rebuild then scans, which is today's cost and today's answer. File.Length is not consulted:
         // between the append's flush and this call another append may have moved the end of the file,
         // and the header would then describe a longer stream than the snapshot covers.
-        var (streamLength, streamOffset) =
+        var calibration =
             _tailOffsets.TryGetValue(actorId, out var tail) && tail.Version == snapshot.Version
-                ? (tail.Offset, tail.Offset)
-                : (0L, 0L);
+                ? CaptureCalibration(actorId, tail.Offset)
+                : SnapshotCalibration.Unknown;
 
-        var bytes = JsonlSnapshotFile.Encode(
-            snapshot.Version,
-            snapshot.Payload,
-            streamLength,
-            streamOffset
-        );
+        var bytes = JsonlSnapshotFile.Encode(snapshot.Version, snapshot.Payload, calibration);
         JsonlSnapshotFile.WriteAtomic(SnapshotPathFor(actorId), bytes);
         return default;
+    }
+
+    /// <summary>
+    /// The calibration a snapshot of <paramref name="offset"/> may carry: the position, the covered length
+    /// (they are the same number — the snapshot is written after the append that reached its version) and
+    /// the WITNESS of the bytes before it.
+    /// <para>
+    /// No witness, no calibration. A position this store cannot measure the prefix of is one every later
+    /// rebuild would have to refuse — with a warning of its own, on a path nobody is watching — so it is
+    /// not written in the first place: the header says "unknown" and the rebuild scans, silently and
+    /// correctly. A snapshot is never failed because its accelerator could not be measured.
+    /// </para>
+    /// </summary>
+    /// <summary>
+    /// The stream file a calibration for <paramref name="actorId"/> is MEASURED against at snapshot time,
+    /// resolved without the read path's diagnostics and without its directory pass.
+    /// <para>
+    /// A snapshot write is not a read: it must not owe the rival-prefix warning (the next read says its
+    /// piece) and it must not turn a miss into a scan — the position it is attaching came from an append
+    /// that resolved this id a moment ago, so a cold map here means "another process wrote this stream",
+    /// which is answered by writing no calibration rather than by guessing a name. Null is that answer.
+    /// </para>
+    /// </summary>
+    private string? WitnessableStreamPathFor(Guid actorId)
+    {
+        if (_options.FileNameFormat != FileNameFormat.TypePrefix)
+            return IdOnlyPathFor(actorId);
+
+        return _typeById.TryGetValue(actorId, out var type) ? PrefixedPathFor(actorId, type) : null;
+    }
+
+    private SnapshotCalibration CaptureCalibration(Guid actorId, long offset)
+    {
+        if (offset <= 0)
+            return SnapshotCalibration.Unknown;
+
+        var streamPath = WitnessableStreamPathFor(actorId);
+        if (streamPath is null)
+            return SnapshotCalibration.Unknown;
+
+        var witness = CoveredPrefixWitness(streamPath, offset);
+        return witness == 0
+            ? SnapshotCalibration.Unknown
+            : new SnapshotCalibration(offset, offset, witness, null);
     }
 
     /// <inheritdoc/>

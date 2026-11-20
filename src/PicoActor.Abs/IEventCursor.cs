@@ -31,6 +31,14 @@ public interface IEventCursor : IAsyncDisposable
     /// <see cref="IEventSourcedActor.Version"/> all come from this one value, so a rebuild never
     /// mixes two different observations of the stream.
     /// </para>
+    /// <para>
+    /// NOT EVERY CURSOR IS BORN FROM <see cref="IEventLogReader.OpenAsync"/>. A BYTE-POSITION cursor —
+    /// the one <see cref="IEventLogReader.OpenAtOffsetAsync"/> hands out — numbers nothing ahead of its
+    /// position, so it makes no observation of the stream's length at all and reports
+    /// <see cref="ulong.MaxValue"/>: the explicit "not measured" sentinel, never a count. A caller of
+    /// such a cursor must derive the length from the events it actually reads (the version it opened at
+    /// plus the events it drained) and must not use <c>End</c> for a guard or a comparison.
+    /// </para>
     /// </summary>
     ulong End { get; }
 

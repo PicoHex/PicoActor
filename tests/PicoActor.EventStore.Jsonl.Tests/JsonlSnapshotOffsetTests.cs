@@ -19,12 +19,14 @@ namespace PicoActor.EventStore.Jsonl.Tests;
 public sealed class JsonlSnapshotOffsetTests
 {
     // The container's field layout, spelled out: 4 magic, 8 version, 4 payloadLength, 4 reserved,
-    // 8 streamLength, 8 streamOffset, then the payload. Sums to 36 — the spec's prose says "32" while
-    // listing these six fields; the FIELD LIST is the wire format and is what these tests pin.
-    private const int Header = 36;
+    // 8 streamLength, 8 streamOffset, 8 coveredPrefixWitness, then the payload. Sums to 44 — the spec's
+    // prose said "36" before the witness was added, but the FIELD LIST is the wire format and is what
+    // these tests pin.
+    private const int Header = 44;
     private const int LegacyHeader = 16;
     private const int StreamLengthAt = 20;
     private const int StreamOffsetAt = 28;
+    private const int CoveredPrefixWitnessAt = 36;
 
     // ── The header (I5 / D3) ────────────────────────────────────────────────────────────────────
 
@@ -41,8 +43,11 @@ public sealed class JsonlSnapshotOffsetTests
         var bytes = JsonlSnapshotFile.Encode(
             version,
             [0xAA, 0xBB],
-            streamLength: 0x1122334455667788L,
-            streamOffset: 0x0102030405060707L
+            new SnapshotCalibration(
+                StreamLength: 0x1122334455667788L,
+                StreamOffset: 0x0102030405060707L,
+                CoveredPrefixWitness: 0x0F0E0D0C0B0A0908UL
+            )
         );
 
         await Assert.That(bytes.Length).IsEqualTo(Header + 2);
@@ -65,6 +70,12 @@ public sealed class JsonlSnapshotOffsetTests
         await Assert
             .That(BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(StreamOffsetAt, 8)))
             .IsEqualTo(0x0102030405060707UL);
+
+        // The covered-prefix WITNESS, last: the field that says WHICH history the two positions describe.
+        // A positional field whose every byte differs, so an omitted or misplaced write cannot agree.
+        await Assert
+            .That(BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(CoveredPrefixWitnessAt, 8)))
+            .IsEqualTo(0x0F0E0D0C0B0A0908UL);
         await Assert.That(bytes[Header]).IsEqualTo((byte)0xAA);
 
         // An OLD reader's check — <c>file.Length - 16 == payloadLength</c> — is FALSE for this file: the
@@ -92,17 +103,19 @@ public sealed class JsonlSnapshotOffsetTests
             legacy,
             out var version,
             out var payload,
-            out var streamLength,
-            out var streamOffset
+            out var calibration
         );
 
         await Assert.That(decoded).IsTrue();
         await Assert.That(version).IsEqualTo(7UL);
         await Assert.That(payload.SequenceEqual(new byte[] { 0xAA, 0xBB, 0xCC })).IsTrue();
 
-        // "Unknown", not "empty": 0 is what makes the rebuild take the scan path.
-        await Assert.That(streamLength).IsEqualTo(0L);
-        await Assert.That(streamOffset).IsEqualTo(0L);
+        // "Unknown", not "empty": 0 is what makes the rebuild take the scan path, and NOT a fault — an
+        // older store simply calibrated nothing, so nothing is owed a warning.
+        await Assert.That(calibration.StreamLength).IsEqualTo(0L);
+        await Assert.That(calibration.StreamOffset).IsEqualTo(0L);
+        await Assert.That(calibration.CoveredPrefixWitness).IsEqualTo(0UL);
+        await Assert.That(calibration.UnusableReason).IsNull();
     }
 
     [Test, Timeout(15000)]
@@ -112,7 +125,7 @@ public sealed class JsonlSnapshotOffsetTests
     {
         _ = cancellationToken;
 
-        var current = JsonlSnapshotFile.Encode(3, [1, 2, 3], 40, 40);
+        var current = JsonlSnapshotFile.Encode(3, [1, 2, 3], new SnapshotCalibration(40, 40, 7));
         var legacy = new byte[LegacyHeader + 3];
         Encoding.ASCII.GetBytes("PASJ").CopyTo(legacy, 0);
         BinaryPrimitives.WriteUInt64LittleEndian(legacy.AsSpan(4, 8), 3UL);
@@ -121,34 +134,30 @@ public sealed class JsonlSnapshotOffsetTests
 
         // A crop that stops inside the new header, and one that stops inside the old one.
         await Assert
-            .That(
-                JsonlSnapshotFile.TryDecode(
-                    current.AsSpan(0, Header - 1),
-                    out _,
-                    out _,
-                    out _,
-                    out _
-                )
-            )
+            .That(JsonlSnapshotFile.TryDecode(current.AsSpan(0, Header - 1), out _, out _, out _))
             .IsFalse();
         await Assert
             .That(
-                JsonlSnapshotFile.TryDecode(
-                    legacy.AsSpan(0, LegacyHeader - 1),
-                    out _,
-                    out _,
-                    out _,
-                    out _
-                )
+                JsonlSnapshotFile.TryDecode(legacy.AsSpan(0, LegacyHeader - 1), out _, out _, out _)
             )
             .IsFalse();
 
         // A payloadLength that disagrees with the bytes on disk.
-        var tampered = JsonlSnapshotFile.Encode(3, [1, 2, 3], 0, 0);
+        var tampered = JsonlSnapshotFile.Encode(3, [1, 2, 3], SnapshotCalibration.Unknown);
         tampered[12] = 9;
-        await Assert
-            .That(JsonlSnapshotFile.TryDecode(tampered, out _, out _, out _, out _))
-            .IsFalse();
+        await Assert.That(JsonlSnapshotFile.TryDecode(tampered, out _, out _, out _)).IsFalse();
+
+        // The THIRTY-SIX-byte layout this store wrote before the witness existed is NOT read: the format
+        // is forward-only and unpublished, and a 36-byte file would otherwise have its payload start
+        // eight bytes early — the exact silent misread <see cref="JsonlSnapshotFile.HeaderBytes"/> pins.
+        var previous = new byte[36 + 3];
+        Encoding.ASCII.GetBytes("PASJ").CopyTo(previous, 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(previous.AsSpan(4, 8), 3UL);
+        BinaryPrimitives.WriteUInt32LittleEndian(previous.AsSpan(12, 4), 3);
+        BinaryPrimitives.WriteUInt64LittleEndian(previous.AsSpan(20, 8), 40UL);
+        BinaryPrimitives.WriteUInt64LittleEndian(previous.AsSpan(28, 8), 40UL);
+        previous[36] = 1;
+        await Assert.That(JsonlSnapshotFile.TryDecode(previous, out _, out _, out _)).IsFalse();
     }
 
     // ── Capture (I6 / D2) ──────────────────────────────────────────────────────────────────────
@@ -526,6 +535,198 @@ public sealed class JsonlSnapshotOffsetTests
         await Assert.That(rebuilt.Value).IsEqualTo(3);
     }
 
+    [Test, Timeout(30000)]
+    public async Task BadOffset_CoveredPrefixRewrittenWithFewerLines_IsRefused_AndTheRebuildMatchesFullReplay(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var logger = new RecordingLogger();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+
+        // THE REAL STORE writes BOTH the stream and the snapshot: the header, the offset and (after the
+        // witness work) the prefix witness are the ones production writes. This test assembles neither.
+        await store.AppendAsync(
+            id,
+            0,
+            [
+                new SSnapshotAdded(111_111),
+                new SSnapshotAdded(111_111),
+                new SSnapshotAdded(111_111),
+                new SSnapshotAdded(111_111),
+                new SSnapshotAdded(111_111),
+            ]
+        );
+        var path = StreamPath(temp.Root, id);
+        var originalLength = new FileInfo(path).Length;
+        await store.SaveSnapshotAsync(id, new ActorSnapshot(5, CounterPayload(555_555)));
+
+        var written = await store.LoadSnapshotAsync(id);
+        await Assert.That(written!.StreamOffset).IsEqualTo(originalLength);
+        await Assert.That(written.StreamLength).IsEqualTo(originalLength);
+        await Assert.That(CountPrefixWitnessWarnings(logger)).IsEqualTo(0);
+
+        // THE REWRITE — a different history of the SAME length. The first three lines survive verbatim;
+        // everything after them becomes padding and ONE terminating newline, so the file's total length
+        // is EXACTLY the recorded StreamOffset and its last byte is '\n'.
+        //
+        // Every GEOMETRIC test therefore passes: the position is inside the file, it is a line start, the
+        // file did not shrink and its last byte ends a line. What changed is the PREFIX the snapshot was
+        // taken over — the one thing an offset can never see for itself. Without a content witness this
+        // rebuild seeks to EOF, derives End = 5 + 0 and restores v5/555555 out of a stream that says
+        // v3/333333: a SILENT wrong state, with no warning and no fallback.
+        var bytes = File.ReadAllBytes(path);
+        var thirdLineEnd = (int)LengthAfterLines(path, 3);
+        await Assert.That(thirdLineEnd > 0 && thirdLineEnd < originalLength).IsTrue();
+
+        var rewritten = new byte[originalLength];
+        Array.Copy(bytes, rewritten, thirdLineEnd);
+        Array.Fill(rewritten, (byte)' ', thirdLineEnd, rewritten.Length - thirdLineEnd);
+        rewritten[^1] = (byte)'\n';
+        File.WriteAllBytes(path, rewritten);
+        await Assert.That(new FileInfo(path).Length).IsEqualTo(originalLength);
+
+        // I2: ONE warning naming the covered prefix, and the calibration is dropped wholesale — an
+        // offset and a length that both still PASS every geometric check are still not believed.
+        var reloaded = await store.LoadSnapshotAsync(id);
+        await Assert.That(reloaded).IsNotNull();
+        await Assert.That(reloaded!.Version).IsEqualTo(5UL);
+        await Assert.That(reloaded.StreamOffset).IsEqualTo(0L);
+        await Assert.That(reloaded.StreamLength).IsEqualTo(0L);
+        await Assert.That(CountPrefixWitnessWarnings(logger)).IsEqualTo(1);
+
+        // ... and the rebuild takes the scan path: the snapshot is newer than the stream it describes, so
+        // it is discarded and the WHOLE remaining stream is replayed — version 3, value 333333.
+        var rebuildLogger = new RecordingLogger();
+        var rebuildStore = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = rebuildLogger }
+        );
+        var system = NewSystem(rebuildStore);
+        var rebuilt = await system.GetAsync<ProbeCounter>(id);
+        await system.StopAsync(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.Version).IsEqualTo(3UL);
+        await Assert.That(rebuilt.Value).IsEqualTo(333_333);
+
+        // The state a full replay of the SAME file reaches — and emphatically NOT the snapshot's own
+        // v5/555555, which is what an unwitnessed offset rebuild answered.
+        await Assert.That(rebuilt.Version).IsNotEqualTo(5UL);
+        await Assert.That(rebuilt.Value).IsNotEqualTo(555_555);
+        await Assert.That(rebuildStore.OffsetOpens).IsEqualTo(0L);
+        await Assert.That(CountPrefixWitnessWarnings(rebuildLogger)).IsEqualTo(1);
+    }
+
+    [Test, Timeout(30000)]
+    public async Task GoodSnapshot_StillTakesTheOffsetPath_SoTheWitnessDoesNotRefuseIt(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var logger = new RecordingLogger();
+        var store = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+
+        await store.AppendAsync(
+            id,
+            0,
+            [new SSnapshotAdded(1), new SSnapshotAdded(2), new SSnapshotAdded(3)]
+        );
+        await store.SaveSnapshotAsync(id, new ActorSnapshot(3, CounterPayload(6)));
+        await store.AppendAsync(id, 3, [new SSnapshotAdded(4), new SSnapshotAdded(5)]);
+
+        // The ordinary lifecycle — append, snapshot, append — must keep the fast path: the witness is a
+        // necessary part of the calibration, not a veto that turns every rebuild into a scan.
+        var restarted = new JsonlEventStore<ConformanceEvent>(
+            temp.Root,
+            new JsonlEventStoreOptions { Logger = logger }
+        );
+        var snapshot = await restarted.LoadSnapshotAsync(id);
+        await Assert.That(snapshot!.StreamOffset > 0).IsTrue();
+        await Assert.That(snapshot.StreamLength > 0).IsTrue();
+        await Assert.That(CountPrefixWitnessWarnings(logger)).IsEqualTo(0);
+
+        var before = restarted.DeserializedEventCount;
+        var system = NewSystem(restarted);
+        var rebuilt = await system.GetAsync<ProbeCounter>(id);
+        await system.StopAsync(id);
+
+        await Assert.That(rebuilt).IsNotNull();
+        await Assert.That(rebuilt!.Version).IsEqualTo(5UL);
+        await Assert.That(rebuilt.Value).IsEqualTo(15);
+
+        // SOUGHT, not counted: one accepted offset, and only the tail deserialized.
+        await Assert.That(restarted.OffsetOpens).IsEqualTo(1L);
+        await Assert.That(restarted.DeserializedEventCount - before).IsEqualTo(2L);
+    }
+
+    [Test, Timeout(30000)]
+    public async Task HalfCalibrationInTheHeader_IsRefusedWithAWarning_NeverHalfBelieved(
+        CancellationToken cancellationToken = default
+    )
+    {
+        _ = cancellationToken;
+        using var temp = new TempRoot();
+        var id = Guid.NewGuid();
+        var store = new JsonlEventStore<ConformanceEvent>(temp.Root);
+        await store.AppendAsync(id, 0, [new SSnapshotAdded(1), new SSnapshotAdded(2)]);
+        var length = new FileInfo(StreamPath(temp.Root, id)).Length;
+
+        // Three headers that CONTRADICT THEMSELVES. Each is a calibration that describes nothing a
+        // rebuild could act on, and each used to be zeroed in silence — an operator had no way to tell
+        // "this store never recorded a position" from "this header is damaged".
+        var cases = new (string Name, long StreamLength, long StreamOffset)[]
+        {
+            ("a position with no covered length", 0, length),
+            ("a covered length with no position", length, 0),
+            ("a position past the length it covers", length / 2, length),
+        };
+
+        foreach (var (name, streamLength, streamOffset) in cases)
+        {
+            var logger = new RecordingLogger();
+            var reader = new JsonlEventStore<ConformanceEvent>(
+                temp.Root,
+                new JsonlEventStoreOptions { Logger = logger }
+            );
+            await WriteSnapshotAsync(
+                temp.Root,
+                id,
+                snapshotVersion: 2,
+                snapshotValue: 3,
+                streamLength,
+                streamOffset
+            );
+
+            var snapshot = await reader.LoadSnapshotAsync(id);
+
+            // The snapshot is still a snapshot: its version and payload are the stream's business. Only
+            // the calibration is dropped — and the ONE warning says so, naming the contradiction.
+            await Assert.That(snapshot).IsNotNull();
+            await Assert.That(snapshot!.Version).IsEqualTo(2UL);
+            await Assert.That(snapshot.StreamOffset).IsEqualTo(0L);
+            await Assert.That(snapshot.StreamLength).IsEqualTo(0L);
+            await Assert.That(CountUnusableCalibrationWarnings(logger)).IsEqualTo(1);
+            await Assert.That(logger.Contains("calibration is unusable")).IsTrue();
+            await Assert.That(reader.OffsetOpens).IsEqualTo(0L);
+
+            // No OTHER offset warning is owed: one damaged header is one line, not a cascade — and it is
+            // not the "refused offset" line either, because an offset was never even put to the test.
+            await Assert.That(CountOffsetWarnings(logger)).IsEqualTo(0);
+            _ = name;
+        }
+    }
+
     // ── Differential state (I4) ────────────────────────────────────────────────────────────────
 
     [Test, Timeout(30000)]
@@ -709,7 +910,12 @@ public sealed class JsonlSnapshotOffsetTests
         return logger;
     }
 
-    /// <summary>Write a snapshot sidecar by hand, with a calibration the caller chose.</summary>
+    /// <summary>
+    /// Write a snapshot sidecar by hand, with the calibration the caller chose and NO covered-prefix
+    /// witness (0 = unknown). That is deliberate: these tests are about the GEOMETRIC refusals, which sit
+    /// in front of the witness in <c>VerifiableOffset</c>, so each one is still refused for its own
+    /// reason — and a sidecar nobody measured a witness for is exactly what a hand-built header is.
+    /// </summary>
     private static async Task WriteSnapshotAsync(
         string root,
         Guid id,
@@ -727,8 +933,7 @@ public sealed class JsonlSnapshotOffsetTests
             JsonlSnapshotFile.Encode(
                 snapshotVersion,
                 CounterPayload(snapshotValue),
-                streamLength,
-                streamOffset
+                new SnapshotCalibration(streamLength, streamOffset, CoveredPrefixWitness: 0)
             )
         );
     }
@@ -776,5 +981,21 @@ public sealed class JsonlSnapshotOffsetTests
     private static int CountOffsetWarnings(RecordingLogger logger) =>
         logger.Messages.Count(message =>
             message.Contains("byte offset", StringComparison.OrdinalIgnoreCase)
+        );
+
+    /// <summary>
+    /// The warning a MISMATCHED COVERED PREFIX owes: one line, naming the thing an offset cannot see. It
+    /// is a separate counter because it is a separate judgement — the position is a line start of this
+    /// file and the file did not shrink, and the calibration is still refused.
+    /// </summary>
+    private static int CountPrefixWitnessWarnings(RecordingLogger logger) =>
+        logger.Messages.Count(message =>
+            message.Contains("covered prefix", StringComparison.OrdinalIgnoreCase)
+        );
+
+    /// <summary>The warning a header that contradicts itself owes: one line, saying the calibration is unusable.</summary>
+    private static int CountUnusableCalibrationWarnings(RecordingLogger logger) =>
+        logger.Messages.Count(message =>
+            message.Contains("calibration is unusable", StringComparison.OrdinalIgnoreCase)
         );
 }
