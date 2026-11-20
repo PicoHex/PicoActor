@@ -29,6 +29,12 @@ internal sealed class ProbeCounter : EventSourcedActor
     /// <summary>Mutate calls on THIS instance — a rebuild that restored a snapshot pays only the tail.</summary>
     internal int MutateCalls { get; private set; }
 
+    /// <summary>
+    /// The payload this instance would persist right now. Two rebuilds that reach the same state reach
+    /// the same BYTES here, which is a stronger claim than "the same folded counter".
+    /// </summary>
+    internal byte[]? SnapshotPayloadForAssert() => TakeSnapshot();
+
     protected override ValueTask<object?> OnMessageAsync(ICommand command)
     {
         switch (command)

@@ -64,3 +64,50 @@ public interface IEventLogReader
     /// </summary>
     ValueTask<IDomainEvent?> PeekFirstAsync(Guid actorId, CancellationToken ct = default);
 }
+
+/// <summary>
+/// OPTIONAL capability of an <see cref="IEventLogReader"/>: open a cursor at a BYTE POSITION instead of
+/// at a version. A store whose stream is a file can seek to where a snapshot says its tail begins, so a
+/// rebuild pays for reading the tail instead of numbering every line of a 47 MB stream.
+/// <para>
+/// Capability discovery is the same one runtime test the read port uses — <c>store is
+/// IEventLogOffsetReader</c> — so a store that keeps its events in memory simply does not declare it,
+/// and no caller has to ask a question with a configured answer.
+/// </para>
+/// <para>
+/// An offset is ADVISORY. Implementations must refuse — answer <see langword="null"/>, log, never
+/// throw — anything they cannot verify against the stream itself: a position past the end, a position
+/// that is not a line boundary, or a stream that shrank below the length the snapshot recorded. The
+/// caller's answer to <see langword="null"/> is today's path (open at a version and let the store
+/// scan), so a refusal costs speed and nothing else.
+/// </para>
+/// </summary>
+public interface IEventLogOffsetReader
+{
+    /// <summary>
+    /// Open a forward-only cursor over the events from <paramref name="byteOffset"/> on, or
+    /// <see langword="null"/> when that position cannot be believed (see the type's summary) or the
+    /// stream does not exist.
+    /// <para>
+    /// The cursor numbers nothing before <paramref name="byteOffset"/>, so it cannot report the stream
+    /// length: its <see cref="IEventCursor.End"/> is <see cref="ulong.MaxValue"/> — the explicit "not
+    /// measured" sentinel — and the caller derives the length, and therefore the rebuilt version, from
+    /// the events it reads (<c>firstVersion - 1 + count</c>). That is ONE observation of the stream (the
+    /// read itself), which is what makes the derivation safe: a length counted by a separate pass could
+    /// describe a stream this cursor never saw.
+    /// </para>
+    /// <para>
+    /// <paramref name="firstVersion"/> is the version the FIRST yielded event has (1-based, normally
+    /// <c>snapshot.Version + 1</c>); version 0 is invalid and throws
+    /// <see cref="System.ArgumentOutOfRangeException"/>. A negative offset is an argument error too. A
+    /// rolled back stream is NOT an error: the cursor simply reaches the end of the file, and the
+    /// caller's own checks decide what that means.
+    /// </para>
+    /// </summary>
+    ValueTask<IEventCursor?> OpenAtOffsetAsync(
+        Guid actorId,
+        long byteOffset,
+        ulong firstVersion,
+        CancellationToken ct = default
+    );
+}
